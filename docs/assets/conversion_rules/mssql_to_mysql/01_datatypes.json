@@ -1,0 +1,350 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 데이터 타입 변환",
+    "category": "DATATYPE",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "SQL Server의 모든 데이터 타입을 MySQL 동등 타입으로 변환. 정밀도/크기 보존 우선"
+  },
+  "rules": [
+    {
+      "id": "dt_int_identity",
+      "src": "INT IDENTITY(1,1)",
+      "tgt": "INT AUTO_INCREMENT",
+      "note": "IDENTITY 시작값/증가값은 AUTO_INCREMENT로 단순화. 시작값이 1이 아니면 ALTER TABLE ... AUTO_INCREMENT=N 추가 필요",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_bigint_identity",
+      "src": "BIGINT IDENTITY(1,1)",
+      "tgt": "BIGINT AUTO_INCREMENT",
+      "note": "BIGINT IDENTITY → BIGINT AUTO_INCREMENT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_smallint_identity",
+      "src": "SMALLINT IDENTITY(1,1)",
+      "tgt": "SMALLINT AUTO_INCREMENT",
+      "note": "SMALLINT IDENTITY → SMALLINT AUTO_INCREMENT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_identity_any",
+      "src": "IDENTITY(\\d+,\\s*\\d+)",
+      "tgt": "AUTO_INCREMENT",
+      "regex": true,
+      "note": "임의 IDENTITY 설정 → AUTO_INCREMENT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_nvarchar_max",
+      "src": "NVARCHAR(MAX)",
+      "tgt": "LONGTEXT",
+      "note": "NVARCHAR(MAX) 최대 2GB → LONGTEXT 최대 4GB. 유니코드 보존",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_varchar_max",
+      "src": "VARCHAR(MAX)",
+      "tgt": "LONGTEXT",
+      "note": "VARCHAR(MAX) → LONGTEXT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_nvarchar_n",
+      "src": "NVARCHAR(n)",
+      "tgt": "VARCHAR(n) CHARACTER SET utf8mb4",
+      "regex": true,
+      "note": "NVARCHAR(n) → VARCHAR(n) utf8mb4. 테이블 기본 charset이 utf8mb4면 CHARACTER SET 생략 가능",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_nvarchar_simple",
+      "src": "NVARCHAR",
+      "tgt": "VARCHAR",
+      "note": "NVARCHAR → VARCHAR (테이블 charset utf8mb4 전제)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_nchar_n",
+      "src": "NCHAR(n)",
+      "tgt": "CHAR(n)",
+      "regex": true,
+      "note": "NCHAR(n) → CHAR(n)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_nchar",
+      "src": "NCHAR",
+      "tgt": "CHAR",
+      "note": "NCHAR → CHAR",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_ntext",
+      "src": "NTEXT",
+      "tgt": "LONGTEXT",
+      "note": "NTEXT(deprecated) → LONGTEXT",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_text",
+      "src": "TEXT",
+      "tgt": "LONGTEXT",
+      "note": "MSSQL TEXT(deprecated, 2GB) → MySQL LONGTEXT(4GB)",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_datetime2_n",
+      "src": "DATETIME2(n)",
+      "tgt": "DATETIME(n)",
+      "regex": true,
+      "note": "DATETIME2(정밀도) → DATETIME(정밀도). MySQL은 0~6까지 지원",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_datetime2",
+      "src": "DATETIME2",
+      "tgt": "DATETIME(6)",
+      "note": "DATETIME2 → DATETIME(6) 마이크로초 정밀도",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_datetimeoffset",
+      "src": "DATETIMEOFFSET",
+      "tgt": "DATETIME(6)",
+      "note": "DATETIMEOFFSET → DATETIME(6). 시간대 정보 손실! 필요시 별도 컬럼으로 시간대 저장",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_smalldatetime",
+      "src": "SMALLDATETIME",
+      "tgt": "DATETIME",
+      "note": "SMALLDATETIME(분 단위) → DATETIME",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_datetime",
+      "src": "DATETIME",
+      "tgt": "DATETIME(3)",
+      "note": "MSSQL DATETIME(3ms 정밀도) → DATETIME(3)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_bit",
+      "src": "BIT",
+      "tgt": "TINYINT(1)",
+      "note": "MSSQL BIT(0/1/NULL) → TINYINT(1). TRUE=1, FALSE=0",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_tinyint",
+      "src": "TINYINT",
+      "tgt": "TINYINT UNSIGNED",
+      "note": "MSSQL TINYINT는 0~255(unsigned). MySQL TINYINT는 -128~127. UNSIGNED 필요",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_smallint",
+      "src": "SMALLINT",
+      "tgt": "SMALLINT",
+      "note": "SMALLINT OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_int",
+      "src": "INT",
+      "tgt": "INT",
+      "note": "INT OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_bigint",
+      "src": "BIGINT",
+      "tgt": "BIGINT",
+      "note": "BIGINT OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_float",
+      "src": "FLOAT",
+      "tgt": "DOUBLE",
+      "note": "MSSQL FLOAT(8바이트) → MySQL DOUBLE(8바이트). MySQL FLOAT는 4바이트",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_real",
+      "src": "REAL",
+      "tgt": "FLOAT",
+      "note": "MSSQL REAL(4바이트) → MySQL FLOAT(4바이트)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_decimal",
+      "src": "DECIMAL(p,s)",
+      "tgt": "DECIMAL(p,s)",
+      "regex": true,
+      "note": "DECIMAL OK — 정밀도/스케일 그대로",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_numeric",
+      "src": "NUMERIC(p,s)",
+      "tgt": "DECIMAL(p,s)",
+      "regex": true,
+      "note": "NUMERIC → DECIMAL",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_money",
+      "src": "MONEY",
+      "tgt": "DECIMAL(19,4)",
+      "note": "MONEY(-922조~922조, 소수4자리) → DECIMAL(19,4)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_smallmoney",
+      "src": "SMALLMONEY",
+      "tgt": "DECIMAL(10,4)",
+      "note": "SMALLMONEY → DECIMAL(10,4)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_varbinary_max",
+      "src": "VARBINARY(MAX)",
+      "tgt": "LONGBLOB",
+      "note": "VARBINARY(MAX) → LONGBLOB(4GB)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_varbinary_n",
+      "src": "VARBINARY(n)",
+      "tgt": "VARBINARY(n)",
+      "regex": true,
+      "note": "VARBINARY(n) OK. n ≤ 65535",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_binary_n",
+      "src": "BINARY(n)",
+      "tgt": "BINARY(n)",
+      "regex": true,
+      "note": "BINARY(n) OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_image",
+      "src": "IMAGE",
+      "tgt": "LONGBLOB",
+      "note": "IMAGE(deprecated, 최대2GB) → LONGBLOB",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_uniqueidentifier",
+      "src": "UNIQUEIDENTIFIER",
+      "tgt": "CHAR(36)",
+      "note": "UNIQUEIDENTIFIER(16바이트) → CHAR(36) 'xxxxxxxx-xxxx-...' 형식 저장. UUID() 함수로 생성",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_xml",
+      "src": "XML",
+      "tgt": "LONGTEXT",
+      "note": "XML → LONGTEXT. MySQL 8.0+ JSON 활용 고려",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_sql_variant",
+      "src": "SQL_VARIANT",
+      "tgt": "TEXT",
+      "note": "SQL_VARIANT(여러 타입 저장) → TEXT. 타입 정보 손실 주의",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_sysname",
+      "src": "SYSNAME",
+      "tgt": "VARCHAR(128)",
+      "note": "SYSNAME(시스템 식별자, NVARCHAR(128)) → VARCHAR(128)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_rowversion",
+      "src": "ROWVERSION",
+      "tgt": "BIGINT UNSIGNED",
+      "note": "ROWVERSION(timestamp, 8바이트 자동증가) → BIGINT UNSIGNED. 자동 업데이트는 트리거로 구현 필요",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_timestamp",
+      "src": "TIMESTAMP",
+      "tgt": "BIGINT UNSIGNED",
+      "note": "MSSQL TIMESTAMP = ROWVERSION (날짜와 무관). MySQL TIMESTAMP는 다름! BIGINT로 변환",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_hierarchyid",
+      "src": "HIERARCHYID",
+      "tgt": "VARCHAR(4000)",
+      "note": "HIERARCHYID → VARCHAR. GetAncestor/GetLevel 등 메서드는 앱레이어에서 구현 필요",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_geography",
+      "src": "GEOGRAPHY",
+      "tgt": "GEOMETRY",
+      "note": "GEOGRAPHY(지구타원체) → MySQL GEOMETRY(평면). 좌표계 변환 필요 가능",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_geometry",
+      "src": "GEOMETRY",
+      "tgt": "GEOMETRY",
+      "note": "GEOMETRY OK — MySQL 5.7+ 지원",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_char_n",
+      "src": "CHAR(n)",
+      "tgt": "CHAR(n)",
+      "regex": true,
+      "note": "CHAR(n) OK. n ≤ 255",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_date",
+      "src": "DATE",
+      "tgt": "DATE",
+      "note": "DATE OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_time_n",
+      "src": "TIME(n)",
+      "tgt": "TIME(n)",
+      "regex": true,
+      "note": "TIME(정밀도) OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_time",
+      "src": "TIME",
+      "tgt": "TIME",
+      "note": "TIME OK",
+      "category": "DATATYPE"
+    }
+  ]
+}

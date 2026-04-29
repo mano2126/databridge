@@ -1,0 +1,61 @@
+:root {
+  --bg-primary:#ffffff; --bg-secondary:#f7f7f5; --bg-tertiary:#f0efeb;
+  --bg-info:#e6f1fb; --bg-success:#eaf3de; --bg-warning:#faeeda; --bg-danger:#fcebeb;
+  --text-primary:#1a1a18; --text-secondary:#4a4a47; --text-tertiary:#888780;
+  --text-info:#185fa5; --text-success:#3b6d11; --text-warning:#854f0b; --text-danger:#a32d2d;
+  --border-light:rgba(0,0,0,.08); --border-mid:rgba(0,0,0,.14); --border-strong:rgba(0,0,0,.22);
+  --accent-blue:#378add; --accent-green:#639922;
+  --sidebar-w:232px; --topbar-h:44px;
+  --radius-sm:6px; --radius-md:8px; --radius-lg:12px;
+  --font:'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;
+}
+[data-theme="dark"] {
+  --bg-primary:#1e1e1c; --bg-secondary:#252523; --bg-tertiary:#1a1a18;
+  --bg-info:#0c2a45; --bg-success:#0f2d08; --bg-warning:#2e1f04; --bg-danger:#2d0f0f;
+  --text-primary:#e8e6de; --text-secondary:#b0ada4; --text-tertiary:#6e6c65;
+  --text-info:#85b7eb; --text-success:#97c459; --text-warning:#ef9f27; --text-danger:#f09595;
+  --border-light:rgba(255,255,255,.07); --border-mid:rgba(255,255,255,.12); --border-strong:rgba(255,255,255,.2);
+}
+
+/* ── UI 커스터마이즈 변수 (v9+) ─────────────────────
+   appStore.applyUI() 에서 동적으로 설정. 기본값은 comfortable. */
+:root {
+  --density-row-h: 36px;
+  --density-gap: 10px;
+  --density-pad: 12px;
+  --base-font-size: 14px;
+  --accent: #1f6feb;
+  --accent-hover: #1a5fcc;
+}
+
+/* ── 접근성: 애니메이션 감소 ─────────────────────── */
+html.reduced-motion,
+html.reduced-motion *,
+html.reduced-motion *::before,
+html.reduced-motion *::after {
+  animation-duration: 0.01s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01s !important;
+  scroll-behavior: auto !important;
+}
+
+/* ── 접근성: 고대비 모드 ────────────────────────── */
+html.high-contrast {
+  --border-light:  rgba(0,0,0,.25);
+  --border-mid:    rgba(0,0,0,.45);
+  --border-strong: rgba(0,0,0,.7);
+  --text-tertiary: #4a4a47;  /* 옅은 회색 → 진한 회색으로 */
+}
+html.high-contrast[data-theme="dark"] {
+  --border-light:  rgba(255,255,255,.3);
+  --border-mid:    rgba(255,255,255,.5);
+  --border-strong: rgba(255,255,255,.8);
+  --text-tertiary: #b8b6ad;
+}
+html.high-contrast .btn,
+html.high-contrast .card,
+html.high-contrast input,
+html.high-contrast select,
+html.high-contrast textarea {
+  border-width: 1.5px !important;
+}

@@ -1,0 +1,8 @@
+【PROCEDURE 전용 추가 규칙 — MySQL 8.0】
+
+1. 파라미터 방향 명시 (IN/OUT/INOUT)
+2. 날짜형 VARCHAR 파라미터: 원본 길이 반드시 유지
+   - YYYYMMDD → VARCHAR(8), YYYYMM → VARCHAR(6), YYYY-MM-DD → VARCHAR(10)
+3. 파라미터를 테이블 컬럼과 비교할 때 Collation 충돌 주의
+4. 임시 테이블: 프로시저 종료 전 DROP 처리
+5. 커서 사용 시 DECLARE ... CURSOR FOR SELECT 형태

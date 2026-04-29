@@ -1,0 +1,219 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 트리거 구문 변환",
+    "category": "TRIGGER_SYNTAX",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "트리거 완전 변환 — INSERTED/DELETED 테이블, INSTEAD OF, 다중 이벤트"
+  },
+  "rules": [
+    {
+      "id": "trig_create",
+      "src": "CREATE TRIGGER [trig_name] ON [dbo].[table_name]\nAFTER INSERT\nAS\nBEGIN",
+      "tgt": "DROP TRIGGER IF EXISTS `trig_name`;\nCREATE TRIGGER `trig_name`\nAFTER INSERT ON `table_name`\nFOR EACH ROW\nBEGIN",
+      "note": "⚠ MySQL은 CREATE OR REPLACE TRIGGER 미지원. DROP IF EXISTS + CREATE. MSSQL은 문장단위, MySQL은 FOR EACH ROW 행단위",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_create_alter",
+      "src": "CREATE OR ALTER TRIGGER [trig_name]",
+      "tgt": "DROP TRIGGER IF EXISTS `trig_name`;\nCREATE TRIGGER `trig_name`",
+      "note": "⚠ OR ALTER → MySQL 미지원. DROP IF EXISTS + CREATE",
+      "category": "TRIGGER_SYNTAX",
+      "warning": true
+    },
+    {
+      "id": "trig_after_insert",
+      "src": "AFTER INSERT",
+      "tgt": "AFTER INSERT",
+      "note": "AFTER INSERT OK",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_after_update",
+      "src": "AFTER UPDATE",
+      "tgt": "AFTER UPDATE",
+      "note": "AFTER UPDATE OK",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_after_delete",
+      "src": "AFTER DELETE",
+      "tgt": "AFTER DELETE",
+      "note": "AFTER DELETE OK",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_instead_of_insert",
+      "src": "INSTEAD OF INSERT",
+      "tgt": "BEFORE INSERT",
+      "note": "INSTEAD OF INSERT → BEFORE INSERT. 로직에서 실제 INSERT도 직접 수행해야 할 수 있음",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_instead_of_update",
+      "src": "INSTEAD OF UPDATE",
+      "tgt": "BEFORE UPDATE",
+      "note": "INSTEAD OF UPDATE → BEFORE UPDATE",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_instead_of_delete",
+      "src": "INSTEAD OF DELETE",
+      "tgt": "BEFORE DELETE",
+      "note": "INSTEAD OF DELETE → BEFORE DELETE",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_multi_event",
+      "src": "AFTER INSERT, UPDATE, DELETE",
+      "tgt": "-- MySQL은 이벤트별 별도 트리거 필요\n-- AFTER INSERT ON `table` FOR EACH ROW ...\n-- AFTER UPDATE ON `table` FOR EACH ROW ...\n-- AFTER DELETE ON `table` FOR EACH ROW ...",
+      "note": "MSSQL 다중 이벤트 트리거 → MySQL은 각각 별도 트리거 생성",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_inserted_col",
+      "src": "INSERTED.column_name",
+      "tgt": "NEW.column_name",
+      "note": "INSERT/UPDATE 후 새 값 → NEW.컬럼",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_deleted_col",
+      "src": "DELETED.column_name",
+      "tgt": "OLD.column_name",
+      "note": "DELETE/UPDATE 전 값 → OLD.컬럼",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_from_inserted",
+      "src": "FROM INSERTED",
+      "tgt": "-- MSSQL INSERTED 테이블 → MySQL은 NEW.col 행단위 접근만 가능\n-- 복수 행 처리는 트리거로 불가능 (앱 레이어 처리 권장)",
+      "note": "INSERTED 테이블 JOIN → MySQL 미지원. MSSQL 트리거는 문장 단위, MySQL은 행 단위",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_from_deleted",
+      "src": "FROM DELETED",
+      "tgt": "-- DELETED 테이블 → OLD.col 행단위만 가능",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_join_inserted",
+      "src": "JOIN INSERTED i ON",
+      "tgt": "-- INSERTED JOIN → MySQL 행단위 NEW.col 으로 리팩터링 필요",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_join_deleted",
+      "src": "JOIN DELETED d ON",
+      "tgt": "-- DELETED JOIN → MySQL 행단위 OLD.col 으로 리팩터링 필요",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_new_col_set",
+      "src": "SET NEW.col = value",
+      "tgt": "SET NEW.col = value",
+      "note": "BEFORE 트리거에서 NEW 값 변경 OK",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_if_trigger_nestlevel",
+      "src": "IF TRIGGER_NESTLEVEL() > 1 RETURN",
+      "tgt": "-- 트리거 중첩 방지 → MySQL은 @@trigger_depth 없음. 로직 재설계 필요",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_update_function",
+      "src": "IF UPDATE(column_name)",
+      "tgt": "IF OLD.column_name <> NEW.column_name",
+      "note": "특정 컬럼 업데이트 확인 → OLD/NEW 비교로 변환",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_columns_updated",
+      "src": "COLUMNS_UPDATED()",
+      "tgt": "-- MySQL 미지원. 컬럼별 OLD/NEW 비교로 대체",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_rollback_in_trigger",
+      "src": "ROLLBACK TRANSACTION",
+      "tgt": "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='조건 위반'",
+      "note": "트리거 내 ROLLBACK → SIGNAL로 오류 발생 (MySQL 트리거 내 ROLLBACK은 제한됨)",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_raiserror_in_trigger",
+      "src": "RAISERROR('메시지', 16, 1)",
+      "tgt": "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='메시지'",
+      "note": "트리거 내 오류 발생",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_for_each_row",
+      "src": "(없음)",
+      "tgt": "FOR EACH ROW",
+      "note": "MySQL 트리거에 항상 추가",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_drop",
+      "src": "IF OBJECT_ID('[trig_name]', 'TR') IS NOT NULL DROP TRIGGER [trig_name]",
+      "tgt": "DROP TRIGGER IF EXISTS `trig_name`",
+      "note": "트리거 삭제",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_on_syntax",
+      "src": "ON [dbo].[table_name]",
+      "tgt": "ON `table_name`",
+      "note": "테이블 지정 — dbo 제거, 대괄호→백틱",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_for_replication",
+      "src": "NOT FOR REPLICATION",
+      "tgt": "",
+      "note": "NOT FOR REPLICATION → MySQL 미지원, 제거",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_with_append",
+      "src": "WITH APPEND",
+      "tgt": "",
+      "note": "WITH APPEND → MySQL 미지원",
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_enable_disable",
+      "src": "DISABLE TRIGGER [trig_name] ON [table]",
+      "tgt": "ALTER TABLE `table` DISABLE KEYS -- 또는 DROP/CREATE TRIGGER",
+      "note": "트리거 비활성화 → MySQL은 DROP/CREATE로 관리",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    },
+    {
+      "id": "trig_mysql_or_replace_not_supported",
+      "src": "CREATE OR REPLACE TRIGGER",
+      "tgt": "-- ⚠ MySQL 미지원!\nDROP TRIGGER IF EXISTS `name`;\nCREATE TRIGGER `name`",
+      "note": "⚠⚠ MySQL은 CREATE OR REPLACE TRIGGER 미지원 (MariaDB 전용). DROP IF EXISTS + CREATE 두 문장으로 분리",
+      "warning": true,
+      "category": "TRIGGER_SYNTAX"
+    }
+  ]
+}

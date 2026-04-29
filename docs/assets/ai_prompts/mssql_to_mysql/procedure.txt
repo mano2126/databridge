@@ -1,0 +1,69 @@
+【PROCEDURE 전용 추가 규칙】
+
+1. 헤더 형식
+   DROP PROCEDURE IF EXISTS `{obj_name}`;
+   CREATE PROCEDURE `{obj_name}`
+   (IN p_param1 TYPE1, OUT p_param2 TYPE2)
+   BEGIN
+     ...
+   END
+
+2. 파라미터 방향 명시
+   - 입력: IN p_name TYPE
+   - 출력: OUT p_name TYPE
+   - 입출력: INOUT p_name TYPE
+
+3. MSSQL OUTPUT 파라미터
+   - @param OUTPUT → OUT p_param TYPE
+
+4. 임시 테이블
+   - DECLARE @t TABLE (...) → CREATE TEMPORARY TABLE t (...);
+   - DROP TABLE IF EXISTS t; (프로시저 끝에 추가)
+
+5. 커서 (CURSOR)
+   DECLARE cur CURSOR FOR SELECT ...;
+   OPEN cur;
+   FETCH cur INTO v_var;
+   CLOSE cur;
+   DEALLOCATE cur;   ← MySQL에서는 생략 가능
+
+6. 오류 처리
+   DECLARE EXIT HANDLER FOR SQLEXCEPTION
+   BEGIN
+     ROLLBACK;
+     -- 오류 처리 로직
+   END;
+
+7. 트랜잭션
+   - BEGIN TRANSACTION → START TRANSACTION
+   - COMMIT TRANSACTION → COMMIT
+   - ROLLBACK TRANSACTION → ROLLBACK
+
+8. IF EXISTS 패턴
+   - IF EXISTS (SELECT 1 FROM tbl WHERE ...) →
+     IF (SELECT COUNT(*) FROM tbl WHERE ...) > 0 THEN
+   
+9. 자주 발생하는 오류 패턴 (누적)
+   - 오류: "PROCEDURE already exists"
+     해결: DROP PROCEDURE IF EXISTS 반드시 포함
+
+   - 오류: "@TBL_TEMP TABLE"
+     원인: 테이블 변수 (@TBL TABLE) MySQL 미지원
+     해결: CREATE TEMPORARY TABLE로 변환
+
+   - 오류: "sp_ 시스템 프로시저 없음"
+     원인: EXEC sp_executesql 등 시스템 SP
+     해결: PREPARE stmt FROM ...; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+【PROCEDURE 날짜/Collation 특별 규칙】
+
+날짜 파라미터 처리
+   - VARCHAR(8) 날짜 파라미터(YYYYMMDD): 절대 DATE나 VARCHAR(10)으로 바꾸지 말 것
+   - VARCHAR(6) 날짜 파라미터(YYYYMM): 절대 줄이지 말 것
+   - 오류 예방: (1406) Data too long for column 발생 원인
+
+Collation 충돌 방지
+   - VARCHAR 파라미터를 DATETIME/DATE/VARCHAR 컬럼과 비교할 때
+     COLLATE utf8mb4_unicode_ci 추가
+   - 예) CONCAT(p_sdate COLLATE utf8mb4_unicode_ci, ' 00:00:00')
+   - 오류 예방: (1270) Illegal mix of collations 발생 원인

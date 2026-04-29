@@ -1,0 +1,98 @@
+{
+  "9288ed86": {
+    "id": "9288ed86",
+    "name": "집PC_MS-Sql → MySql",
+    "source": {
+      "dbType": "mssql",
+      "version": "SQL Server 2022",
+      "host": "127.0.0.1",
+      "port": 1434,
+      "username": "sa",
+      "password": "0000",
+      "database": "mgtest",
+      "status": "ok",
+      "latency": 188,
+      "versionResult": "Microsoft SQL Server 2022 (RTM) - 16.0.1000.6 (X64) \n\tOct  8 2022 05:58:25 \n\tCop",
+      "message": "연결 성공 — SQL Server"
+    },
+    "target": {
+      "dbType": "mysql",
+      "version": "MySQL 8.0",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "username": "root",
+      "password": "mano212643@!",
+      "database": "mgtest",
+      "status": "ok",
+      "latency": 672,
+      "versionResult": "8.0.45",
+      "message": "연결 성공 — MySQL 8.0.45"
+    },
+    "created_at": "2026-04-01T13:34:12.722912",
+    "status": "ok"
+  },
+  "c5efebd7": {
+    "id": "c5efebd7",
+    "name": "집PC_테스트콜DB이관_MS-Sql -> MySQL",
+    "source": {
+      "dbType": "mssql",
+      "version": "SQL Server 2022",
+      "host": "127.0.0.1",
+      "port": 1434,
+      "username": "sa",
+      "password": "0000",
+      "database": "crec",
+      "status": "ok",
+      "latency": 375,
+      "versionResult": "Microsoft SQL Server 2022 (RTM) - 16.0.1000.6 (X64) \n\tOct  8 2022 05:58:25 \n\tCop",
+      "message": "연결 성공 — SQL Server"
+    },
+    "target": {
+      "dbType": "mysql",
+      "version": "MySQL 8.0",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "username": "root",
+      "password": "mano212643@!",
+      "database": "crec",
+      "status": "ok",
+      "latency": 78,
+      "versionResult": "8.0.45",
+      "message": "연결 성공 — MySQL 8.0.45"
+    },
+    "created_at": "2026-04-09T22:07:48.009043",
+    "status": "ok"
+  },
+  "780af02b": {
+    "id": "780af02b",
+    "name": "Docker_mssql -> mysql",
+    "source": {
+      "dbType": "mssql",
+      "version": "SQL Server 2022",
+      "host": "127.0.0.1",
+      "port": 1433,
+      "username": "sa",
+      "password": "Bridge@1234",
+      "database": "crec",
+      "status": "ok",
+      "latency": 78,
+      "versionResult": "Microsoft SQL Server 2022 (RTM-CU24) (KB5080999) - 16.0.4245.2 (X64) \n\tFeb 25 20",
+      "message": "연결 성공 — SQL Server"
+    },
+    "target": {
+      "dbType": "mysql",
+      "version": "MySQL 8.0",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "username": "bridge",
+      "password": "bridge1234",
+      "database": "testdb",
+      "status": "ok",
+      "latency": 672,
+      "versionResult": "8.0.45",
+      "message": "연결 성공 — MySQL 8.0.45"
+    },
+    "created_at": "2026-04-11T11:36:09.614196",
+    "status": "ok"
+  }
+}

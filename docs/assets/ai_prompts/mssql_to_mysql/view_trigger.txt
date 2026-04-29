@@ -1,0 +1,42 @@
+【VIEW 전용 추가 규칙】
+
+1. 헤더 형식
+   CREATE OR REPLACE VIEW `{obj_name}` AS
+   SELECT ...
+
+2. WITH CHECK OPTION 유지 가능
+3. 파라미터 없음 — WHERE절 하드코딩된 파라미터 제거 불필요
+4. TOP n → LIMIT n (끝에 추가)
+5. NOLOCK 제거
+
+
+【TRIGGER 전용 추가 규칙】
+
+1. 헤더 형식
+   DROP TRIGGER IF EXISTS `{obj_name}`;
+   DELIMITER $$          ← 트리거는 DELIMITER 사용 가능 (별도 처리됨)
+   CREATE TRIGGER `{obj_name}`
+   {BEFORE|AFTER} {INSERT|UPDATE|DELETE}
+   ON `table_name` FOR EACH ROW
+   BEGIN
+     ...
+   END$$
+   DELIMITER ;
+
+2. INSERTED → NEW, DELETED → OLD
+
+3. MySQL 트리거 제약
+   - 자기 테이블 UPDATE 불가 → 제거 또는 주석 처리
+   - INSERT 트리거에서 OLD 참조 불가
+   - DELETE 트리거에서 NEW 참조 불가
+
+4. FOR INSERT, UPDATE, DELETE (MSSQL) →
+   MySQL은 각각 별도 트리거 3개로 분리 필요
+   (하나의 트리거에서 여러 이벤트 처리 불가)
+
+5. WITH EXECUTE AS → 제거
+
+6. 자주 발생하는 오류 패턴 (누적)
+   - 오류: "Can't update table in stored function/trigger"
+     원인: 트리거에서 자기 테이블 수정
+     해결: 해당 로직 제거 또는 주석 처리 + 경고 추가

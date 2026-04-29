@@ -1,0 +1,44 @@
+【FUNCTION 전용 추가 규칙】
+
+1. 헤더 형식
+   DROP FUNCTION IF EXISTS `{obj_name}`;
+   CREATE FUNCTION `{obj_name}`
+   (p_param1 TYPE1, p_param2 TYPE2)   ← 파라미터 수/순서 동일
+   RETURNS return_type
+   DETERMINISTIC                        ← 또는 NOT DETERMINISTIC
+   BEGIN
+     ...
+   END
+
+2. DETERMINISTIC 명시 필수
+   - 같은 입력에 같은 결과 → DETERMINISTIC
+   - 랜덤/시간/외부 의존 → NOT DETERMINISTIC
+   - 단순 조회 함수는 대부분 DETERMINISTIC
+
+3. 파라미터 선언
+   - MSSQL: (@p1 VARCHAR(20), @p2 INT)
+   - MySQL:  (p_p1 VARCHAR(20), p_p2 INT)   ← IN 키워드 생략 가능
+
+4. 지역변수 선언
+   - DECLARE v_result VARCHAR(40);   ← 세미콜론 필수
+   - SET v_result = '';              ← 세미콜론 필수
+   - RETURN v_result;               ← 세미콜론 필수
+
+5. SELECT INTO 패턴
+   SELECT col INTO v_result
+   FROM `tbl`
+   WHERE condition
+   LIMIT 1;    ← 세미콜론 필수, 별도 줄
+
+6. 자주 발생하는 오류 패턴 (누적)
+   - 오류: "Undeclared variable: 1RETURN"
+     원인: LIMIT 1 바로 뒤에 RETURN이 붙음 (LIMIT 1RETURN)
+     해결: LIMIT 1;\n  RETURN v_var; 로 분리
+
+   - 오류: "You have an error in your SQL syntax near 'SET'"
+     원인: DECLARE 또는 이전 문장 끝에 세미콜론 누락
+     해결: 모든 DECLARE, SET 끝에 ; 추가
+
+   - 오류: "near '(('"
+     원인: CREATE FUNCTION name\n( 패턴으로 이중 괄호
+     해결: CREATE FUNCTION `name` 만 쓰고, 소스의 ( 그대로 사용

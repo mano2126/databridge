@@ -1,0 +1,132 @@
+{
+  "127.0.0.1:crec→127.0.0.1:testdb": {
+    "CREC_monitoring": {
+      "ts_col": "DATETIME",
+      "last_sync": "2026-04-13 15:03:40.874",
+      "strategy": "append",
+      "last_run": "2026-04-13 16:00:26",
+      "last_rows": 300000,
+      "last_errors": 0
+    },
+    "tbl_abort_hist": {
+      "ts_col": "abort_datm",
+      "last_sync": "2026-04-13 15:47:22.808",
+      "strategy": "append",
+      "last_run": "2026-04-13 16:00:30",
+      "last_rows": 50001,
+      "last_errors": 0
+    },
+    "tbl_down_hist": {
+      "ts_col": "rec_datm",
+      "last_sync": "2025-08-29 13:13:51",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:45",
+      "last_rows": 54
+    },
+    "tbl_excel_hist": {
+      "ts_col": "excel_datm",
+      "last_sync": "2023-05-23 16:50:00.833000",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:53",
+      "last_rows": 6
+    },
+    "tbl_listen_hist": {
+      "ts_col": "rec_datm",
+      "last_sync": "2025-11-18 16:30:23",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:53",
+      "last_rows": 1106
+    },
+    "tbl_login_hist": {
+      "ts_col": "login_datm",
+      "last_sync": "2026-03-30 17:19:00.243000",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:53",
+      "last_rows": 1203
+    },
+    "tbl_obstacle_db": {
+      "ts_col": "db_raise_time",
+      "last_sync": "2022-12-14 16:53:32.273000",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:55",
+      "last_rows": 1
+    },
+    "tbl_pass_change_hist": {
+      "ts_col": "change_datm",
+      "last_sync": "2025-09-05 10:00:59.480000",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:55",
+      "last_rows": 85
+    },
+    "tbl_record": {
+      "ts_col": "rec_datm",
+      "last_sync": "2026-04-08 16:00:44",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:57",
+      "last_rows": 2654
+    },
+    "tbl_record_backup": {
+      "ts_col": "rec_datm",
+      "last_sync": "2023-04-11 20:13:07",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:57",
+      "last_rows": 4
+    },
+    "tbl_record_custid_matching": {
+      "ts_col": "rec_datm",
+      "last_sync": "2022-12-09 17:35:20",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:58",
+      "last_rows": 695
+    },
+    "tbl_record_custid_notmatching": {
+      "ts_col": "rec_datm",
+      "last_sync": "2023-01-02 13:54:11",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:03:58",
+      "last_rows": 3
+    },
+    "tbl_record2": {
+      "ts_col": "rec_datm",
+      "last_sync": "2024-12-03 15:11:58",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:04:20",
+      "last_rows": 52713
+    },
+    "tbl_record3": {
+      "ts_col": "rec_datm",
+      "last_sync": "2024-12-03 15:11:58",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:04:35",
+      "last_rows": 42012
+    },
+    "tbl_rlisten_hist": {
+      "ts_col": "rlisten_datm",
+      "last_sync": "2023-06-15 09:35:25.747000",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:04:35",
+      "last_rows": 226
+    },
+    "tbl_user_change_hist": {
+      "ts_col": "change_datm",
+      "last_sync": "2025-09-05 09:16:09.627000",
+      "strategy": "append",
+      "last_run": "2026-04-12 00:04:38",
+      "last_rows": 292
+    },
+    "tbl_obstacle": {
+      "ts_col": "raise_time",
+      "last_sync": "2026-03-30 17:19:00.257000",
+      "strategy": "upsert",
+      "last_run": "2026-04-12 00:25:42",
+      "last_rows": 6821
+    },
+    "tbl_user": {
+      "ts_col": "upd_datm",
+      "last_sync": "2026-03-30 17:19:00.247000",
+      "strategy": "upsert",
+      "last_run": "2026-04-12 00:25:48",
+      "last_rows": 99
+    }
+  }
+}

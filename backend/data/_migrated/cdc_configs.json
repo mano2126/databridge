@@ -1,0 +1,40 @@
+{
+  "413e6816": {
+    "name": "변경분 테스트",
+    "src_conn": {
+      "db_type": "mssql",
+      "host": "127.0.0.1",
+      "port": 1433,
+      "database": "crec",
+      "username": "sa",
+      "password": "Bridge@1234"
+    },
+    "tgt_conn": {
+      "db_type": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "database": "testdb",
+      "username": "bridge",
+      "password": "bridge1234"
+    },
+    "batch_size": 5000,
+    "tables": [
+      {
+        "table": "CREC_monitoring",
+        "ts_col": "DATETIME",
+        "extra_where": "",
+        "strategy": "append",
+        "base_date": "2026-04-12 22:09:50.751"
+      },
+      {
+        "table": "tbl_abort_hist",
+        "ts_col": "abort_datm",
+        "extra_where": "",
+        "strategy": "append",
+        "base_date": "2026-04-12 22:09:59.828"
+      }
+    ],
+    "id": "413e6816",
+    "updated_at": "2026-04-12 22:12:50"
+  }
+}

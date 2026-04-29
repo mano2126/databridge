@@ -1,0 +1,39 @@
+{
+  "_meta": {
+    "title": "MySQL → MSSQL 쿼리/DML 구문 변환",
+    "category": "QUERY_DML",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "version": "1.0",
+    "description": "SELECT/INSERT/UPDATE/DELETE, LIMIT, CTE 변환"
+  },
+  "rules": [
+    {"id":"dml_limit_offset","src":"LIMIT\\s+(\\d+)\\s+OFFSET\\s+(\\d+)","tgt":"OFFSET \\2 ROWS FETCH NEXT \\1 ROWS ONLY","regex":true,"note":"LIMIT n OFFSET m → OFFSET m ROWS FETCH NEXT n ROWS ONLY","category":"QUERY_DML"},
+    {"id":"dml_limit_n","src":"\\bLIMIT\\s+(\\d+)\\b","tgt":"-- TOP \\1 (SELECT 앞으로 이동 필요)","regex":true,"note":"LIMIT → TOP n (SELECT 앞에 추가, 사전처리에서 변환)","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_nolock_hint","src":"WITH\\s*\\(NOLOCK\\)","tgt":"WITH (NOLOCK)","regex":true,"note":"NOLOCK OK (MSSQL 지원)","category":"QUERY_DML"},
+    {"id":"dml_cte_recursive","src":"WITH RECURSIVE\\s+(\\w+)","tgt":"WITH \\1","regex":true,"note":"WITH RECURSIVE → WITH (MSSQL CTE는 RECURSIVE 없이 재귀 지원)","category":"QUERY_DML"},
+    {"id":"dml_insert_ignore","src":"INSERT IGNORE INTO","tgt":"INSERT INTO","note":"INSERT IGNORE → 오류무시 미지원. TRY/CATCH 사용 권장","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_insert_on_dup","src":"ON DUPLICATE KEY UPDATE","tgt":"-- ON DUPLICATE KEY UPDATE → MERGE INTO 또는 IF EXISTS UPDATE ELSE INSERT로 변환 필요","note":"ON DUPLICATE KEY → MERGE INTO","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_replace_into","src":"REPLACE INTO","tgt":"-- REPLACE INTO → DELETE + INSERT 또는 MERGE INTO로 변환","note":"REPLACE INTO → MSSQL 미지원","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_insert_set","src":"INSERT INTO ([^\\s]+)\\s+SET\\s+","tgt":"INSERT INTO \\1 (col) VALUES (","regex":true,"note":"INSERT SET 구문 → INSERT VALUES 형식으로 변환 필요","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_update_limit","src":"UPDATE\\s+(\\w+)\\s+SET\\s+(.+?)\\s+LIMIT\\s+(\\d+)","tgt":"UPDATE TOP (\\3) \\1 SET \\2","regex":true,"note":"UPDATE LIMIT → UPDATE TOP","category":"QUERY_DML"},
+    {"id":"dml_delete_limit","src":"DELETE FROM\\s+(\\w+)\\s+WHERE(.+?)LIMIT\\s+(\\d+)","tgt":"DELETE TOP (\\3) FROM \\1 WHERE \\2","regex":true,"note":"DELETE LIMIT → DELETE TOP","category":"QUERY_DML"},
+    {"id":"dml_create_table_as","src":"CREATE TABLE ([^\\s]+)\\s+AS\\s+SELECT","tgt":"SELECT * INTO \\1 FROM (SELECT","regex":true,"note":"CREATE TABLE AS SELECT → SELECT INTO","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_lock_tables","src":"LOCK TABLES","tgt":"-- LOCK TABLES → MSSQL: BEGIN TRAN + WITH(TABLOCKX)","note":"LOCK TABLES → MSSQL 미지원","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_unlock_tables","src":"UNLOCK TABLES","tgt":"-- UNLOCK TABLES → COMMIT 또는 ROLLBACK","note":"UNLOCK TABLES → COMMIT","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_start_transaction","src":"START TRANSACTION","tgt":"BEGIN TRANSACTION","note":"START TRANSACTION → BEGIN TRANSACTION","category":"QUERY_DML"},
+    {"id":"dml_commit","src":"\\bCOMMIT\\b","tgt":"COMMIT","regex":true,"note":"COMMIT OK","category":"QUERY_DML"},
+    {"id":"dml_rollback","src":"\\bROLLBACK\\b","tgt":"ROLLBACK","regex":true,"note":"ROLLBACK OK","category":"QUERY_DML"},
+    {"id":"dml_set_autocommit","src":"SET AUTOCOMMIT\\s*=\\s*\\d","tgt":"-- SET AUTOCOMMIT → MSSQL은 기본 자동커밋. BEGIN TRAN으로 제어","note":"SET AUTOCOMMIT → 제거","category":"QUERY_DML"},
+    {"id":"dml_use_database","src":"USE `([^`]+)`","tgt":"USE [\\1]","regex":true,"note":"USE → 대괄호","category":"QUERY_DML"},
+    {"id":"dml_show_tables","src":"SHOW TABLES","tgt":"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'","note":"SHOW TABLES → INFORMATION_SCHEMA","category":"QUERY_DML"},
+    {"id":"dml_show_columns","src":"SHOW COLUMNS FROM\\s+`?([^`\\s]+)`?","tgt":"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='\\1'","regex":true,"note":"SHOW COLUMNS → INFORMATION_SCHEMA","category":"QUERY_DML"},
+    {"id":"dml_describe","src":"DESCRIBE\\s+`?([^`\\s]+)`?","tgt":"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='\\1'","regex":true,"note":"DESCRIBE → INFORMATION_SCHEMA","category":"QUERY_DML"},
+    {"id":"dml_explain","src":"EXPLAIN\\s+","tgt":"-- EXPLAIN → MSSQL: SET SHOWPLAN_TEXT ON 또는 실행계획 확인\n","note":"EXPLAIN → SET SHOWPLAN_TEXT ON","warning":true,"category":"QUERY_DML"},
+    {"id":"dml_ansi_nulls","src":"SET ANSI_NULLS","tgt":"SET ANSI_NULLS","note":"SET ANSI_NULLS OK","category":"QUERY_DML"},
+    {"id":"dml_except","src":"\\bMINUS\\b","tgt":"EXCEPT","regex":true,"note":"MINUS → EXCEPT","category":"QUERY_DML"},
+    {"id":"dml_straight_join","src":"STRAIGHT_JOIN","tgt":"INNER JOIN","note":"STRAIGHT_JOIN → INNER JOIN (힌트 무시)","category":"QUERY_DML"},
+    {"id":"dml_sql_calc_found","src":"SQL_CALC_FOUND_ROWS","tgt":"","note":"SQL_CALC_FOUND_ROWS 제거","category":"QUERY_DML"},
+    {"id":"dml_found_rows","src":"FOUND_ROWS\\(\\)","tgt":"@@ROWCOUNT","regex":true,"note":"FOUND_ROWS() → @@ROWCOUNT","category":"QUERY_DML"}
+  ]
+}

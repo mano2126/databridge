@@ -1,0 +1,417 @@
+{
+  "_meta": {
+    "title": "MySQL → MSSQL 문자열/수학/시스템 함수 변환",
+    "category": "FUNCTION_STRING",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "version": "1.0",
+    "description": "MySQL 함수 → SQL Server 동등 함수"
+  },
+  "rules": [
+    {
+      "id": "fn_ifnull",
+      "src": "IFNULL\\s*\\(",
+      "tgt": "ISNULL(",
+      "regex": true,
+      "note": "IFNULL → ISNULL",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_if_fn",
+      "src": "\\bIF\\s*\\(",
+      "tgt": "IIF(",
+      "regex": true,
+      "note": "IF( → IIF(",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_char_length",
+      "src": "\\bCHAR_LENGTH\\s*\\(",
+      "tgt": "LEN(",
+      "regex": true,
+      "note": "CHAR_LENGTH → LEN (후행공백 차이 주의)",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_length",
+      "src": "\\bLENGTH\\s*\\(",
+      "tgt": "DATALENGTH(",
+      "regex": true,
+      "note": "LENGTH(바이트수) → DATALENGTH",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_locate",
+      "src": "LOCATE\\s*\\(([^,]+),\\s*([^,)]+)\\)",
+      "tgt": "CHARINDEX(\\1, \\2)",
+      "regex": true,
+      "note": "LOCATE(찾을값, 대상) → CHARINDEX(찾을값, 대상)",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_locate_start",
+      "src": "LOCATE\\s*\\(([^,]+),\\s*([^,]+),\\s*([^)]+)\\)",
+      "tgt": "CHARINDEX(\\1, \\2, \\3)",
+      "regex": true,
+      "note": "LOCATE 3인자 → CHARINDEX 3인자",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_instr",
+      "src": "INSTR\\s*\\(([^,]+),\\s*([^)]+)\\)",
+      "tgt": "CHARINDEX(\\2, \\1)",
+      "regex": true,
+      "note": "⚠ INSTR(대상, 찾을값) → CHARINDEX(찾을값, 대상) 순서반대",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_substr",
+      "src": "SUBSTR\\s*\\(",
+      "tgt": "SUBSTRING(",
+      "note": "SUBSTR → SUBSTRING",
+      "category": "FUNCTION_STRING",
+      "regex": true
+    },
+    {
+      "id": "fn_repeat",
+      "src": "REPEAT\\s*\\(([^,]+),\\s*([^)]+)\\)",
+      "tgt": "REPLICATE(\\1, \\2)",
+      "regex": true,
+      "note": "REPEAT → REPLICATE",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_insert_str",
+      "src": "INSERT\\(([^,]+),\\s*([^,]+),\\s*([^,]+),\\s*([^)]+)\\)",
+      "tgt": "STUFF(\\1, \\2, \\3, \\4)",
+      "regex": true,
+      "note": "INSERT(문자열함수) → STUFF",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_lpad",
+      "src": "LPAD\\(([^,]+),\\s*([^,]+),\\s*([^)]+)\\)",
+      "tgt": "RIGHT(REPLICATE(\\3, \\2) + CAST(\\1 AS NVARCHAR(\\2)), \\2)",
+      "regex": true,
+      "note": "LPAD → RIGHT+REPLICATE",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_rpad",
+      "src": "RPAD\\(([^,]+),\\s*([^,]+),\\s*([^)]+)\\)",
+      "tgt": "LEFT(CAST(\\1 AS NVARCHAR(\\2)) + REPLICATE(\\3, \\2), \\2)",
+      "regex": true,
+      "note": "RPAD → LEFT+REPLICATE",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_concat",
+      "src": "CONCAT\\(",
+      "tgt": "CONCAT(",
+      "note": "CONCAT OK (MSSQL 2012+)",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_concat_ws",
+      "src": "CONCAT_WS\\(",
+      "tgt": "CONCAT_WS(",
+      "note": "CONCAT_WS OK (MSSQL 2017+)",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_group_concat",
+      "src": "GROUP_CONCAT\\s*\\(([^)]+)\\s+SEPARATOR\\s+([^)]+)\\)",
+      "tgt": "STRING_AGG(\\1, \\2)",
+      "regex": true,
+      "note": "GROUP_CONCAT SEPARATOR → STRING_AGG",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_group_concat_order",
+      "src": "GROUP_CONCAT\\s*\\(([^)]+)\\s+ORDER\\s+BY\\s+([^)]+)\\s+SEPARATOR\\s+([^)]+)\\)",
+      "tgt": "STRING_AGG(\\1, \\3) WITHIN GROUP (ORDER BY \\2)",
+      "regex": true,
+      "note": "GROUP_CONCAT ORDER BY SEPARATOR → STRING_AGG WITHIN GROUP",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_group_concat_simple",
+      "src": "GROUP_CONCAT\\s*\\(([^)]+)\\)",
+      "tgt": "STRING_AGG(\\1, ',')",
+      "regex": true,
+      "note": "GROUP_CONCAT 기본 → STRING_AGG",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_trim_both",
+      "src": "TRIM\\(BOTH\\s+([^\\s]+)\\s+FROM\\s+([^)]+)\\)",
+      "tgt": "REPLACE(\\2, \\1, '')",
+      "regex": true,
+      "note": "TRIM BOTH → REPLACE",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_trim",
+      "src": "\\bTRIM\\s*\\(",
+      "tgt": "LTRIM(RTRIM(",
+      "regex": true,
+      "note": "TRIM → LTRIM(RTRIM()) — 닫는괄호 추가 필요",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_elt",
+      "src": "ELT\\s*\\(",
+      "tgt": "CHOOSE(",
+      "note": "ELT → CHOOSE",
+      "category": "FUNCTION_STRING",
+      "regex": true
+    },
+    {
+      "id": "fn_field",
+      "src": "FIELD\\(([^,]+),",
+      "tgt": "-- FIELD(\\1, ... ) → CASE WHEN으로 수동 변환",
+      "regex": true,
+      "note": "FIELD → MySQL 전용. CASE WHEN으로 변환 필요",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_ord",
+      "src": "ORD\\s*\\(",
+      "tgt": "UNICODE(",
+      "note": "ORD → UNICODE (유니코드 코드포인트)",
+      "category": "FUNCTION_STRING",
+      "regex": true
+    },
+    {
+      "id": "fn_hex",
+      "src": "HEX\\(([^)]+)\\)",
+      "tgt": "CONVERT(NVARCHAR(MAX), \\1, 2)",
+      "regex": true,
+      "note": "HEX → CONVERT hex",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_unhex",
+      "src": "UNHEX\\(([^)]+)\\)",
+      "tgt": "CONVERT(VARBINARY(MAX), \\1, 2)",
+      "regex": true,
+      "note": "UNHEX → CONVERT binary",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_bit_length",
+      "src": "BIT_LENGTH\\(([^)]+)\\)",
+      "tgt": "DATALENGTH(\\1) * 8",
+      "regex": true,
+      "note": "BIT_LENGTH → DATALENGTH * 8",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_md5",
+      "src": "MD5\\(",
+      "tgt": "CONVERT(NVARCHAR(32), HASHBYTES('MD5', ",
+      "note": "MD5 → HASHBYTES MD5 (닫는괄호 조정 필요)",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_sha1",
+      "src": "SHA1\\(",
+      "tgt": "CONVERT(NVARCHAR(40), HASHBYTES('SHA1', ",
+      "note": "SHA1 → HASHBYTES SHA1",
+      "warning": true,
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_sha2",
+      "src": "SHA2\\(([^,]+),\\s*256\\)",
+      "tgt": "CONVERT(NVARCHAR(64), HASHBYTES('SHA2_256', \\1), 2)",
+      "regex": true,
+      "note": "SHA2 256 → HASHBYTES SHA2_256",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_format_num",
+      "src": "FORMAT\\s*\\(([^,]+),\\s*(\\d+)\\)",
+      "tgt": "FORMAT(\\1, 'N\\2')",
+      "regex": true,
+      "note": "FORMAT(num, decimals) → FORMAT(num, 'N{decimals}')",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_uuid",
+      "src": "UUID\\s*\\(\\s*\\)",
+      "tgt": "NEWID()",
+      "note": "UUID() → NEWID()",
+      "category": "FUNCTION_STRING",
+      "regex": true
+    },
+    {
+      "id": "fn_last_insert_id",
+      "src": "LAST_INSERT_ID\\s*\\(\\s*\\)",
+      "tgt": "SCOPE_IDENTITY()",
+      "regex": true,
+      "note": "LAST_INSERT_ID → SCOPE_IDENTITY",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_row_count",
+      "src": "ROW_COUNT\\s*\\(\\s*\\)",
+      "tgt": "@@ROWCOUNT",
+      "regex": true,
+      "note": "ROW_COUNT() → @@ROWCOUNT",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_database",
+      "src": "DATABASE\\s*\\(\\s*\\)",
+      "tgt": "DB_NAME()",
+      "regex": true,
+      "note": "DATABASE() → DB_NAME()",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_version",
+      "src": "VERSION\\s*\\(\\s*\\)",
+      "tgt": "@@VERSION",
+      "regex": true,
+      "note": "VERSION() → @@VERSION",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_connection_id",
+      "src": "CONNECTION_ID\\s*\\(\\s*\\)",
+      "tgt": "@@SPID",
+      "regex": true,
+      "note": "CONNECTION_ID → @@SPID",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_current_user",
+      "src": "CURRENT_USER\\s*\\(\\s*\\)",
+      "tgt": "USER_NAME()",
+      "regex": true,
+      "note": "CURRENT_USER → USER_NAME",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_power",
+      "src": "POW\\s*\\(",
+      "tgt": "POWER(",
+      "note": "POW → POWER",
+      "category": "FUNCTION_STRING",
+      "regex": true
+    },
+    {
+      "id": "fn_ln",
+      "src": "\\bLN\\s*\\(",
+      "tgt": "LOG(",
+      "regex": true,
+      "note": "LN → LOG (자연로그)",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_log2",
+      "src": "LOG2\\s*\\(([^)]+)\\)",
+      "tgt": "LOG(\\1) / LOG(2)",
+      "regex": true,
+      "note": "LOG2 → LOG(n)/LOG(2)",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_truncate",
+      "src": "TRUNCATE\\s*\\(([^,]+),\\s*([^)]+)\\)",
+      "tgt": "ROUND(\\1, \\2, 1)",
+      "regex": true,
+      "note": "TRUNCATE(n,d) → ROUND(n,d,1) 절사",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_mod",
+      "src": "MOD\\s*\\(([^,]+),\\s*([^)]+)\\)",
+      "tgt": "(\\1 % \\2)",
+      "regex": true,
+      "note": "MOD → %",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_sign",
+      "src": "SIGN\\(",
+      "tgt": "SIGN(",
+      "note": "SIGN OK",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_rand",
+      "src": "RAND\\s*\\(\\s*\\)",
+      "tgt": "RAND()",
+      "regex": true,
+      "note": "RAND OK",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_isnumeric",
+      "src": "([^\\s]+)\\s+REGEXP\\s+'\\^\\[0-9\\]'",
+      "tgt": "ISNUMERIC(\\1)",
+      "regex": true,
+      "note": "REGEXP 숫자확인 → ISNUMERIC",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_backtick",
+      "src": "`([^`]+)`",
+      "tgt": "[\\1]",
+      "regex": true,
+      "note": "백틱 → 대괄호",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_limit_n",
+      "src": "LIMIT\\s+(\\d+)\\s*;",
+      "tgt": ";",
+      "regex": true,
+      "note": "LIMIT → SELECT TOP으로 이동 (사전처리)",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_engine_remove",
+      "src": "\\s*ENGINE\\s*=\\s*\\w+",
+      "tgt": "",
+      "regex": true,
+      "note": "ENGINE 제거",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_charset_remove",
+      "src": "\\s*DEFAULT\\s+CHARSET\\s*=\\s*\\w+",
+      "tgt": "",
+      "regex": true,
+      "note": "CHARSET 제거",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_character_set_remove",
+      "src": "\\s*CHARACTER\\s+SET\\s+\\w+",
+      "tgt": "",
+      "regex": true,
+      "note": "CHARACTER SET 제거",
+      "category": "FUNCTION_STRING"
+    },
+    {
+      "id": "fn_collate_remove",
+      "src": "\\s*COLLATE\\s+\\w+",
+      "tgt": "",
+      "regex": true,
+      "note": "COLLATE 제거",
+      "category": "FUNCTION_STRING"
+    }
+  ]
+}

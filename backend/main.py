@@ -1,0 +1,394 @@
+"""
+main.py
+DataBridge Studio v2.0 — FastAPI 애플리케이션 진입점
+"""
+
+import os
+import re
+import logging
+import traceback
+from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+# ── .env 로드 ─────────────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# ── 로깅 설정 ─────────────────────────────────────────────────────
+def setup_logging():
+    """
+    logs/databridge.log 로 통합 로깅
+    - 콘솔: INFO 이상
+    - 파일: DEBUG 이상 (최대 10MB × 5개 롤링)
+    """
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "databridge.log"
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 루트 로거
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # 콘솔 핸들러 (INFO+)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+
+    # 파일 핸들러 (DEBUG+, 10MB × 5)
+    fh = RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5,
+        encoding="utf-8"
+    )
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+
+    # 기존 핸들러 제거 후 추가
+    root.handlers.clear()
+    root.addHandler(ch)
+    root.addHandler(fh)
+
+    # uvicorn / fastapi 로거도 파일로 전달
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.propagate = True
+
+    logging.info("DataBridge Studio v2.0 로깅 시작 → %s", log_file)
+    return log_file
+
+LOG_FILE = setup_logging()
+logger   = logging.getLogger("databridge.main")
+
+# ── pyodbc 패치 ───────────────────────────────────────────────────
+def _patch_pyodbc():
+    try:
+        import pyodbc
+        _orig_connect = pyodbc.connect
+
+        def _patched_connect(dsn_or_str, *args, **kwargs):
+            s = str(dsn_or_str)
+            s = re.sub(r';?Encrypt=[^;]+', '', s)
+            s = re.sub(r';?Connection Timeout=\d+', '', s)
+            s = s.rstrip(';')
+            if 'TrustServerCertificate' not in s:
+                s += ';TrustServerCertificate=yes;'
+            if 'ODBC Driver 18 for SQL Server' in s:
+                drivers = [d for d in pyodbc.drivers() if 'SQL Server' in d]
+                if drivers and 'ODBC Driver 18 for SQL Server' not in drivers:
+                    preferred = next(
+                        (d for d in ('ODBC Driver 17 for SQL Server', 'SQL Server')
+                         if d in drivers),
+                        drivers[0]
+                    )
+                    s = s.replace('ODBC Driver 18 for SQL Server', preferred)
+            kwargs.pop('timeout', None)
+            logger.debug("PYODBC connect → %s", s[:120])
+            return _orig_connect(s, *args, **kwargs)
+
+        pyodbc.connect = _patched_connect
+        logger.info("pyodbc 패치 완료")
+    except ImportError:
+        logger.warning("pyodbc 없음 — MSSQL 연결 불가")
+
+# ── 라우터 import ─────────────────────────────────────────────────
+from app.api.routes import (
+    connector, jobs, schema, mapping, validate,
+    report, settings, sql_converter, obj_mapping, ai_assistant, cdc,
+    auth as auth_routes, audit_routes, license_routes,
+    kb,              # v10 #17: 에러 프롬프트 지식 베이스
+    health_metrics,  # v10 #21: 상세 헬스체크 + Prometheus /metrics
+    advisor,         # v88 P1: AI DBA Consultant Wizard (Stage 4)
+    pii,             # v89 (Phase F-1f): PII Privacy Scanner
+    adaptive_resource,  # v89 (Phase I): Adaptive Resource Control
+)
+from app.websocket.ws_router import router as ws_router
+
+# ── 라이프사이클 ──────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _patch_pyodbc()
+    logger.info("DataBridge Studio API 시작")
+
+    # ── v10 #21: 전역 PII 마스킹 필터 설치 ──────────────────────
+    # 로그에 주민번호/카드/계좌 등 민감정보가 찍히는 사고 방지.
+    # 모든 logger 로 가는 메시지의 PII 가 * 로 자동 치환됨.
+    try:
+        from app.core.pii_masker import install_global_pii_filter
+        install_global_pii_filter()
+    except Exception as e:
+        logger.warning("PII 필터 설치 실패 (무시하고 진행): %s", e)
+
+    # ── 암호화 인프라 초기화 & 기존 평문 데이터 마이그레이션 ────
+    try:
+        from app.core.crypto import is_available, migrate_store_passwords, encrypt as _enc, is_encrypted as _is_enc
+        if is_available():
+            logger.info("암호화 모듈 준비 완료 (Fernet)")
+            # 기존 평문 저장 데이터가 있으면 자동 암호화 업그레이드
+            try:
+                # profiles.json : 엔트리 내부의 source.password / target.password
+                n1 = migrate_store_passwords("profiles", ["source.password", "target.password"])
+                # jobs.json : 엔트리 내부의 src_password / tgt_password
+                n2 = migrate_store_passwords("jobs", ["src_password", "tgt_password"])
+                # settings.json : 구조가 다름 — {"config": {...}} 한 덩어리
+                # 엔트리 "config"의 내부 필드 anthropic_api_key만 암호화
+                n3 = 0
+                from app.core.store import Store as _S
+                _sstore = _S("settings")
+                _scfg = _sstore.get("config", None)
+                if isinstance(_scfg, dict):
+                    _ak = _scfg.get("anthropic_api_key", "")
+                    if isinstance(_ak, str) and _ak and not _is_enc(_ak):
+                        _scfg["anthropic_api_key"] = _enc(_ak)
+                        _sstore.set("config", _scfg)
+                        n3 = 1
+                if (n1 + n2 + n3) > 0:
+                    logger.warning(
+                        "평문 데이터 → 암호문 마이그레이션 완료: profiles=%d, jobs=%d, settings_api_key=%d",
+                        n1, n2, n3,
+                    )
+            except Exception as _me:
+                logger.warning("암호화 마이그레이션 실패 (기존 데이터는 그대로 유지): %s", _me)
+        else:
+            logger.warning(
+                "암호화 모듈 사용 불가 — 'pip install cryptography' 권장. "
+                "현재 비밀번호가 평문으로 저장됩니다."
+            )
+    except Exception as e:
+        logger.warning("암호화 초기화 실패 (무시): %s", e)
+
+    # v9 패치 #58: CDC configs 에 '__new__' 같은 잘못된 ID 로 저장된 설정 자동 정리
+    # (이전 프론트 버그로 ID='__new__' 가 실제로 저장되는 경우 있었음 → 편집 시 레이어 2개 열림)
+    try:
+        from app.core.store import Store as _CStore
+        _cstore = _CStore("cdc_configs")
+        _bad_ids = [k for k in list(_cstore.all().keys()) if k in ("__new__", "", None)]
+        for _bid in _bad_ids:
+            _cstore.delete(_bid)
+        if _bad_ids:
+            logger.warning("CDC configs 에서 잘못된 ID 자동 정리: %s", _bad_ids)
+    except Exception as _ce:
+        logger.warning("CDC configs 정리 실패 (무시): %s", _ce)
+
+    # ── 스케줄러 엔진 초기화 ─────────────────────────────────────
+    try:
+        from app.scheduler.engine import get_engine
+        from app.api.routes.jobs import _run_scheduled, _schedules
+        engine = get_engine()
+        engine.set_run_fn(_run_scheduled)
+        # 기존 활성 스케줄 복원
+        existing = [s for s in _schedules.values()
+                    if s.get("status") not in ("done","error","deleted")]
+        engine.load_existing(existing)
+        logger.info("스케줄러 초기화 완료 — 활성 스케줄 %d개 복원", len(existing))
+    except Exception as e:
+        logger.warning("스케줄러 초기화 실패 (무시): %s", e)
+
+    # ── RBAC 초기화 ──────────────────────────────────────────────
+    # 사용자가 한 명도 없으면 기본 admin 생성 (임시 비번 로그 출력).
+    # 만료된 세션 정리.
+    try:
+        from app.core import auth as _auth
+        _auth.ensure_default_admin()
+        removed = _auth.cleanup_expired_sessions()
+        if removed > 0:
+            logger.info("만료 세션 %d개 정리됨", removed)
+    except Exception as e:
+        logger.warning("RBAC 초기화 실패 (무시): %s", e)
+
+    # ── 라이선스 로드 ────────────────────────────────────────────
+    # 기동 시 1회 로드. 라이선스 파일 없으면 community 모드로 동작.
+    try:
+        from app.core import license as _license
+        lic = _license.load_license()
+        logger.info("라이선스: %s edition — %s", lic.edition, lic.customer)
+        if lic.warning:
+            logger.warning("라이선스 경고: %s", lic.warning)
+    except Exception as e:
+        logger.warning("라이선스 로드 실패 (community 폴백): %s", e)
+
+    yield
+
+    # ── 스케줄러 종료 ─────────────────────────────────────────────
+    try:
+        from app.scheduler.engine import get_engine
+        get_engine().shutdown()
+    except Exception:
+        pass
+    # ── SQLite WAL 체크포인트 & 커넥션 종료 ────────────────────
+    try:
+        from app.core.store import close_all
+        close_all()
+    except Exception:
+        pass
+    logger.info("DataBridge Studio API 종료")
+
+# ── FastAPI 앱 ────────────────────────────────────────────────────
+app = FastAPI(
+    title="DataBridge Studio API",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+# ── 대용량 요청 허용 (SQL 파일 변환용: 최대 50MB) ─────────────────
+# uvicorn 기본값 1MB → 748KB 파일 업로드 오류 방지
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class LargeBodyMiddleware(BaseHTTPMiddleware):
+    """HTTP body 크기 제한을 50MB로 상향 (SQL 대용량 파일 처리용)"""
+    MAX_BODY = 50 * 1024 * 1024  # 50MB
+
+    async def dispatch(self, request, call_next):
+        if request.method in ("POST", "PUT", "PATCH"):
+            content_length = request.headers.get("content-length")
+            if content_length and int(content_length) > self.MAX_BODY:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": f"요청 크기 초과 (최대 {self.MAX_BODY // 1024 // 1024}MB)"}
+                )
+        return await call_next(request)
+
+app.add_middleware(LargeBodyMiddleware)
+
+# ── 전역 예외 핸들러 ──────────────────────────────────────────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    logger.error("Unhandled exception [%s %s]: %s", request.method, request.url.path, tb)
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+# ── 요청 로깅 미들웨어 ────────────────────────────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    import time
+    t0 = time.monotonic()
+    response = await call_next(request)
+    elapsed = round((time.monotonic() - t0) * 1000)
+    if request.url.path not in ("/health", "/ws"):
+        logger.info("%s %s → %d (%dms)",
+                    request.method, request.url.path,
+                    response.status_code, elapsed)
+    return response
+
+# ── 로그 조회 API ─────────────────────────────────────────────────
+@app.get("/api/v1/logs")
+def get_logs(lines: int = 200, level: str = "ALL"):
+    """
+    최근 로그 lines 줄 반환
+    level: ALL | ERROR | WARNING | INFO | DEBUG
+    """
+    try:
+        if not LOG_FILE.exists():
+            return {"lines": [], "total": 0, "file": str(LOG_FILE)}
+        with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+
+        if level != "ALL":
+            all_lines = [l for l in all_lines if f"[{level}]" in l]
+
+        recent = all_lines[-lines:]
+        return {
+            "lines": [l.rstrip() for l in recent],
+            "total": len(all_lines),
+            "file": str(LOG_FILE),
+        }
+    except Exception as e:
+        logger.error("로그 조회 오류: %s", e)
+        return {"lines": [f"로그 조회 오류: {e}"], "total": 0, "file": str(LOG_FILE)}
+
+@app.delete("/api/v1/logs")
+def clear_logs():
+    """로그 파일 초기화"""
+    try:
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+        logger.info("로그 초기화됨")
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+# ── REST 라우터 등록 ──────────────────────────────────────────────
+P = "/api/v1"
+app.include_router(connector.router,     prefix=P + "/connectors",   tags=["Connector"])
+app.include_router(jobs.router,          prefix=P + "/jobs",          tags=["Jobs"])
+app.include_router(schema.router,        prefix=P + "/schema",        tags=["Schema"])
+app.include_router(mapping.router,       prefix=P + "/mapping",       tags=["Mapping"])
+app.include_router(validate.router,      prefix=P + "/validate",      tags=["Validate"])
+app.include_router(report.router,        prefix=P + "/report",        tags=["Report"])
+app.include_router(settings.router,      prefix=P + "/settings",      tags=["Settings"])
+app.include_router(sql_converter.router, prefix=P + "/sql-converter", tags=["SQL Converter"])
+app.include_router(obj_mapping.router,   prefix=P + "/obj-mapping",   tags=["ObjectMapping"])
+app.include_router(ai_assistant.router,  prefix=P + "/ai",            tags=["AI Assistant"])
+app.include_router(cdc.router,           prefix=P + "/cdc",           tags=["CDC"])
+app.include_router(ws_router,            prefix="/ws")
+app.include_router(auth_routes.router,   prefix=P + "/auth",          tags=["Auth"])
+app.include_router(audit_routes.router,  prefix=P + "/audit",         tags=["Audit"])
+app.include_router(license_routes.router, prefix=P + "/license",      tags=["License"])
+# v10 #17: 에러 프롬프트 지식 베이스 (KB)
+app.include_router(kb.router,             prefix=P,                    tags=["KB"])
+# v10 #21: 상세 헬스체크 + Prometheus 메트릭
+# - /api/v1/health/detailed (인증 의존성은 라우터 내부에서 필요 시 추가)
+# - /metrics (루트 경로, Prometheus exporter 관례. 운영 시 방화벽/IP 제한 권장)
+app.include_router(health_metrics.router,         prefix=P,    tags=["Health"])
+app.include_router(health_metrics.metrics_router,              tags=["Metrics"])
+
+# v88 P1: AI DBA Consultant Wizard (Stage 4)
+# - /api/v1/advisor/estimate-cost     (구현 완료)
+# - /api/v1/advisor/analyze           (P1: placeholder, P2~P5 에서 실제 구현)
+# - /api/v1/advisor/refine            (P2+ 예정)
+# - /api/v1/advisor/apply-decision    (P6 예정)
+app.include_router(advisor.router,    prefix=P + "/advisor",   tags=["AI DBA Advisor"])
+
+# ── v90.5: 사용자 환경설정 (시나리오/DB 사용 이력) ──
+from app.api.routes import user_preferences
+app.include_router(user_preferences.router, prefix="/api/v1/user/preferences", tags=["User Preferences"])
+
+# ── v89 (Phase F-1f): PII Privacy Scanner ─────────────────────────
+# 엔드포인트:
+# - /api/v1/pii/presets          (마스킹 정책 7가지)
+# - /api/v1/pii/scan             (PII 자동 탐지 + 자동 샘플링)
+# - /api/v1/pii/preview          (마스킹 미리보기)
+# - /api/v1/pii/generate-sql     (마스킹 SQL 생성)
+# - /api/v1/pii/apply-policies   (정책 적용)
+app.include_router(pii.router,        prefix=P + "/pii",       tags=["PII Privacy"])
+
+# ── v89 (Phase I): Adaptive Resource Control ──────────────────────
+# 엔드포인트:
+# - /api/v1/jobs/{id}/resource/status, throttle, mode, pause, resume, decisions
+# - WebSocket: /api/v1/jobs/{id}/resource/stream
+app.include_router(adaptive_resource.router, prefix=P,           tags=["Adaptive Resource"])
+
+# ── v89.8 (Phase A-1): 실시간 멀티 타겟 모니터 ──
+# 엔드포인트: /api/v1/system/live, /api/v1/system/targets 등
+# FloatingMonitor.vue 컴포넌트가 사용
+from app.api.routes import system_live as system_live_routes
+app.include_router(system_live_routes.router, prefix=P, tags=["System Monitor"])
+
+# ── 헬스체크 ─────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    return {
+        "ok": True, "version": "2.0.0",
+        "api_key": bool(api_key and api_key != "ollama"),
+        "log_file": str(LOG_FILE),
+    }

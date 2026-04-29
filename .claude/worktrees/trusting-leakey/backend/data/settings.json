@@ -1,0 +1,18 @@
+{
+  "config": {
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "log_level": "DEBUG",
+    "log_retention_days": 30,
+    "notify_email": false,
+    "notify_slack": false,
+    "on_error": "skip",
+    "retry_count": 3,
+    "backend_log_file": "./logs/databridge_backend.log",
+    "frontend_log_file": "./logs/databridge_frontend.log",
+    "log_format": "TEXT",
+    "log_max_mb": 50,
+    "log_backup_count": 5,
+    "anthropic_api_key": "ollama"
+  }
+}

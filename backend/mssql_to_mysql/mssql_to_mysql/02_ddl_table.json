@@ -1,0 +1,331 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL DDL 테이블 구조 변환",
+    "category": "DDL_TABLE",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "CREATE/ALTER TABLE, 제약조건, 인덱스 변환"
+  },
+  "rules": [
+    {
+      "id": "ddl_create_table_check",
+      "src": "IF OBJECT_ID(N'[dbo].[table]', N'U') IS NULL CREATE TABLE [dbo].[table]",
+      "tgt": "CREATE TABLE IF NOT EXISTS `table`",
+      "note": "MSSQL 테이블 존재 확인 패턴 → IF NOT EXISTS",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_create_table",
+      "src": "CREATE TABLE [dbo].[table_name]",
+      "tgt": "CREATE TABLE `table_name`",
+      "note": "dbo 스키마 제거, 대괄호→백틱",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_table_engine",
+      "src": "(끝에 추가)",
+      "tgt": "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+      "note": "MySQL은 ENGINE 지정 필요. InnoDB = FK/트랜잭션 지원",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_pk_constraint",
+      "src": "CONSTRAINT [PK_table] PRIMARY KEY ([col1], [col2])",
+      "tgt": "PRIMARY KEY (`col1`, `col2`)",
+      "note": "PK 제약조건명 제거 (MySQL은 PRIMARY KEY 이름 변경 불가)",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_pk_clustered",
+      "src": "PRIMARY KEY CLUSTERED ([col] ASC)",
+      "tgt": "PRIMARY KEY (`col`)",
+      "note": "CLUSTERED 키워드 제거 — MySQL InnoDB는 항상 클러스터드",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_pk_nonclustered",
+      "src": "PRIMARY KEY NONCLUSTERED",
+      "tgt": "PRIMARY KEY",
+      "note": "NONCLUSTERED 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_unique_constraint",
+      "src": "CONSTRAINT [UQ_name] UNIQUE ([col])",
+      "tgt": "UNIQUE KEY `UQ_name` (`col`)",
+      "note": "UNIQUE 제약조건 → UNIQUE KEY",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_unique_nonclustered",
+      "src": "UNIQUE NONCLUSTERED ([col] ASC)",
+      "tgt": "UNIQUE (`col`)",
+      "note": "NONCLUSTERED UNIQUE → UNIQUE",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_fk_constraint",
+      "src": "CONSTRAINT [FK_name] FOREIGN KEY ([col]) REFERENCES [dbo].[ref_table] ([ref_col])",
+      "tgt": "CONSTRAINT `FK_name` FOREIGN KEY (`col`) REFERENCES `ref_table` (`ref_col`)",
+      "note": "FK 제약조건 — dbo 스키마 제거, 대괄호→백틱",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_fk_on_delete_cascade",
+      "src": "ON DELETE CASCADE",
+      "tgt": "ON DELETE CASCADE",
+      "note": "ON DELETE CASCADE OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_fk_on_delete_set_null",
+      "src": "ON DELETE SET NULL",
+      "tgt": "ON DELETE SET NULL",
+      "note": "ON DELETE SET NULL OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_fk_on_delete_set_default",
+      "src": "ON DELETE SET DEFAULT",
+      "tgt": "ON DELETE SET DEFAULT",
+      "note": "ON DELETE SET DEFAULT OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_fk_on_delete_no_action",
+      "src": "ON DELETE NO ACTION",
+      "tgt": "ON DELETE RESTRICT",
+      "note": "NO ACTION → RESTRICT (동일 동작)",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_fk_on_update_cascade",
+      "src": "ON UPDATE CASCADE",
+      "tgt": "ON UPDATE CASCADE",
+      "note": "ON UPDATE CASCADE OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_check_constraint",
+      "src": "CONSTRAINT [CK_name] CHECK ([col] > 0)",
+      "tgt": "CONSTRAINT `CK_name` CHECK (`col` > 0)",
+      "note": "CHECK 제약조건 — MySQL 8.0.16+ 지원. 이전 버전은 파싱만 하고 무시",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_default_getdate",
+      "src": "DEFAULT (GETDATE())",
+      "tgt": "DEFAULT CURRENT_TIMESTAMP",
+      "note": "GETDATE() 기본값 → CURRENT_TIMESTAMP",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_default_newid",
+      "src": "DEFAULT (NEWID())",
+      "tgt": "DEFAULT (UUID())",
+      "note": "NEWID() → UUID(). MySQL 8.0+에서 DEFAULT (UUID()) 가능",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_default_newsequentialid",
+      "src": "DEFAULT (NEWSEQUENTIALID())",
+      "tgt": "DEFAULT (UUID())",
+      "note": "NEWSEQUENTIALID() → UUID(). 순서 보장 안 됨",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_not_null",
+      "src": "NOT NULL",
+      "tgt": "NOT NULL",
+      "note": "NOT NULL OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_null",
+      "src": "NULL",
+      "tgt": "NULL",
+      "note": "NULL OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_with_nocheck",
+      "src": "WITH NOCHECK",
+      "tgt": "-- WITH NOCHECK 제거 (MySQL 미지원)",
+      "note": "MySQL은 기존 데이터 무시하고 FK 추가 기능 없음",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_alter_table_add_column",
+      "src": "ALTER TABLE [dbo].[table] ADD [col] NVARCHAR(100) NULL",
+      "tgt": "ALTER TABLE `table` ADD COLUMN `col` VARCHAR(100) NULL",
+      "note": "컬럼 추가 — ADD → ADD COLUMN",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_alter_table_alter_column",
+      "src": "ALTER TABLE [table] ALTER COLUMN [col] INT NOT NULL",
+      "tgt": "ALTER TABLE `table` MODIFY COLUMN `col` INT NOT NULL",
+      "note": "ALTER COLUMN → MODIFY COLUMN",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_alter_table_drop_column",
+      "src": "ALTER TABLE [table] DROP COLUMN [col]",
+      "tgt": "ALTER TABLE `table` DROP COLUMN `col`",
+      "note": "DROP COLUMN OK",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_alter_table_add_constraint",
+      "src": "ALTER TABLE [dbo].[table] ADD CONSTRAINT [PK_name] PRIMARY KEY ([col])",
+      "tgt": "ALTER TABLE `table` ADD PRIMARY KEY (`col`)",
+      "note": "PK 추가 — 제약조건명 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_alter_table_drop_constraint",
+      "src": "ALTER TABLE [table] DROP CONSTRAINT [FK_name]",
+      "tgt": "ALTER TABLE `table` DROP FOREIGN KEY `FK_name`",
+      "note": "DROP CONSTRAINT → DROP FOREIGN KEY / DROP INDEX (제약 유형에 따라)",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_create_index",
+      "src": "CREATE INDEX [IX_name] ON [dbo].[table] ([col] ASC)",
+      "tgt": "CREATE INDEX `IX_name` ON `table` (`col` ASC)",
+      "note": "인덱스 생성 — dbo 제거, 대괄호→백틱",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_create_unique_index",
+      "src": "CREATE UNIQUE INDEX [IX_name] ON [dbo].[table] ([col])",
+      "tgt": "CREATE UNIQUE INDEX `IX_name` ON `table` (`col`)",
+      "note": "UNIQUE 인덱스 생성",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_create_nonclustered_index",
+      "src": "CREATE NONCLUSTERED INDEX [IX_name] ON [dbo].[table] ([col])",
+      "tgt": "CREATE INDEX `IX_name` ON `table` (`col`)",
+      "note": "NONCLUSTERED 키워드 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_create_clustered_index",
+      "src": "CREATE CLUSTERED INDEX [IX_name] ON [dbo].[table] ([col])",
+      "tgt": "-- CLUSTERED INDEX는 MySQL에서 별도 생성 불가. InnoDB는 PK가 클러스터드\n-- CREATE INDEX `IX_name` ON `table` (`col`);",
+      "note": "클러스터드 인덱스는 MySQL에서 PK만 가능. 비클러스터드로 대체",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_include_columns",
+      "src": "CREATE INDEX [IX_name] ON [table] ([col]) INCLUDE ([col2])",
+      "tgt": "CREATE INDEX `IX_name` ON `table` (`col`, `col2`)",
+      "note": "INCLUDE 컬럼 → 인덱스에 포함. MySQL은 커버링 인덱스로 자동 처리",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_filtered_index",
+      "src": "CREATE INDEX [IX_name] ON [table] ([col]) WHERE [col] IS NOT NULL",
+      "tgt": "CREATE INDEX `IX_name` ON `table` (`col`)",
+      "note": "필터 인덱스(WHERE절) → MySQL 미지원. 부분 인덱스 제거",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_drop_table",
+      "src": "IF OBJECT_ID(N'[dbo].[table]', N'U') IS NOT NULL DROP TABLE [dbo].[table]",
+      "tgt": "DROP TABLE IF EXISTS `table`",
+      "note": "MSSQL 테이블 삭제 존재 확인 패턴 → DROP TABLE IF EXISTS",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_truncate",
+      "src": "TRUNCATE TABLE [dbo].[table]",
+      "tgt": "TRUNCATE TABLE `table`",
+      "note": "TRUNCATE OK — FK가 있으면 SET FOREIGN_KEY_CHECKS=0 먼저 필요",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_schema_prefix",
+      "src": "[dbo].",
+      "tgt": "",
+      "note": "dbo 스키마 접두사 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_bracket_to_backtick",
+      "src": "[identifier]",
+      "tgt": "`identifier`",
+      "note": "MSSQL 대괄호 식별자 → MySQL 백틱",
+      "regex": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_with_fillfactor",
+      "src": "WITH (FILLFACTOR = n)",
+      "tgt": "-- WITH (FILLFACTOR) 제거",
+      "note": "FILLFACTOR → MySQL 미지원",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_with_padindex",
+      "src": "WITH (PAD_INDEX = ON)",
+      "tgt": "",
+      "note": "PAD_INDEX → MySQL 미지원, 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_on_primary",
+      "src": "ON [PRIMARY]",
+      "tgt": "",
+      "note": "파일그룹 지정 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_textimage_on",
+      "src": "TEXTIMAGE_ON [PRIMARY]",
+      "tgt": "",
+      "note": "TEXTIMAGE_ON 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_asc_desc_in_pk",
+      "src": "ASC) WITH (PAD_INDEX",
+      "tgt": "ASC)",
+      "note": "인덱스 WITH 옵션 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_computed_column",
+      "src": "[col] AS ([expr])",
+      "tgt": "`col` DECIMAL(x,y) GENERATED ALWAYS AS (expr) STORED",
+      "note": "계산 열 → MySQL 8.0+ GENERATED COLUMNS. 타입과 표현식 수동 확인 필요",
+      "warning": true,
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_sparse_column",
+      "src": "[col] NVARCHAR(100) SPARSE NULL",
+      "tgt": "`col` VARCHAR(100) NULL",
+      "note": "SPARSE 키워드 → MySQL 미지원, 제거",
+      "category": "DDL_TABLE"
+    },
+    {
+      "id": "ddl_rowguid",
+      "src": "ROWGUIDCOL",
+      "tgt": "",
+      "note": "ROWGUIDCOL → MySQL 미지원, 제거",
+      "category": "DDL_TABLE"
+    }
+  ]
+}

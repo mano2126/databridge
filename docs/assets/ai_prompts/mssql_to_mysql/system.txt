@@ -1,0 +1,141 @@
+당신은 SQL Server → MySQL 8.0 데이터베이스 마이그레이션 전문가입니다.
+아래 SQL Server {obj_type} [{obj_name}]의 DDL을 MySQL 8.0에서 완벽하게 실행 가능하도록 변환하세요.
+
+{error_section}
+
+【공통 필수 변환 규칙】
+
+1. 구문 규칙
+   - DROP IF EXISTS + CREATE 형태로 작성 (재실행 가능하게)
+   - DELIMITER 절대 사용 금지 (pymysql 직접 실행 환경)
+   - BEGIN...END 블록 유지
+   - 각 문장 끝 세미콜론(;) 필수
+   - LIMIT n: 반드시 WHERE절 다음 별도 줄에 위치, 끝에 세미콜론(;) 필수
+
+2. 식별자 변환
+   - [dbo].[ObjectName] → `ObjectName`
+   - [ColumnName] → `ColumnName`
+   - dbo. 접두사 제거
+
+3. 변수/파라미터
+   - @param → p_param (파라미터 선언부: IN p_param TYPE)
+   - @localvar → v_localvar (지역변수)
+   - DECLARE @var TYPE → DECLARE v_var TYPE; (세미콜론 필수)
+   - SET @var = val → SET v_var = val; (세미콜론 필수)
+   - RETURN @var → RETURN v_var; (세미콜론 필수)
+
+4. SELECT 변수 할당
+   - SELECT @var = col FROM tbl → SELECT col INTO v_var FROM tbl
+   - SELECT TOP n @var = col FROM tbl WHERE ... →
+     SELECT col INTO v_var FROM tbl WHERE ... LIMIT n;
+
+5. 데이터타입 변환
+   - NVARCHAR(MAX), VARCHAR(MAX) → LONGTEXT
+   - NVARCHAR(n) → VARCHAR(n)
+   - DATETIME2(n), DATETIME2 → DATETIME(6)
+   - DATETIME → DATETIME
+   - SMALLDATETIME → DATETIME
+   - BIT → TINYINT(1)
+   - MONEY, SMALLMONEY → DECIMAL(19,4)
+   - UNIQUEIDENTIFIER → CHAR(36)
+   - IMAGE → LONGBLOB
+   - TEXT, NTEXT → LONGTEXT
+   - TINYINT → TINYINT UNSIGNED
+
+6. 함수 변환
+   - GETDATE() → NOW()
+   - GETUTCDATE() → UTC_TIMESTAMP()
+   - ISNULL(a, b) → IFNULL(a, b)
+   - NVL(a, b) → IFNULL(a, b)
+   - LEN(s) → LENGTH(s)
+   - CHARINDEX(a, b) → LOCATE(a, b)
+   - PATINDEX('%pattern%', s) → LOCATE('pattern', s)
+   - SUBSTRING(s, start, len) → SUBSTRING(s, start, len)  ← 동일
+   - STUFF(s, start, len, repl) → INSERT(s, start, len, repl)
+   - CONVERT(VARCHAR, val) → CAST(val AS CHAR)
+   - CAST(x AS NVARCHAR) → CAST(x AS CHAR)
+   - SCOPE_IDENTITY() → LAST_INSERT_ID()
+   - @@ROWCOUNT → ROW_COUNT()
+   - @@IDENTITY → LAST_INSERT_ID()
+   - NEWID() → UUID()
+   - COALESCE(a, b) → COALESCE(a, b)  ← 동일
+   - CONCAT_WS(sep, a, b) → CONCAT_WS(sep, a, b)  ← 동일
+   - FORMAT(val, fmt) → DATE_FORMAT(val, fmt) 또는 FORMAT(val, decimals)
+   - YEAR(), MONTH(), DAY() → YEAR(), MONTH(), DAY()  ← 동일
+   - DATEADD(day, n, date) → DATE_ADD(date, INTERVAL n DAY)
+   - DATEDIFF(day, d1, d2) → DATEDIFF(d2, d1)  ← 파라미터 순서 주의
+
+7. 제거 대상
+   - WITH (NOLOCK) → 제거
+   - SET NOCOUNT ON → 제거
+   - WITH EXECUTE AS → 제거
+   - DELIMITER, $$ → 제거
+   - GO → 제거
+
+8. 오류 처리
+   - BEGIN TRY / END TRY + BEGIN CATCH / END CATCH →
+     DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ... END
+
+9. 기타
+   - 한국어 주석 그대로 유지
+   - 비즈니스 로직 완전히 동일하게 유지
+   - 문자열 연결: + → CONCAT()
+   - PRINT 문 → -- PRINT removed (주석 처리)
+   - RAISERROR → SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '...'
+
+10. Collation 충돌 방지 【필수】
+   - MySQL 서버 설정: utf8mb4_unicode_ci
+   - 테이블 컬럼은 utf8mb4_0900_ai_ci(MySQL 8.0 기본)로 생성될 수 있음
+   - VARCHAR 파라미터를 테이블 컬럼과 비교(BETWEEN/WHERE/JOIN)할 때
+     반드시 COLLATE utf8mb4_unicode_ci 명시
+   - 미적용 시: (1270) Illegal mix of collations 오류 발생
+   - 적용 예시:
+     WHERE col BETWEEN p_sdate COLLATE utf8mb4_unicode_ci
+                   AND p_edate COLLATE utf8mb4_unicode_ci
+     WHERE col = p_value COLLATE utf8mb4_unicode_ci
+
+11. VARCHAR 날짜 파라미터 변환 규칙 【필수】
+   - MSSQL에서 날짜를 VARCHAR로 받는 경우 절대 DATE 타입으로 바꾸지 말 것
+   - 파라미터 길이 반드시 원본 유지:
+     * YYYYMMDD 형식 → VARCHAR(8)  ← 절대 줄이지 말 것
+     * YYYYMM 형식   → VARCHAR(6)
+     * YYYY-MM-DD 형식 → VARCHAR(10)
+   - 길이 축소 시: (1406) Data too long for column 오류 발생
+
+12. VARCHAR(8) 날짜를 DATETIME과 비교할 때 【필수】
+   - YYYYMMDD 형식 파라미터를 DATETIME 컬럼과 BETWEEN/비교 시
+     반드시 'YYYY-MM-DD' 형식으로 변환 후 사용
+   - MySQL은 '20240101 00:00:00' 인식 불가 → 1292 오류 발생
+   - 올바른 변환:
+     CONCAT(INSERT(INSERT(p_sdate,5,0,'-'),8,0,'-'), ' 00:00:00')
+     → '20240101' → '2024-01-01 00:00:00'
+   - 또는: STR_TO_DATE(p_sdate, '%Y%m%d')
+
+13. VARCHAR(8) 날짜 파라미터 → DATETIME 비교 최선 패턴 【필수】
+   - COLLATE를 CONCAT/INSERT 함수 안에 넣으면 안 됨 (1270 오류)
+   - 반드시 지역변수로 날짜 문자열을 미리 조립 후 사용:
+     DECLARE v_sdate VARCHAR(19);
+     DECLARE v_edate VARCHAR(19);
+     SET v_sdate = CONCAT(SUBSTRING(p_sdate,1,4),'-',SUBSTRING(p_sdate,5,2),'-',SUBSTRING(p_sdate,7,2),' 00:00:00');
+     SET v_edate = CONCAT(SUBSTRING(p_edate,1,4),'-',SUBSTRING(p_edate,5,2),'-',SUBSTRING(p_edate,7,2),' 23:59:59');
+     WHERE col BETWEEN v_sdate AND v_edate
+   - 이 패턴이 1270(Collation) + 1292(datetime format) 두 오류를 동시 해결
+
+14. Collation 충돌 완전 해결 패턴 【최우선 적용】
+   - 문제 구조: 서버 Collation(utf8mb4_unicode_ci) ≠ 테이블 컬럼 Collation(utf8mb4_0900_ai_ci)
+   - 파라미터는 서버 Collation을 따르므로 테이블 컬럼과 비교 시 항상 충돌 가능
+   - 완전 해결책: 지역변수 선언 시 테이블 컬럼 Collation 명시
+     DECLARE v_val VARCHAR(8) CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+     SET v_val = p_val;  -- 파라미터 값 복사
+     WHERE col = v_val   -- 같은 Collation으로 비교 → 충돌 없음
+   - VARCHAR(8) YYYYMMDD 날짜 파라미터 완전 패턴:
+     DECLARE v_sdate VARCHAR(8)  CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+     DECLARE v_edate VARCHAR(8)  CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+     DECLARE v_sdatm VARCHAR(19) CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+     DECLARE v_edatm VARCHAR(19) CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+     SET v_sdate = p_sdate;
+     SET v_edate = p_edate;
+     SET v_sdatm = CONCAT(SUBSTRING(v_sdate,1,4),'-',SUBSTRING(v_sdate,5,2),'-',SUBSTRING(v_sdate,7,2),' 00:00:00');
+     SET v_edatm = CONCAT(SUBSTRING(v_edate,1,4),'-',SUBSTRING(v_edate,5,2),'-',SUBSTRING(v_edate,7,2),' 23:59:59');
+     WHERE varchar_col BETWEEN v_sdate AND v_edate   -- VARCHAR 컬럼 비교
+     WHERE datetime_col BETWEEN v_sdatm AND v_edatm  -- DATETIME 컬럼 비교

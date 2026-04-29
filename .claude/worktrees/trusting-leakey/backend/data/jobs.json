@@ -1,0 +1,312 @@
+{
+  "37a92a68-24dd-4fc4-b9ce-b8c07390065f": {
+    "id": "37a92a68-24dd-4fc4-b9ce-b8c07390065f",
+    "name": "sakila → target_db 이관",
+    "status": "completed",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "src_host": "",
+    "src_database": "",
+    "tgt_host": "",
+    "tgt_database": "",
+    "tables": [],
+    "progress": 100,
+    "rows_processed": 311915,
+    "rows_total": 311915,
+    "rows_error": 0,
+    "speed": 0,
+    "table_done": 0,
+    "table_total": 0,
+    "current_table": "",
+    "current_table_rows_done": 0,
+    "current_table_rows_total": 0,
+    "created_at": "2026-03-29T13:16:13.683652",
+    "started_at": null,
+    "finished_at": "2026-03-29T13:16:13.683652",
+    "error_message": null,
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "on_error": "skip",
+    "truncate_target": false,
+    "create_table": true,
+    "src_username": "",
+    "src_password": "",
+    "tgt_username": "",
+    "tgt_password": ""
+  },
+  "a7cfdf11-269c-484e-a6a0-c3a3a0985c02": {
+    "id": "a7cfdf11-269c-484e-a6a0-c3a3a0985c02",
+    "name": "oracle_hr → postgresql",
+    "status": "idle",
+    "src_db": "oracle",
+    "tgt_db": "postgresql",
+    "src_host": "",
+    "src_database": "",
+    "tgt_host": "",
+    "tgt_database": "",
+    "tables": [],
+    "progress": 0,
+    "rows_processed": 0,
+    "rows_total": 216711,
+    "rows_error": 0,
+    "speed": 0,
+    "table_done": 0,
+    "table_total": 0,
+    "current_table": "",
+    "current_table_rows_done": 0,
+    "current_table_rows_total": 0,
+    "created_at": "2026-03-29T13:16:13.684654",
+    "started_at": null,
+    "finished_at": null,
+    "error_message": null,
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "on_error": "skip",
+    "truncate_target": false,
+    "create_table": true,
+    "src_username": "",
+    "src_password": "",
+    "tgt_username": "",
+    "tgt_password": ""
+  },
+  "30534b25-3ada-4322-be2e-7aac340eb110": {
+    "id": "30534b25-3ada-4322-be2e-7aac340eb110",
+    "name": "mgtest → mgtest 이관",
+    "status": "aborted",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_host": "127.0.0.1",
+    "src_database": "mgtest",
+    "tgt_host": "127.0.0.1",
+    "tgt_database": "mgtest",
+    "tables": [
+      "CustomerLog",
+      "Customers",
+      "Orders",
+      "Products",
+      "Users"
+    ],
+    "progress": 300300.0,
+    "rows_processed": 3003,
+    "rows_total": 0,
+    "rows_error": 0,
+    "speed": 10752,
+    "table_done": 5,
+    "table_total": 5,
+    "current_table": "Users",
+    "current_table_rows_done": 3,
+    "current_table_rows_total": 3,
+    "created_at": "2026-03-29T13:16:40.079886",
+    "started_at": "2026-03-29T13:16:40.082268",
+    "finished_at": null,
+    "error_message": null,
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "on_error": "skip",
+    "truncate_target": false,
+    "create_table": true,
+    "src_username": "sa",
+    "src_password": "0000",
+    "tgt_username": "root",
+    "tgt_password": "mano212643@!",
+    "src_port": 1434,
+    "tgt_port": 3306,
+    "objects": {
+      "procedures": [
+        "usp_GetCustomerCount"
+      ],
+      "functions": [
+        "fn_CalculateTax"
+      ],
+      "triggers": [
+        "trg_LogCustomerDelete",
+        "trg_ProtectPrice",
+        "trg_UpdateStockOnOrder"
+      ],
+      "views": [
+        "vw_CustomerOrders"
+      ]
+    },
+    "convert_objects": true
+  },
+  "5060926b-2431-4e34-8da6-24479842e806": {
+    "id": "5060926b-2431-4e34-8da6-24479842e806",
+    "name": "mgtest → mgtest 이관",
+    "status": "completed",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_host": "127.0.0.1",
+    "src_database": "mgtest",
+    "tgt_host": "127.0.0.1",
+    "tgt_database": "mgtest",
+    "tables": [
+      "CustomerLog",
+      "Customers",
+      "Orders",
+      "Products",
+      "Users"
+    ],
+    "progress": 100,
+    "rows_processed": 3003,
+    "rows_total": 0,
+    "rows_error": 0,
+    "speed": 0,
+    "table_done": 5,
+    "table_total": 5,
+    "current_table": "",
+    "current_table_rows_done": 3,
+    "current_table_rows_total": 3,
+    "created_at": "2026-03-29T13:23:41.073401",
+    "started_at": "2026-03-29T13:23:41.076945",
+    "finished_at": "2026-03-29T13:23:42.630199",
+    "error_message": null,
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "on_error": "skip",
+    "truncate_target": false,
+    "create_table": true,
+    "src_username": "sa",
+    "src_password": "0000",
+    "tgt_username": "root",
+    "tgt_password": "mano212643@!",
+    "src_port": 1434,
+    "tgt_port": 3306,
+    "objects": {
+      "procedures": [
+        "usp_GetCustomerCount"
+      ],
+      "functions": [
+        "fn_CalculateTax"
+      ],
+      "triggers": [
+        "trg_LogCustomerDelete",
+        "trg_ProtectPrice",
+        "trg_UpdateStockOnOrder"
+      ],
+      "views": [
+        "vw_CustomerOrders"
+      ]
+    },
+    "convert_objects": true
+  },
+  "05e1492d-97ee-4c75-8307-766c5bc54091": {
+    "id": "05e1492d-97ee-4c75-8307-766c5bc54091",
+    "name": "mgtest → mgtest 이관",
+    "status": "completed",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_host": "127.0.0.1",
+    "src_database": "mgtest",
+    "tgt_host": "127.0.0.1",
+    "tgt_database": "mgtest",
+    "tables": [
+      "CustomerLog",
+      "Customers",
+      "Orders",
+      "Products",
+      "Users"
+    ],
+    "progress": 100,
+    "rows_processed": 3003,
+    "rows_total": 0,
+    "rows_error": 0,
+    "speed": 0,
+    "table_done": 5,
+    "table_total": 5,
+    "current_table": "",
+    "current_table_rows_done": 3,
+    "current_table_rows_total": 3,
+    "created_at": "2026-03-30T12:42:04.215239",
+    "started_at": "2026-03-30T12:42:04.220305",
+    "finished_at": "2026-03-30T12:42:05.390293",
+    "error_message": null,
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "on_error": "skip",
+    "truncate_target": false,
+    "create_table": true,
+    "src_username": "sa",
+    "src_password": "0000",
+    "tgt_username": "root",
+    "tgt_password": "mano212643@!",
+    "src_port": 1434,
+    "tgt_port": 3306,
+    "objects": {
+      "procedures": [
+        "usp_GetCustomerCount"
+      ],
+      "functions": [
+        "fn_CalculateTax"
+      ],
+      "triggers": [
+        "trg_LogCustomerDelete",
+        "trg_ProtectPrice",
+        "trg_UpdateStockOnOrder"
+      ],
+      "views": [
+        "vw_CustomerOrders"
+      ]
+    },
+    "convert_objects": true
+  },
+  "86438dc2-4a1d-4203-8398-238e2207f359": {
+    "id": "86438dc2-4a1d-4203-8398-238e2207f359",
+    "name": "mgtest → mgtest 이관",
+    "status": "completed",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_host": "127.0.0.1",
+    "src_database": "mgtest",
+    "tgt_host": "127.0.0.1",
+    "tgt_database": "mgtest",
+    "tables": [
+      "CustomerLog",
+      "Customers",
+      "Orders",
+      "Products",
+      "Users"
+    ],
+    "progress": 100,
+    "rows_processed": 3003,
+    "rows_total": 0,
+    "rows_error": 0,
+    "speed": 0,
+    "table_done": 5,
+    "table_total": 5,
+    "current_table": "",
+    "current_table_rows_done": 3,
+    "current_table_rows_total": 3,
+    "created_at": "2026-03-31T13:34:24.150057",
+    "started_at": "2026-03-31T13:34:24.155892",
+    "finished_at": "2026-03-31T13:34:25.764286",
+    "error_message": null,
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "on_error": "skip",
+    "truncate_target": false,
+    "create_table": true,
+    "src_username": "sa",
+    "src_password": "0000",
+    "tgt_username": "root",
+    "tgt_password": "mano212643@!",
+    "src_port": 1434,
+    "tgt_port": 3306,
+    "objects": {
+      "procedures": [
+        "usp_GetCustomerCount"
+      ],
+      "functions": [
+        "fn_CalculateTax"
+      ],
+      "triggers": [
+        "trg_LogCustomerDelete",
+        "trg_ProtectPrice",
+        "trg_UpdateStockOnOrder"
+      ],
+      "views": [
+        "vw_CustomerOrders"
+      ]
+    },
+    "convert_objects": true
+  }
+}

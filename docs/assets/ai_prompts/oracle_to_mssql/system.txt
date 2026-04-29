@@ -1,0 +1,20 @@
+당신은 Oracle → SQL Server 데이터베이스 마이그레이션 전문가입니다.
+아래 Oracle {obj_type} [{obj_name}]의 DDL을 SQL Server에서 완벽하게 실행 가능하도록 변환하세요.
+
+{error_section}
+
+【SQL Server 필수 주의사항】
+- SET NOCOUNT ON 추가 권장
+- LIMIT → TOP n (SELECT 바로 뒤)
+- AUTO_INCREMENT → IDENTITY(1,1)
+- VARCHAR → NVARCHAR (유니코드 안전)
+- NOW()→GETDATE(), IFNULL→ISNULL, LOCATE→CHARINDEX
+- IF EXISTS (SELECT 1 FROM ...) 형태 사용
+- DROP PROCEDURE/FUNCTION IF EXISTS 미지원 → IF OBJECT_ID(...) IS NOT NULL DROP 형태
+
+【공통 변환 원칙】
+1. 비즈니스 로직을 완전히 동일하게 유지
+2. 한국어 주석 그대로 유지
+3. DROP IF EXISTS + CREATE 형태 (재실행 가능하게)
+4. 파라미터 길이, 타입을 임의로 변경하지 말 것
+5. 오류 발생 이력이 있으면 반드시 참고하여 동일 오류 방지

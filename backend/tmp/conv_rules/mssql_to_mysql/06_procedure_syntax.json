@@ -1,0 +1,409 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 프로시저/함수 구문 변환",
+    "category": "PROCEDURE_SYNTAX",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "저장 프로시저와 함수의 구문 차이 전체 커버"
+  },
+  "rules": [
+    {
+      "id": "proc_create",
+      "src": "CREATE PROCEDURE [dbo].[proc_name]",
+      "tgt": "CREATE OR REPLACE PROCEDURE `proc_name`",
+      "note": "dbo 스키마 제거, 대괄호→백틱, OR REPLACE 추가",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_create_alter",
+      "src": "CREATE OR ALTER PROCEDURE [proc_name]",
+      "tgt": "CREATE OR REPLACE PROCEDURE `proc_name`",
+      "note": "OR ALTER → OR REPLACE",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_alter",
+      "src": "ALTER PROCEDURE [dbo].[proc_name]",
+      "tgt": "CREATE OR REPLACE PROCEDURE `proc_name`",
+      "note": "ALTER PROCEDURE → CREATE OR REPLACE PROCEDURE",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_as_begin",
+      "src": "AS\nBEGIN",
+      "tgt": "BEGIN",
+      "note": "MSSQL은 AS BEGIN, MySQL은 BEGIN만",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_as_begin_inline",
+      "src": "AS BEGIN",
+      "tgt": "BEGIN",
+      "note": "같은 줄의 AS BEGIN → BEGIN",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_param_in",
+      "src": "@param_name NVARCHAR(100)",
+      "tgt": "IN param_name VARCHAR(100)",
+      "note": "@param → IN param (기본값: IN). NVARCHAR → VARCHAR",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_param_out",
+      "src": "@param_name INT OUTPUT",
+      "tgt": "OUT param_name INT",
+      "note": "OUTPUT → OUT",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_param_inout",
+      "src": "@param_name INT OUTPUT (INOUT)",
+      "tgt": "INOUT param_name INT",
+      "note": "INOUT 파라미터",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_param_default",
+      "src": "@param_name INT = 0",
+      "tgt": "IN param_name INT DEFAULT 0",
+      "note": "기본값 파라미터",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_param_null_default",
+      "src": "@param_name NVARCHAR(100) = NULL",
+      "tgt": "IN param_name VARCHAR(100) DEFAULT NULL",
+      "note": "NULL 기본값",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_variable_declare",
+      "src": "DECLARE @var_name NVARCHAR(100);",
+      "tgt": "DECLARE var_name VARCHAR(100);",
+      "note": "변수 선언 — @ 제거, NVARCHAR→VARCHAR",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_variable_declare_init",
+      "src": "DECLARE @var_name INT = 0;",
+      "tgt": "DECLARE var_name INT DEFAULT 0;",
+      "note": "초기값 있는 변수 선언 — = → DEFAULT",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_variable_set",
+      "src": "SET @var_name = value;",
+      "tgt": "SET var_name = value;",
+      "note": "변수 할당 — @ 제거",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_variable_select_into",
+      "src": "SELECT @var = col FROM table WHERE ...;",
+      "tgt": "SELECT col INTO var FROM table WHERE ...;",
+      "note": "SELECT INTO 변수 — MSSQL: SELECT @var = 컬럼 → MySQL: SELECT 컬럼 INTO var",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_variable_ref",
+      "src": "@variable",
+      "tgt": "variable",
+      "note": "변수 참조 — @ 제거",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_if_then",
+      "src": "IF condition\nBEGIN\n    ...\nEND",
+      "tgt": "IF condition THEN\n    ...\nEND IF;",
+      "note": "IF 블록 — BEGIN/END → THEN...END IF",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_if_else",
+      "src": "IF condition\nBEGIN\n    ...\nEND\nELSE\nBEGIN\n    ...\nEND",
+      "tgt": "IF condition THEN\n    ...\nELSE\n    ...\nEND IF;",
+      "note": "IF-ELSE 블록",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_if_else_if",
+      "src": "ELSE IF condition\nBEGIN",
+      "tgt": "ELSEIF condition THEN",
+      "note": "ELSE IF → ELSEIF",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_while",
+      "src": "WHILE condition\nBEGIN\n    ...\nEND",
+      "tgt": "WHILE condition DO\n    ...\nEND WHILE;",
+      "note": "WHILE 루프 — BEGIN/END → DO...END WHILE",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_break",
+      "src": "BREAK;",
+      "tgt": "LEAVE loop_label;",
+      "note": "BREAK → LEAVE 레이블명. 레이블 추가 필요",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_continue",
+      "src": "CONTINUE;",
+      "tgt": "ITERATE loop_label;",
+      "note": "CONTINUE → ITERATE 레이블명. 레이블 추가 필요",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_return",
+      "src": "RETURN;",
+      "tgt": "LEAVE proc_label;",
+      "note": "프로시저 중간 RETURN → LEAVE. 함수는 RETURN값",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_exec_call",
+      "src": "EXEC proc_name @p1, @p2",
+      "tgt": "CALL proc_name(p1, p2)",
+      "note": "EXEC → CALL, 파라미터 괄호 추가",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_exec_sp_executesql",
+      "src": "EXEC sp_executesql @sql, N'@p1 INT', @p1=val",
+      "tgt": "SET @sql = ...; PREPARE stmt FROM @sql; EXECUTE stmt USING @p1; DEALLOCATE PREPARE stmt;",
+      "note": "동적 SQL — sp_executesql → PREPARE/EXECUTE/DEALLOCATE",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_print",
+      "src": "PRINT '메시지'",
+      "tgt": "-- PRINT 제거 (SELECT '메시지' 또는 로그 테이블 INSERT 활용)",
+      "note": "PRINT → MySQL 미지원. SELECT로 대체 가능",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_raiserror",
+      "src": "RAISERROR('메시지', 16, 1)",
+      "tgt": "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='메시지'",
+      "note": "오류 발생 — RAISERROR → SIGNAL SQLSTATE",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_throw",
+      "src": "THROW 50001, '메시지', 1;",
+      "tgt": "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='메시지', MYSQL_ERRNO=50001;",
+      "note": "THROW → SIGNAL",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_throw_rethrow",
+      "src": "THROW;",
+      "tgt": "RESIGNAL;",
+      "note": "예외 재발생 — THROW → RESIGNAL",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_try_catch",
+      "src": "BEGIN TRY\n    ...\nEND TRY\nBEGIN CATCH\n    ...\nEND CATCH",
+      "tgt": "DECLARE EXIT HANDLER FOR SQLEXCEPTION\nBEGIN\n    -- 오류 처리\nEND;\n-- 본문 코드",
+      "note": "TRY/CATCH → HANDLER. 구조 완전히 다름. 재작성 필요",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_error_message",
+      "src": "ERROR_MESSAGE()",
+      "tgt": "-- DECLARE CONTINUE HANDLER FOR SQLEXCEPTION SET msg = '';",
+      "note": "오류 메시지 → HANDLER에서 변수로 캡처",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_error_number",
+      "src": "ERROR_NUMBER()",
+      "tgt": "-- SQLSTATE 또는 MYSQL_ERRNO 변수로 캡처",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_temp_table",
+      "src": "CREATE TABLE #temp (...)",
+      "tgt": "CREATE TEMPORARY TABLE temp (...)",
+      "note": "임시 테이블 — #table → TEMPORARY TABLE",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_global_temp_table",
+      "src": "CREATE TABLE ##global_temp (...)",
+      "tgt": "CREATE TABLE global_temp (...) -- 또는 앱 레이어 처리",
+      "note": "글로벌 임시 테이블 → MySQL 미지원. 일반 테이블로 대체",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_table_variable",
+      "src": "DECLARE @tbl TABLE (col INT)",
+      "tgt": "CREATE TEMPORARY TABLE tbl (col INT)",
+      "note": "테이블 변수 → TEMPORARY TABLE",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_begin_transaction",
+      "src": "BEGIN TRANSACTION",
+      "tgt": "START TRANSACTION",
+      "note": "트랜잭션 시작",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_begin_tran",
+      "src": "BEGIN TRAN",
+      "tgt": "START TRANSACTION",
+      "note": "축약형 트랜잭션 시작",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_commit_transaction",
+      "src": "COMMIT TRANSACTION",
+      "tgt": "COMMIT",
+      "note": "커밋",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_commit_tran",
+      "src": "COMMIT TRAN",
+      "tgt": "COMMIT",
+      "note": "커밋 축약형",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_rollback_transaction",
+      "src": "ROLLBACK TRANSACTION",
+      "tgt": "ROLLBACK",
+      "note": "롤백",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_rollback_tran",
+      "src": "ROLLBACK TRAN",
+      "tgt": "ROLLBACK",
+      "note": "롤백 축약형",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_savepoint",
+      "src": "SAVE TRANSACTION savepoint_name",
+      "tgt": "SAVEPOINT savepoint_name",
+      "note": "세이브포인트",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_rollback_savepoint",
+      "src": "ROLLBACK TRANSACTION savepoint_name",
+      "tgt": "ROLLBACK TO SAVEPOINT savepoint_name",
+      "note": "세이브포인트로 롤백",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_set_nocount",
+      "src": "SET NOCOUNT ON;",
+      "tgt": "-- SET NOCOUNT ON 제거",
+      "note": "MySQL에 해당 없음",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_set_nocount_off",
+      "src": "SET NOCOUNT OFF;",
+      "tgt": "-- SET NOCOUNT OFF 제거",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_set_xact_abort",
+      "src": "SET XACT_ABORT ON;",
+      "tgt": "-- SET XACT_ABORT ON 제거 (HANDLER로 대체)",
+      "note": "오류 시 자동 롤백 → EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; END",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_set_rowcount",
+      "src": "SET ROWCOUNT n;",
+      "tgt": "-- SET ROWCOUNT n 제거 (쿼리에 LIMIT n 추가)",
+      "note": "ROWCOUNT → LIMIT",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_cursor_declare",
+      "src": "DECLARE cursor_name CURSOR FOR SELECT ...",
+      "tgt": "DECLARE cursor_name CURSOR FOR SELECT ...",
+      "note": "커서 선언 OK",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_cursor_open",
+      "src": "OPEN cursor_name",
+      "tgt": "OPEN cursor_name",
+      "note": "커서 열기 OK",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_cursor_fetch",
+      "src": "FETCH NEXT FROM cursor_name INTO @var1, @var2",
+      "tgt": "FETCH cursor_name INTO var1, var2",
+      "note": "FETCH NEXT FROM → FETCH (MySQL은 NEXT FROM 불필요)",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_cursor_fetch_check",
+      "src": "WHILE @@FETCH_STATUS = 0",
+      "tgt": "WHILE done = 0 -- (DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;)",
+      "note": "@@FETCH_STATUS → NOT FOUND 핸들러로 done 플래그 사용",
+      "warning": true,
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_cursor_close",
+      "src": "CLOSE cursor_name",
+      "tgt": "CLOSE cursor_name",
+      "note": "커서 닫기 OK",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_cursor_deallocate",
+      "src": "DEALLOCATE cursor_name",
+      "tgt": "",
+      "note": "DEALLOCATE → MySQL 미지원. 제거",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_drop_proc",
+      "src": "IF OBJECT_ID('proc_name', 'P') IS NOT NULL DROP PROCEDURE proc_name",
+      "tgt": "DROP PROCEDURE IF EXISTS `proc_name`",
+      "note": "존재 확인 후 삭제 → IF EXISTS",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_with_recompile",
+      "src": "WITH RECOMPILE",
+      "tgt": "",
+      "note": "WITH RECOMPILE → MySQL 미지원, 제거",
+      "category": "PROCEDURE_SYNTAX"
+    },
+    {
+      "id": "proc_with_encryption",
+      "src": "WITH ENCRYPTION",
+      "tgt": "",
+      "note": "WITH ENCRYPTION → MySQL 미지원, 제거",
+      "category": "PROCEDURE_SYNTAX"
+    }
+  ]
+}

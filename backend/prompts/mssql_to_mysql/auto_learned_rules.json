@@ -1,0 +1,18 @@
+{
+  "version": "v90.52",
+  "updated_at": "2026-04-28T13:57:28",
+  "patterns": [
+    {
+      "rule_id": "R-10",
+      "obj_type": "FUNCTION",
+      "occurrence": 5,
+      "first_seen": "2026-04-27T22:23:05",
+      "last_seen": "2026-04-28T13:57:28",
+      "issue_msg": "MySQL 은 RETURNS TABLE (Table-Valued Function) 을 지원하지 않습니다",
+      "suggested_action": "이 객체는 VIEW 로 변환하거나, CALL 가능한 PROCEDURE + OUT 결과셋 으로 변환하세요. FUNCTION 으로는 표현 불가.",
+      "last_obj_names": [
+        "tvf_contract_events"
+      ]
+    }
+  ]
+}

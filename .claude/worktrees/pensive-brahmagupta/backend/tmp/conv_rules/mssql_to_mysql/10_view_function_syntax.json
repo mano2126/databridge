@@ -1,0 +1,185 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 뷰/함수 구문 변환",
+    "category": "VIEW_FUNCTION_SYNTAX",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "뷰(VIEW), 스칼라 함수, 테이블 반환 함수 변환"
+  },
+  "rules": [
+    {
+      "id": "view_create",
+      "src": "CREATE VIEW [dbo].[view_name] AS",
+      "tgt": "CREATE OR REPLACE VIEW `view_name` AS",
+      "note": "dbo 제거, 대괄호→백틱, OR REPLACE 추가",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_create_alter",
+      "src": "CREATE OR ALTER VIEW [dbo].[view_name]",
+      "tgt": "CREATE OR REPLACE VIEW `view_name`",
+      "note": "OR ALTER → OR REPLACE",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_alter",
+      "src": "ALTER VIEW [dbo].[view_name] AS",
+      "tgt": "CREATE OR REPLACE VIEW `view_name` AS",
+      "note": "ALTER VIEW → CREATE OR REPLACE VIEW",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_with_schemabinding",
+      "src": "WITH SCHEMABINDING",
+      "tgt": "",
+      "note": "WITH SCHEMABINDING → MySQL 미지원, 제거",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_with_check_option",
+      "src": "WITH CHECK OPTION",
+      "tgt": "WITH CHECK OPTION",
+      "note": "WITH CHECK OPTION OK",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_with_encryption",
+      "src": "WITH ENCRYPTION",
+      "tgt": "",
+      "note": "WITH ENCRYPTION → MySQL 미지원, 제거",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_order_by_no_top",
+      "src": "ORDER BY col -- 뷰 내부",
+      "tgt": "-- ORDER BY 제거 (MySQL 뷰에서 TOP/LIMIT 없이 ORDER BY 불가)",
+      "note": "뷰 내 ORDER BY는 LIMIT과 함께만 가능",
+      "warning": true,
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_indexed",
+      "src": "CREATE UNIQUE CLUSTERED INDEX IX ON view_name",
+      "tgt": "-- 인덱스드 뷰 → MySQL 미지원. 별도 테이블 + 트리거로 구현",
+      "note": "인덱스드 뷰(구체화 뷰) → MySQL 미지원",
+      "warning": true,
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "view_drop",
+      "src": "IF OBJECT_ID('[view_name]', 'V') IS NOT NULL DROP VIEW [view_name]",
+      "tgt": "DROP VIEW IF EXISTS `view_name`",
+      "note": "뷰 삭제",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+
+    {
+      "id": "fn_create_scalar",
+      "src": "CREATE FUNCTION [dbo].[fn_name] (@param INT)\nRETURNS INT\nAS\nBEGIN\n    RETURN ...\nEND",
+      "tgt": "CREATE OR REPLACE FUNCTION `fn_name` (param INT)\nRETURNS INT\nDETERMINISTIC\nBEGIN\n    RETURN ...;\nEND",
+      "note": "스칼라 함수 — @param → param, DETERMINISTIC 추가, AS BEGIN → BEGIN",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_create_alter",
+      "src": "CREATE OR ALTER FUNCTION [fn_name]",
+      "tgt": "CREATE OR REPLACE FUNCTION `fn_name`",
+      "note": "OR ALTER → OR REPLACE",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_returns_type",
+      "src": "RETURNS NVARCHAR(100)",
+      "tgt": "RETURNS VARCHAR(100)",
+      "note": "반환 타입 NVARCHAR → VARCHAR",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_returns_bit",
+      "src": "RETURNS BIT",
+      "tgt": "RETURNS TINYINT(1)",
+      "note": "BIT → TINYINT(1)",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_return_true",
+      "src": "RETURN 1 -- TRUE",
+      "tgt": "RETURN 1",
+      "note": "RETURN 1 OK",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_return_false",
+      "src": "RETURN 0 -- FALSE",
+      "tgt": "RETURN 0",
+      "note": "RETURN 0 OK",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_deterministic",
+      "src": "(없음 — MSSQL 함수는 항상 SCHEMABINDING으로 결정적 선언)",
+      "tgt": "DETERMINISTIC -- 같은 입력에 항상 같은 출력",
+      "note": "MySQL은 DETERMINISTIC/NOT DETERMINISTIC 명시 필요. 날짜 함수 쓰면 NOT DETERMINISTIC",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_reads_sql",
+      "src": "(없음)",
+      "tgt": "READS SQL DATA -- SELECT는 포함하나 수정 없음",
+      "note": "MySQL 함수 특성 선언",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_no_sql",
+      "src": "(없음)",
+      "tgt": "NO SQL -- SQL 없는 순수 계산 함수",
+      "note": "MySQL 함수 특성 선언",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_table_valued",
+      "src": "CREATE FUNCTION [fn_name] (@param INT)\nRETURNS TABLE\nAS\nRETURN (SELECT ...)",
+      "tgt": "-- 인라인 테이블 반환 함수 → MySQL 미지원. 뷰 또는 프로시저로 대체",
+      "note": "인라인 테이블 반환 함수 → MySQL 미지원",
+      "warning": true,
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_multi_statement_tvf",
+      "src": "CREATE FUNCTION [fn_name] (@param INT)\nRETURNS @result TABLE (...)\nAS\nBEGIN\n    INSERT INTO @result SELECT ...\n    RETURN\nEND",
+      "tgt": "-- 다중 문장 TVF → TEMPORARY TABLE + 프로시저로 대체",
+      "note": "다중 문장 테이블 반환 함수 → MySQL 미지원. 구조 변경 필요",
+      "warning": true,
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_schemabinding",
+      "src": "WITH SCHEMABINDING",
+      "tgt": "",
+      "note": "SCHEMABINDING → MySQL 미지원, 제거",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_execute_as",
+      "src": "WITH EXECUTE AS CALLER",
+      "tgt": "",
+      "note": "EXECUTE AS → MySQL 미지원, 제거",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_drop",
+      "src": "IF OBJECT_ID('[fn_name]', 'FN') IS NOT NULL DROP FUNCTION [fn_name]",
+      "tgt": "DROP FUNCTION IF EXISTS `fn_name`",
+      "note": "함수 삭제",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    },
+    {
+      "id": "fn_call_dbo",
+      "src": "dbo.fn_name(@param)",
+      "tgt": "fn_name(param)",
+      "note": "dbo. 접두사 제거, @param → param",
+      "category": "VIEW_FUNCTION_SYNTAX"
+    }
+  ]
+}

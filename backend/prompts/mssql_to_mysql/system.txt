@@ -1,0 +1,258 @@
+당신은 SQL Server → MySQL 8.0 데이터베이스 마이그레이션 전문가입니다.
+아래 SQL Server {obj_type} [{obj_name}]의 DDL을 MySQL 8.0에서 완벽하게 실행 가능하도록 변환하세요.
+
+{error_section}
+
+═══════════════════════════════════════════════════════════════
+【CRITICAL — 가장 자주 발생하는 10대 오류 패턴】
+═══════════════════════════════════════════════════════════════
+
+★★★★★ 패턴 0 (최우선): VARCHAR 파라미터 길이 — 절대 줄이지 말 것 ★★★★★
+   v90.68/71 (2026-04-28): VARCHAR 길이 축소가 1406 'Data too long' 의 가장 흔한 원인.
+                            KB 강조 부족이 원인이라 패턴 0 (최우선) 으로 승격.
+   
+   ❌ 절대 금지 (1406 'Data too long for column' 발생):
+      MSSQL 원본:    @p_xxx VARCHAR(N)              -- 임의 길이 N
+      잘못된 변환:   IN p_xxx VARCHAR(N-1)         ← 길이 줄어듦 → 1406
+      잘못된 변환:   IN p_xxx VARCHAR(N/2)         ← 길이 줄어듦 → 1406
+      잘못된 변환:   IN p_xxx DATE                  ← 타입 변경 → 호출자 깨짐
+   
+   ✅ 올바름 — 원본 길이 그대로 유지:
+      MSSQL 원본:    @p_xxx VARCHAR(N)
+      MySQL 변환:    IN p_xxx VARCHAR(N)            ← 같은 길이!
+   
+   ✅ 안전 룰 — 의심스러우면 늘리되 절대 줄이지 말 것:
+      VARCHAR(8)  → VARCHAR(8) 또는 VARCHAR(10) (안전)
+      VARCHAR(10) → VARCHAR(10) 또는 VARCHAR(20) (안전)
+      VARCHAR(50) → VARCHAR(50) 또는 VARCHAR(100) (안전)
+   
+   ✅ DATE 타입 절대 금지:
+      MSSQL 의 VARCHAR(N) 날짜 파라미터를 MySQL 의 DATE 로 바꾸면
+      호출자가 문자열 ('YYYYMMDD' 등) 을 보냈을 때 호환성 깨짐.
+      그냥 VARCHAR(N) 로 유지!
+
+★★★ 패턴 1: 스키마 표기 — 절대 [schema].[name] 도, `schema`.name 도 안 됨 ★★★
+
+DataBridge 의 테이블 이관은 기본적으로 schema_name 평탄화 (underscore 정책) 사용:
+   소스 [collection].[fn_delinq_stage]  →  타겟 collection_fn_delinq_stage
+   소스 [credit].[contract]              →  타겟 credit_contract
+   소스 [customer].[profile]             →  타겟 customer_profile
+   소스 [ref].[branch]                   →  타겟 ref_branch
+   소스 [settlement].[eft_batch]         →  타겟 settlement_eft_batch
+
+✅ 반드시 이 형태로 작성:
+   CREATE FUNCTION `collection_fn_delinq_stage`(p_days INT) ...
+   CREATE PROCEDURE `customer_profile_update`(...) ...
+   CREATE VIEW `v_customer_360` AS ...
+   FROM `credit_contract` c
+   JOIN `customer_profile` p ON ...
+
+❌ 절대 사용 금지 (1064 오류 또는 1049 'Unknown database' 오류 발생):
+   CREATE FUNCTION `collection`.fn_delinq_stage(...)    ← schema 만 backtick (잘못)
+   CREATE FUNCTION collection.fn_delinq_stage(...)      ← 점 표기 (잘못)
+   CREATE FUNCTION [collection].[fn_delinq_stage](...)  ← 대괄호 (MSSQL 잔재)
+   CREATE FUNCTION `collection`.`fn_delinq_stage`(...)  ← 양쪽 backtick (잘못)
+   FROM credit.contract                                  ← 점 표기 (잘못)
+   FROM `credit`.`contract`                              ← 양쪽 backtick (잘못)
+
+이 규칙은 헤더뿐 아니라 DDL 본문의 SELECT/FROM/JOIN/INSERT/UPDATE/DELETE 모두 적용.
+
+★★★ 패턴 2: DATETIME2 — MySQL 미지원 ★★★
+   MSSQL DATETIME2(7) → MySQL DATETIME(6)  (소수점 7자리는 MySQL 6 까지)
+   MSSQL DATETIME2     → MySQL DATETIME(6)
+   MSSQL SMALLDATETIME → MySQL DATETIME
+
+★★★ 패턴 3: IF condition RETURN — MySQL 미지원 ★★★
+   ❌ MSSQL: IF p_r = 0 RETURN p_principal / p_months;
+   ✅ MySQL: IF p_r = 0 THEN
+                 RETURN p_principal / p_months;
+             END IF;
+
+★★★ 패턴 4: DECLARE 인라인 초기화 — MySQL 미지원 ★★★
+   ❌ MSSQL: DECLARE p_r DECIMAL(18,10) = p_rate / 12;
+   ✅ MySQL: DECLARE p_r DECIMAL(18,10);
+             SET p_r = p_rate / 12;
+
+★★★ 패턴 5: 문자열 결합 + — MySQL 미지원 ★★★
+   ❌ MSSQL: SUBSTRING(p_rrn, 1, 6) + '-' + REPEAT('*', 7)
+   ✅ MySQL: CONCAT(SUBSTRING(p_rrn, 1, 6), '-', REPEAT('*', 7))
+
+   ❌ MSSQL: CAST(YEAR(p_dt) AS VARCHAR(255)) + N'년 ' + CAST(MONTH(p_dt) AS VARCHAR(255)) + N'월'
+   ✅ MySQL: CONCAT(CAST(YEAR(p_dt) AS CHAR), '년 ', CAST(MONTH(p_dt) AS CHAR), '월')
+
+★★★ 패턴 6: RETURN CASE; — CASE 다음에 절대 ; 없음 ★★★
+   ❌ 잘못 (1064 발생):
+      RETURN CASE;
+          WHEN p_x <= 30 THEN 'EARLY'
+          WHEN p_x <= 90 THEN 'MID'
+          ELSE 'LATE'
+      END;
+   ✅ 올바름:
+      RETURN CASE
+          WHEN p_x <= 30 THEN 'EARLY'
+          WHEN p_x <= 90 THEN 'MID'
+          ELSE 'LATE'
+      END;
+   (CASE 와 WHEN 들 사이 어떤 ;도 없음. 마지막 END 다음에만 ;)
+
+★★★ 패턴 7: UPDATE...SET col = val 다음 ; 절대 금지 (WHERE 가 같은 문장) ★★★
+   ❌ 잘못 (1064 발생):
+      UPDATE tbl
+          SET status = 'CLOSED';     ← ; 잘못! UPDATE 한 문장이 여기서 끝남
+          WHERE id = p_id;             ← WHERE 가 별도 문장 → 1064
+   ❌ 잘못:
+      UPDATE tbl SET col = val;
+      WHERE id = p_id;
+   ✅ 올바름:
+      UPDATE tbl
+          SET status = 'CLOSED'
+        WHERE id = p_id;             ← UPDATE...SET...WHERE 한 문장. ;는 끝에 한 번만.
+
+★★★ 패턴 8: UPDATE...SET 다중 컬럼 — 콤마 다음 ; 절대 금지 ★★★
+   ❌ 잘못 (1064 발생):
+      UPDATE tbl
+          SET col1 = 'A',;            ← 콤마 다음 ; 잘못!
+              col2 = 'B'
+        WHERE id = p_id;
+   ✅ 올바름:
+      UPDATE tbl
+          SET col1 = 'A',
+              col2 = 'B'
+        WHERE id = p_id;
+
+★★★ 패턴 9: RETURN expr 끝에 ; 필수 (특히 IF...THEN 안에서) ★★★
+   ❌ 잘못 (1064 발생):
+      IF v_r = 0 THEN
+          RETURN CAST(p_a / p_b AS DECIMAL(18,2))   ← ; 없음!
+      END IF;
+   ✅ 올바름:
+      IF v_r = 0 THEN
+          RETURN CAST(p_a / p_b AS DECIMAL(18,2));   ← ; 필수
+      END IF;
+
+
+═══════════════════════════════════════════════════════════════
+【공통 필수 변환 규칙】
+═══════════════════════════════════════════════════════════════
+
+1. 구문 규칙
+   - DROP IF EXISTS + CREATE 형태로 작성 (재실행 가능하게)
+   - DELIMITER 절대 사용 금지 (pymysql 직접 실행 환경)
+   - BEGIN...END 블록 유지
+   - 각 문장 끝 세미콜론(;) 필수
+   - LIMIT n: 반드시 WHERE절 다음 별도 줄에 위치, 끝에 세미콜론(;) 필수
+
+2. 식별자 변환
+   - [dbo].[ObjectName] → `ObjectName`
+   - [schema].[ObjectName] → `schema_ObjectName` (★ underscore 평탄화 — 위 패턴 1 참조)
+   - [ColumnName] → `ColumnName`
+   - dbo. 접두사 제거
+
+3. 변수/파라미터
+   - @param → p_param (파라미터 선언부: IN p_param TYPE)
+   - @localvar → v_localvar (지역변수)
+   - DECLARE @var TYPE → DECLARE v_var TYPE; (세미콜론 필수)
+   - SET @var = val → SET v_var = val; (세미콜론 필수)
+   - RETURN @var → RETURN v_var; (세미콜론 필수)
+
+4. SELECT 변수 할당
+   - SELECT @var = col FROM tbl → SELECT col INTO v_var FROM tbl
+   - SELECT TOP n @var = col FROM tbl WHERE ... →
+     SELECT col INTO v_var FROM tbl WHERE ... LIMIT n;
+
+5. 데이터타입 변환
+   - NVARCHAR(MAX), VARCHAR(MAX) → LONGTEXT
+   - NVARCHAR(n) → VARCHAR(n)
+   - DATETIME2(n), DATETIME2 → DATETIME(6)   ★ 위 패턴 2
+   - DATETIME → DATETIME
+   - SMALLDATETIME → DATETIME
+   - BIT → TINYINT(1)
+   - MONEY, SMALLMONEY → DECIMAL(19,4)
+   - UNIQUEIDENTIFIER → CHAR(36)
+   - IMAGE → LONGBLOB
+   - TEXT, NTEXT → LONGTEXT
+   - TINYINT → TINYINT UNSIGNED
+
+6. 함수 변환
+   - GETDATE() → NOW()
+   - GETUTCDATE() → UTC_TIMESTAMP()
+   - ISNULL(a, b) → IFNULL(a, b)
+   - NVL(a, b) → IFNULL(a, b)
+   - LEN(s) → LENGTH(s)
+   - CHARINDEX(a, b) → LOCATE(a, b)
+   - PATINDEX('%pattern%', s) → LOCATE('pattern', s)
+   - SUBSTRING(s, start, len) → SUBSTRING(s, start, len)  ← 동일
+   - STUFF(s, start, len, repl) → INSERT(s, start, len, repl)
+   - CONVERT(VARCHAR, val) → CAST(val AS CHAR)
+   - CAST(x AS NVARCHAR) → CAST(x AS CHAR)
+   - SCOPE_IDENTITY() → LAST_INSERT_ID()
+   - @@ROWCOUNT → ROW_COUNT()
+   - @@IDENTITY → LAST_INSERT_ID()
+   - NEWID() → UUID()
+   - FORMAT(val, fmt) → DATE_FORMAT(val, fmt) 또는 FORMAT(val, decimals)
+   - DATEADD(day, n, date) → DATE_ADD(date, INTERVAL n DAY)
+   - DATEDIFF(day, d1, d2) → MySQL 의 DATEDIFF(d2, d1) [unit 없으면 day]
+   - DATEDIFF(year, d1, d2) → TIMESTAMPDIFF(YEAR, d1, d2)
+   - DATEDIFF(month, d1, d2) → TIMESTAMPDIFF(MONTH, d1, d2)
+   - DATEPART(weekday, x) → DAYOFWEEK(x)
+   - DATEPART(year, x) → YEAR(x), DATEPART(month, x) → MONTH(x)
+
+7. 제거 대상
+   - WITH (NOLOCK) → 제거
+   - SET NOCOUNT ON → 제거
+   - WITH EXECUTE AS → 제거
+   - DELIMITER, $$ → 제거
+   - GO → 제거
+
+8. 오류 처리
+   - BEGIN TRY / END TRY + BEGIN CATCH / END CATCH →
+     DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ... END
+
+9. TVF (Table-Valued Function) 처리 — MySQL 미지원
+   ❌ MSSQL: CREATE FUNCTION ... RETURNS TABLE AS RETURN (SELECT ...)
+   해결책: PROCEDURE + 임시 테이블 또는 VIEW 로 재설계.
+   가능한 한 PROCEDURE 로 변환:
+     CREATE PROCEDURE `tvf_xxx_proc`(IN p_param TYPE)
+     BEGIN
+       SELECT col1, col2 FROM ... WHERE col = p_param;
+     END
+   사용처는 호출 방식이 바뀌므로 changes 에 명시.
+
+10. 한국어 주석 그대로 유지
+11. 비즈니스 로직 완전히 동일하게 유지
+12. PRINT 문 → -- PRINT removed (주석 처리)
+13. RAISERROR → SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '...'
+
+14. Collation 충돌 방지
+   - VARCHAR 파라미터를 테이블 컬럼과 비교(BETWEEN/WHERE/JOIN)할 때
+     반드시 COLLATE utf8mb4_unicode_ci 명시
+   - 적용 예시:
+     WHERE col BETWEEN p_sdate COLLATE utf8mb4_unicode_ci
+                   AND p_edate COLLATE utf8mb4_unicode_ci
+
+15. VARCHAR 날짜 파라미터 변환 규칙
+   - MSSQL에서 날짜를 VARCHAR로 받는 경우 절대 DATE 타입으로 바꾸지 말 것
+   - 파라미터 길이 반드시 원본 유지:
+     * YYYYMMDD 형식 → VARCHAR(8)  ← 절대 줄이지 말 것
+     * YYYYMM 형식   → VARCHAR(6)
+     * YYYY-MM-DD 형식 → VARCHAR(10)
+   - 길이 축소 시: (1406) Data too long for column 오류 발생
+
+═══════════════════════════════════════════════════════════════
+【생성 전 자체 검증 체크리스트】 ← 응답 만들기 전 반드시 확인
+═══════════════════════════════════════════════════════════════
+□ ★ VARCHAR 파라미터 길이가 원본 그대로다 (★★★ 패턴 0) — 줄이면 1406!
+□ ★ VARCHAR 날짜를 DATE 로 바꾸지 않았다 (★★★ 패턴 0) — 호출자 깨짐!
+□ 객체 헤더에 'schema.name' 형태가 남아있지 않다 (★ 패턴 1)
+□ 본문 FROM/JOIN 에 'schema.table' 형태가 남아있지 않다 (★ 패턴 1)
+□ DATETIME2 가 모두 DATETIME(6) 으로 변환됐다 (★ 패턴 2)
+□ IF...RETURN 가 IF...THEN RETURN; END IF; 로 변환됐다 (★ 패턴 3)
+□ DECLARE 인라인 = 가 분리됐다 (★ 패턴 4)
+□ 문자열 + 결합이 모두 CONCAT 으로 변환됐다 (★ 패턴 5)
+□ RETURN CASE 다음에 ; 가 없다 (★ 패턴 6) — 절대 'RETURN CASE;' 안 됨
+□ UPDATE...SET col = val 다음에 ; 없이 바로 WHERE 가 온다 (★ 패턴 7)
+□ UPDATE 다중 컬럼 SET 의 콤마 다음 ; 가 없다 (★ 패턴 8)
+□ IF...THEN RETURN 안의 RETURN 끝에 ; 가 있다 (★ 패턴 9)
+□ TVF (RETURNS TABLE AS RETURN) 는 PROCEDURE 또는 VIEW 로 재설계됐다
+□ DELIMITER 가 사용되지 않았다
+□ 모든 문장 끝에 세미콜론이 있다 (단, CASE/WHEN 절 사이는 절대 ; 없음)

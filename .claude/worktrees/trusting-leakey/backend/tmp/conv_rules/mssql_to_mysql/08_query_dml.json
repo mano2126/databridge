@@ -1,0 +1,342 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 쿼리/DML 구문 변환",
+    "category": "QUERY_DML",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "SELECT/INSERT/UPDATE/DELETE, CTE, 페이징, 조인, 서브쿼리 변환"
+  },
+  "rules": [
+    {
+      "id": "dml_top_n",
+      "src": "SELECT TOP n col FROM table",
+      "tgt": "SELECT col FROM table LIMIT n",
+      "note": "TOP n → LIMIT n (쿼리 끝으로 이동)",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_top_percent",
+      "src": "SELECT TOP (n) PERCENT col FROM table",
+      "tgt": "SELECT col FROM table LIMIT ROUND(cnt * n / 100)",
+      "note": "TOP n PERCENT → 서브쿼리로 총 건수 계산 후 LIMIT",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_top_with_ties",
+      "src": "SELECT TOP n WITH TIES",
+      "tgt": "-- TOP WITH TIES → MySQL 미지원. 윈도우 함수로 재작성 필요",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_offset_fetch",
+      "src": "ORDER BY col OFFSET n ROWS FETCH NEXT m ROWS ONLY",
+      "tgt": "ORDER BY col LIMIT m OFFSET n",
+      "note": "페이징 — OFFSET/FETCH → LIMIT m OFFSET n",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_offset_fetch_first",
+      "src": "OFFSET n ROWS FETCH FIRST m ROWS ONLY",
+      "tgt": "LIMIT m OFFSET n",
+      "note": "FETCH FIRST 변형",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_nolock",
+      "src": "FROM table WITH (NOLOCK)",
+      "tgt": "FROM `table`",
+      "note": "NOLOCK 힌트 제거. MySQL InnoDB는 MVCC로 더티 리드 없음",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_nolock_alias",
+      "src": "FROM table t WITH (NOLOCK)",
+      "tgt": "FROM `table` t",
+      "note": "WITH (NOLOCK) 제거",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_with_updlock",
+      "src": "WITH (UPDLOCK)",
+      "tgt": "FOR UPDATE",
+      "note": "UPDATE 잠금 → FOR UPDATE",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_with_holdlock",
+      "src": "WITH (HOLDLOCK)",
+      "tgt": "-- HOLDLOCK → MySQL에서 LOCK IN SHARE MODE 또는 FOR SHARE",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_with_tablock",
+      "src": "WITH (TABLOCK)",
+      "tgt": "LOCK TABLES `table` WRITE",
+      "note": "테이블 잠금 → LOCK TABLES",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_with_tablockx",
+      "src": "WITH (TABLOCKX)",
+      "tgt": "LOCK TABLES `table` WRITE",
+      "note": "배타적 테이블 잠금",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_other_hints",
+      "src": "WITH (ROWLOCK, READPAST)",
+      "tgt": "",
+      "note": "기타 힌트 → 제거",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_cte_basic",
+      "src": "WITH cte AS (SELECT ...)\nSELECT * FROM cte",
+      "tgt": "WITH cte AS (SELECT ...)\nSELECT * FROM cte",
+      "note": "CTE (WITH 절) OK — MySQL 8.0+",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_cte_recursive",
+      "src": "WITH cte AS (SELECT ... UNION ALL SELECT ... FROM cte WHERE ...)\nSELECT * FROM cte",
+      "tgt": "WITH RECURSIVE cte AS (SELECT ... UNION ALL SELECT ... FROM cte WHERE ...)\nSELECT * FROM cte",
+      "note": "재귀 CTE → WITH RECURSIVE 키워드 추가",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_pivot",
+      "src": "SELECT * FROM table PIVOT (SUM(val) FOR col IN ([a],[b],[c])) AS pvt",
+      "tgt": "SELECT\n  SUM(CASE WHEN col='a' THEN val END) AS `a`,\n  SUM(CASE WHEN col='b' THEN val END) AS `b`\nFROM table",
+      "note": "PIVOT → CASE WHEN 집계로 수동 변환",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_unpivot",
+      "src": "UNPIVOT (val FOR col IN ([a],[b],[c]))",
+      "tgt": "-- UNPIVOT → UNION ALL 또는 JSON으로 수동 변환",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_insert_identity",
+      "src": "SET IDENTITY_INSERT [table] ON\nINSERT INTO [table] ...\nSET IDENTITY_INSERT [table] OFF",
+      "tgt": "INSERT INTO `table` ...",
+      "note": "MySQL AUTO_INCREMENT는 명시적 값 INSERT 가능. IDENTITY_INSERT 불필요",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_insert_output",
+      "src": "INSERT INTO table OUTPUT INSERTED.id INTO @ids VALUES (...)",
+      "tgt": "INSERT INTO `table` VALUES (...);\nSET @id = LAST_INSERT_ID();",
+      "note": "OUTPUT INSERTED → LAST_INSERT_ID(). 다중 행은 별도 처리 필요",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_update_output",
+      "src": "UPDATE table SET col=val OUTPUT DELETED.col, INSERTED.col",
+      "tgt": "-- OUTPUT → MySQL 미지원. 업데이트 전 SELECT 후 UPDATE",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_delete_output",
+      "src": "DELETE FROM table OUTPUT DELETED.* WHERE ...",
+      "tgt": "-- OUTPUT → MySQL 미지원. DELETE 전 SELECT로 확인",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_merge",
+      "src": "MERGE INTO target USING source ON (condition)\nWHEN MATCHED THEN UPDATE ...\nWHEN NOT MATCHED THEN INSERT ...",
+      "tgt": "INSERT INTO `target` (...) SELECT ... FROM source\nON DUPLICATE KEY UPDATE col = VALUES(col)",
+      "note": "MERGE → INSERT...ON DUPLICATE KEY UPDATE 또는 INSERT IGNORE",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_upsert",
+      "src": "IF EXISTS (SELECT 1 FROM table WHERE id=@id) UPDATE ... ELSE INSERT ...",
+      "tgt": "INSERT INTO `table` (...) VALUES (...)\nON DUPLICATE KEY UPDATE col=VALUES(col)",
+      "note": "수동 UPSERT → INSERT ON DUPLICATE KEY UPDATE",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_update_join",
+      "src": "UPDATE t SET t.col = s.col FROM table1 t JOIN table2 s ON t.id = s.id",
+      "tgt": "UPDATE `table1` t JOIN `table2` s ON t.id = s.id SET t.col = s.col",
+      "note": "FROM 절 UPDATE → MySQL JOIN UPDATE 구문",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_delete_join",
+      "src": "DELETE t FROM table1 t JOIN table2 s ON t.id = s.id WHERE s.flag=1",
+      "tgt": "DELETE t FROM `table1` t JOIN `table2` s ON t.id = s.id WHERE s.flag=1",
+      "note": "JOIN DELETE OK — 테이블 별칭 앞에 DELETE 명시",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_select_into",
+      "src": "SELECT * INTO new_table FROM source_table",
+      "tgt": "CREATE TABLE `new_table` AS SELECT * FROM `source_table`",
+      "note": "SELECT INTO → CREATE TABLE AS SELECT",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_insert_select",
+      "src": "INSERT INTO table SELECT ... FROM ...",
+      "tgt": "INSERT INTO `table` SELECT ... FROM ...",
+      "note": "INSERT...SELECT OK",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_bulk_insert",
+      "src": "BULK INSERT table FROM 'file.csv' WITH (FIELDTERMINATOR=',')",
+      "tgt": "LOAD DATA INFILE 'file.csv' INTO TABLE `table` FIELDS TERMINATED BY ','",
+      "note": "BULK INSERT → LOAD DATA INFILE",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_not_in_null",
+      "src": "col NOT IN (SELECT col FROM table WHERE col IS NULL)",
+      "tgt": "col NOT IN (SELECT col FROM table WHERE col IS NOT NULL)",
+      "note": "NOT IN에 NULL 포함 시 항상 FALSE. MySQL도 동일 주의",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_apply_cross",
+      "src": "CROSS APPLY",
+      "tgt": "JOIN LATERAL",
+      "note": "CROSS APPLY → MySQL 8.0.14+ LATERAL JOIN",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_apply_outer",
+      "src": "OUTER APPLY",
+      "tgt": "LEFT JOIN LATERAL",
+      "note": "OUTER APPLY → LEFT JOIN LATERAL",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_except",
+      "src": "SELECT * FROM t1 EXCEPT SELECT * FROM t2",
+      "tgt": "SELECT * FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE t1.id=t2.id)",
+      "note": "EXCEPT → NOT EXISTS 또는 LEFT JOIN IS NULL",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_intersect",
+      "src": "SELECT * FROM t1 INTERSECT SELECT * FROM t2",
+      "tgt": "SELECT t1.* FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t1.id=t2.id)",
+      "note": "INTERSECT → EXISTS",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_union_all",
+      "src": "UNION ALL",
+      "tgt": "UNION ALL",
+      "note": "UNION ALL OK",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_union",
+      "src": "UNION",
+      "tgt": "UNION",
+      "note": "UNION OK",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_groupby_rollup",
+      "src": "GROUP BY col WITH ROLLUP",
+      "tgt": "GROUP BY col WITH ROLLUP",
+      "note": "ROLLUP OK — MySQL 5.7+",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_groupby_cube",
+      "src": "GROUP BY CUBE (col1, col2)",
+      "tgt": "-- CUBE → MySQL 미지원. ROLLUP 또는 UNION으로 수동 구현",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_groupby_grouping_sets",
+      "src": "GROUP BY GROUPING SETS ((col1), (col2), ())",
+      "tgt": "-- GROUPING SETS → MySQL 미지원. UNION ALL로 수동 구현",
+      "warning": true,
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_having",
+      "src": "HAVING COUNT(*) > 1",
+      "tgt": "HAVING COUNT(*) > 1",
+      "note": "HAVING OK",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_case_when",
+      "src": "CASE WHEN col = 1 THEN 'Y' ELSE 'N' END",
+      "tgt": "CASE WHEN col = 1 THEN 'Y' ELSE 'N' END",
+      "note": "CASE WHEN OK",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_isnull_check",
+      "src": "WHERE col IS NULL",
+      "tgt": "WHERE col IS NULL",
+      "note": "IS NULL OK",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_ansi_nulls",
+      "src": "SET ANSI_NULLS ON",
+      "tgt": "",
+      "note": "SET ANSI_NULLS → MySQL 미지원, 제거. MySQL은 기본적으로 ANSI NULL",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_quoted_identifier",
+      "src": "SET QUOTED_IDENTIFIER ON",
+      "tgt": "",
+      "note": "SET QUOTED_IDENTIFIER → MySQL 미지원, 제거",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_concat_null_yields_null",
+      "src": "SET CONCAT_NULL_YIELDS_NULL ON",
+      "tgt": "",
+      "note": "제거",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_string_concat_op",
+      "src": "col1 + ' ' + col2",
+      "tgt": "CONCAT(col1, ' ', col2)",
+      "note": "+ 문자열 연결 → CONCAT(). NULL 포함 시 CONCAT_WS 고려",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_go_statement",
+      "src": "GO",
+      "tgt": "",
+      "note": "GO (배치 구분자) → MySQL 미지원, 제거",
+      "category": "QUERY_DML"
+    },
+    {
+      "id": "dml_use_database",
+      "src": "USE [database_name]",
+      "tgt": "USE `database_name`",
+      "note": "USE 데이터베이스 — 대괄호→백틱",
+      "category": "QUERY_DML"
+    }
+  ]
+}

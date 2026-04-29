@@ -1,0 +1,78 @@
+【VIEW 전용 추가 규칙】
+
+1. 헤더 형식
+   CREATE OR REPLACE VIEW `{obj_name}` AS
+   SELECT ...
+
+2. WITH CHECK OPTION 유지 가능
+3. 파라미터 없음 — WHERE절 하드코딩된 파라미터 제거 불필요
+4. TOP n → LIMIT n (끝에 추가)
+5. NOLOCK 제거
+
+6. 【v63 최우선】 뷰 본문 SELECT 안의 모든 테이블 참조에서 스키마 접두사 제거 【필수】
+
+   ❌ 잘못된 패턴 (1146 Table 'db.schema_table' doesn't exist 원인):
+      CREATE OR REPLACE VIEW `v_customer_360` AS
+      SELECT c.*, l.loan_amount
+      FROM customer.customers c               ← customer. 스키마 접두사
+      JOIN credit.loans l ON c.id = l.cust_id ← credit. 스키마 접두사
+      LEFT JOIN collection.delinquent d       ← collection. 스키마 접두사
+
+   ✅ 올바른 패턴:
+      CREATE OR REPLACE VIEW `v_customer_360` AS
+      SELECT c.*, l.loan_amount
+      FROM `customers` c
+      JOIN `loans` l ON c.id = l.cust_id
+      LEFT JOIN `delinquent` d ON l.id = d.loan_id
+
+   규칙:
+   - MySQL 은 database.table 형식만 지원. 스키마 개념이 없음.
+   - MSSQL 의 dbo.xxx, credit.xxx, collection.xxx, settlement.xxx, customer.xxx, ref.xxx
+     등 모든 스키마 접두사는 반드시 제거.
+   - FROM 절, JOIN 절, 서브쿼리 안의 FROM 절 모두 적용.
+   - 만약 이관 당시 테이블명이 「스키마_테이블」 형태 (예: settlement_trx)로
+     바뀌었으면 그 패턴을 따라가되, 기본은 스키마 제거.
+
+7. 【v63】 CROSS APPLY / OUTER APPLY 변환
+   - MSSQL 의 CROSS APPLY → MySQL 의 JOIN LATERAL (MySQL 8.0.14+) 또는 서브쿼리
+   - OUTER APPLY → LEFT JOIN LATERAL
+
+   예:
+   MSSQL:  FROM t1 CROSS APPLY (SELECT col FROM t2 WHERE t2.id = t1.id) AS x
+   MySQL:  FROM t1, LATERAL (SELECT col FROM t2 WHERE t2.id = t1.id) AS x
+
+8. 【v63】 상관 서브쿼리 alias 주의
+   - SELECT 절 안의 서브쿼리는 alias 뒤에 세미콜론 절대 금지
+   - SELECT (SELECT MAX(col) FROM tbl WHERE ...) AS max_val  ← 괄호 안에 세미콜론 없음
+
+
+【TRIGGER 전용 추가 규칙】
+
+1. 헤더 형식
+   DROP TRIGGER IF EXISTS `{obj_name}`;
+   DELIMITER $$          ← 트리거는 DELIMITER 사용 가능 (별도 처리됨)
+   CREATE TRIGGER `{obj_name}`
+   {BEFORE|AFTER} {INSERT|UPDATE|DELETE}
+   ON `table_name` FOR EACH ROW
+   BEGIN
+     ...
+   END$$
+   DELIMITER ;
+
+2. INSERTED → NEW, DELETED → OLD
+
+3. MySQL 트리거 제약
+   - 자기 테이블 UPDATE 불가 → 제거 또는 주석 처리
+   - INSERT 트리거에서 OLD 참조 불가
+   - DELETE 트리거에서 NEW 참조 불가
+
+4. FOR INSERT, UPDATE, DELETE (MSSQL) →
+   MySQL은 각각 별도 트리거 3개로 분리 필요
+   (하나의 트리거에서 여러 이벤트 처리 불가)
+
+5. WITH EXECUTE AS → 제거
+
+6. 자주 발생하는 오류 패턴 (누적)
+   - 오류: "Can't update table in stored function/trigger"
+     원인: 트리거에서 자기 테이블 수정
+     해결: 해당 로직 제거 또는 주석 처리 + 경고 추가

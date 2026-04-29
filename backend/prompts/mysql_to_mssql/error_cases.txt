@@ -1,0 +1,16 @@
+# MySQL 8.0 → SQL Server 변환 시 발생한 실제 오류 누적 기록
+# 형식: [날짜] 오브젝트명 | 오류코드 | 원인 | 해결책
+# 오류 발생 시 자동으로 이 파일에 누적됩니다.
+
+
+[2026-04-19] SP_STATRECORD (PROCEDURE) | ('42S22', "[42S22] [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]Invalid column name 'rec_hour'. (207) (SQLExecD
+  원인: 오브젝트 이관 중 실행 오류
+  해결: AI 재이관 또는 DDL 수동 수정 필요
+
+[2026-04-19] crec_recfile_ins (TRIGGER) | ('42000', "[42000] [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]Incorrect syntax near '`'. (102) (SQLExecDirect
+  원인: 오브젝트 이관 중 실행 오류
+  해결: AI 재이관 또는 DDL 수동 수정 필요
+
+[2026-04-19] crec_recfile_ins (TRIGGER) | ('42000', '[42000] [Microsoft][ODBC Driver 18 for SQL Server][SQL Server]The variable name \'@REC_SYSTEM_CODE\' has alre
+  원인: 오브젝트 이관 중 실행 오류
+  해결: AI 재이관 또는 DDL 수동 수정 필요

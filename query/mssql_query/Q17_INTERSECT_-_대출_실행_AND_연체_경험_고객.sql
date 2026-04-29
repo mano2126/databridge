@@ -1,0 +1,7 @@
+-- Q17. MSSQL
+SELECT cust_id FROM E01_LoanContract WHERE status_cd IN ('ACT','CL')
+INTERSECT
+SELECT DISTINCT l.cust_id FROM E02_RepaySchedule s
+INNER JOIN E01_LoanContract l ON s.loan_id = l.loan_id
+WHERE s.status_cd = 'OV'
+ORDER BY cust_id;

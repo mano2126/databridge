@@ -1,0 +1,1124 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# error_cases.txt — DataBridge MSSQL → MySQL 변환 실패 KB
+# ═══════════════════════════════════════════════════════════════════════════
+# 이 파일은 AI 변환에서 반복 발생한 실패 패턴을 누적합니다.
+# preflight_kb_learner.py 가 자동으로 추가하며, 사람이 직접 편집해도 됩니다.
+# 
+# 내용은 _ai_convert_ddl 의 _load_kb_hint 에서 로드되어 AI 프롬프트에 주입됩니다.
+# ═══════════════════════════════════════════════════════════════════════════
+
+## v90.52 (2026-04-27) — 본부장님 환경 18건 1064 패턴 누적 시드
+
+### [R-01] UPDATE SET 절 콤마 직후 잘못된 세미콜론 (FUNCTION/PROCEDURE) — 6건
+잘못된 예 (절대 만들지 말 것):
+    SET app_status = 'APPROVED',;
+        approved_amount = p_amount,
+        decision_by = p_emp_no
+    WHERE app_id = p_app_id;
+올바른 예:
+    SET app_status = 'APPROVED',
+        approved_amount = p_amount,
+        decision_by = p_emp_no
+    WHERE app_id = p_app_id;
+
+### [R-02] SET 단일컬럼 종료 세미콜론 후 WHERE — 3건
+잘못된 예:
+    UPDATE credit_contract
+       SET customer_id = p_target_id;     ← 잘못된 ;
+     WHERE customer_id = p_source_id;
+올바른 예:
+    UPDATE credit_contract
+       SET customer_id = p_target_id
+     WHERE customer_id = p_source_id;
+
+### [R-03] RETURN CASE 직후 잘못된 세미콜론 (FUNCTION) — 1건
+잘못된 예 (collection_fn_delinq_stage):
+    RETURN CASE;                        ← 잘못된 ;
+        WHEN p_days <= 30 THEN 'EARLY'
+        ...
+    END
+올바른 예:
+    RETURN CASE
+        WHEN p_days <= 30 THEN 'EARLY'
+        ...
+    END;                                ← END 뒤에 ;
+
+### [R-04] INSERT VALUES / END IF / END LOOP 뒤 세미콜론 누락 — 다수
+잘못된 예 (TRIGGER):
+    INSERT INTO ... VALUES (...)         ← ; 누락
+    END IF;
+올바른 예:
+    INSERT INTO ... VALUES (...);
+    END IF;
+
+잘못된 예 (FUNCTION 내부):
+    IF v_r = 0 THEN
+        RETURN x;
+    END IF                              ← ; 누락
+    RETURN y;
+올바른 예:
+    IF v_r = 0 THEN
+        RETURN x;
+    END IF;                             ← ; 보강
+    RETURN y;
+
+### [R-05] PROCEDURE INSERT 뒤 의미 없는 LIMIT N — 1건
+잘못된 예 (collection_sp_mark_delinquent):
+    INSERT INTO ... VALUES (...);
+    LIMIT 1;                            ← INSERT 에 LIMIT 무의미
+    END
+올바른 예: LIMIT 1; 라인 자체 제거. SELECT TOP 1 변환 시 SELECT 안의 LIMIT 으로.
+
+### [R-06] PROCEDURE 본문 마지막 문장 종결 세미콜론 누락
+잘못된 예 (ref_sp_update_employee_status):
+    UPDATE ref_employee
+    SET status = p_new_status,
+        resign_date = ...
+    WHERE emp_no = p_emp_no             ← ; 누락
+    END
+올바른 예: WHERE 절 끝에 ; 보강.
+
+### [R-07] FUNCTION DETERMINISTIC 등 SQL 특성 키워드 누락 (1418 오류 원인)
+MySQL 8.x 는 FUNCTION 생성 시 다음 중 하나 필수:
+    DETERMINISTIC | NO SQL | READS SQL DATA | MODIFIES SQL DATA | CONTAINS SQL
+
+### [R-08] RETURN 문 세미콜론 누락 — 1건
+잘못된 예 (ref_fn_age):
+    SET v_age = TIMESTAMPDIFF(YEAR, p_birth, CURDATE());
+    RETURN v_age                        ← ; 누락
+    END
+
+### [R-09] IF/CASE/WHILE/LOOP 의 END 누락 (자동수정 불가, AI 재시도 필수)
+모든 IF...THEN 블록은 END IF; 로 닫혀야 함.
+모든 CASE 표현식은 END 로 닫혀야 함.
+
+### [R-10] TVF (RETURNS TABLE) MySQL 미지원 (자동수정 불가) — 1건
+MySQL 은 Table-Valued Function 을 지원하지 않습니다.
+잘못된 예 (credit_tvf_contract_events):
+    CREATE FUNCTION credit_tvf_contract_events(...)
+    RETURNS TABLE                       ← MySQL 미지원
+    RETURN ( SELECT ... )
+대안:
+  1. VIEW 로 변환 (인자가 없을 때만 가능)
+  2. PROCEDURE + SELECT 결과셋 (CALL 로 호출)
+  3. 인자 있는 TVF 는 PROCEDURE OUT 파라미터 + 임시 테이블 패턴
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 이하 자동 등재 케이스 (preflight_kb_learner.record_fail_cases 가 추가)
+# ═══════════════════════════════════════════════════════════════════════════
+
+[2026-04-27] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+## 2026-04-27 22:23:05 [FUNCTION] tvf_contract_events
+- [R-10] MySQL 은 RETURNS TABLE (Table-Valued Function) 을 지원하지 않습니다
+  → 이 객체는 VIEW 로 변환하거나, CALL 가능한 PROCEDURE + OUT 결과셋 으로 변환하세요. FUNCTION 으로는 표현 불가.
+
+[2026-04-27] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] sp_calculate_schedule | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_delinq_summary | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_active_contract | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_maturing_soon | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_customer_360 | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_new_customers | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] trg_profile_updated | (1362) (1362, 'Updating of NEW row is not allowed in after trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] sp_calculate_schedule | (?) 실행 가능한 CREATE 문장이 없음 (AI 응답 파싱 확인 필요)
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_delinq_summary | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_active_contract | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_maturing_soon | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_customer_360 | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] v_new_customers | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] trg_profile_updated | (1146) (1146, "Table 'capital_target.customer_profile' doesn't exist")
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+## 2026-04-27 22:37:10 [FUNCTION] tvf_contract_events
+- [R-10] MySQL 은 RETURNS TABLE (Table-Valued Function) 을 지원하지 않습니다
+  → 이 객체는 VIEW 로 변환하거나, CALL 가능한 PROCEDURE + OUT 결과셋 으로 변환하세요. FUNCTION 으로는 표현 불가.
+
+[2026-04-27] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] fn_next_business_day | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END IF;\\n    END LOOP loop_label;\\n    RETURN v_d;\\nEND' (line 24)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] tvf_daily_trx | (1304) (1304, 'FUNCTION settlement_tvf_daily_trx_not_supported already exists')
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] sp_calculate_schedule | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] trg_profile_updated | (1362) (1362, 'Updating of NEW row is not allowed in after trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] tvf_daily_trx | (1304) (1304, 'PROCEDURE settlement_tvf_daily_trx already exists')
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-27] sp_calculate_schedule | (?) 실행 가능한 CREATE 문장이 없음 (AI 응답 파싱 확인 필요)
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_delinq_ranking | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_calc_monthly_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_total_balance | (1049) (1049, "Unknown database 'credit'")
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_mask_rrn | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_get_grade | (1049) (1049, "Unknown database 'ref'")
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_korean_date | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_next_business_day | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_daily_trx | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_assign_collector | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_mark_delinquent | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_approve_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_calculate_schedule | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_contract | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reject_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_deactivate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_merge_customer | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_credit_score | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_branch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_refresh_fx | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_employee_status | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_daily_batch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_process_payment | (1049) (1049, "Unknown database 'credit'")
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reverse_trx | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_delinq_summary | (1049) (1049, "Unknown database 'collection'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_active_contract | (1582) (1582, "Incorrect parameter count in the call to native function 'DATEDIFF'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_maturing_soon | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_product_delinq_rate | (1049) (1049, "Unknown database 'ref'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_customer_360 | (1049) (1049, "Unknown database 'customer'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_new_customers | (1049) (1049, "Unknown database 'customer'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_branch_performance | (1049) (1049, "Unknown database 'ref'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_employee_workload | (1049) (1049, "Unknown database 'ref'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_monthly_disburse | (1049) (1049, "Unknown database 'settlement'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_recent_trx | (1049) (1049, "Unknown database 'settlement'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_profile_updated | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_contract_status_change | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_delinq_resolved | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_bank_primary | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_trx_large_alert | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_delinq_ranking | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_calc_monthly_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_total_balance | (1049) (1049, "Unknown database 'credit'")
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_mask_rrn | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_get_grade | (1049) (1049, "Unknown database 'ref'")
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_korean_date | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_next_business_day | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_daily_trx | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_assign_collector | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_mark_delinquent | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_approve_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_calculate_schedule | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_contract | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reject_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_deactivate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_merge_customer | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_credit_score | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_branch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_refresh_fx | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_employee_status | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_daily_batch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_process_payment | (1049) (1049, "Unknown database 'credit'")
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reverse_trx | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_delinq_summary | (1049) (1049, "Unknown database 'collection'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_active_contract | (1582) (1582, "Incorrect parameter count in the call to native function 'DATEDIFF'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_maturing_soon | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_product_delinq_rate | (1049) (1049, "Unknown database 'ref'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_customer_360 | (1049) (1049, "Unknown database 'customer'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_new_customers | (1049) (1049, "Unknown database 'customer'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_branch_performance | (1049) (1049, "Unknown database 'ref'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_employee_workload | (1049) (1049, "Unknown database 'ref'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_monthly_disburse | (1049) (1049, "Unknown database 'settlement'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] v_recent_trx | (1049) (1049, "Unknown database 'settlement'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_profile_updated | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_contract_status_change | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_delinq_resolved | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_bank_primary | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_trx_large_alert | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_calc_monthly_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+## 2026-04-28 13:06:27 [FUNCTION] tvf_contract_events
+- [R-10] MySQL 은 RETURNS TABLE (Table-Valued Function) 을 지원하지 않습니다
+  → 이 객체는 VIEW 로 변환하거나, CALL 가능한 PROCEDURE + OUT 결과셋 으로 변환하세요. FUNCTION 으로는 표현 불가.
+
+[2026-04-28] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_next_business_day | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_assign_collector | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'WHERE delinq_id = p_delinq_id;\\nEND' (line 8)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_mark_delinquent | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'LIMIT 1;\\n\\tEND' (line 25)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_approve_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_contract | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reject_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_deactivate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_merge_customer | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_branch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_employee_status | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_process_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'WHERE contract_id = p_contract_id;\\n\\n    COMMIT;\\nEND' (line 34)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_profile_updated | (1362) (1362, 'Updating of NEW row is not allowed in after trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_assign_collector | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'WHERE delinq_id = p_delinq_id;\\nEND' (line 8)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_approve_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_contract | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reject_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_deactivate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_merge_customer | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_branch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_employee_status | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_process_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'WHERE contract_id = p_contract_id;\\n\\n    COMMIT;\\nEND' (line 34)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_delinq_stage | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_calc_monthly_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+## 2026-04-28 13:38:55 [FUNCTION] tvf_contract_events
+- [R-10] MySQL 은 RETURNS TABLE (Table-Valued Function) 을 지원하지 않습니다
+  → 이 객체는 VIEW 로 변환하거나, CALL 가능한 PROCEDURE + OUT 결과셋 으로 변환하세요. FUNCTION 으로는 표현 불가.
+
+[2026-04-28] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_next_business_day | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] tvf_daily_trx | (1304) (1304, 'FUNCTION settlement_tvf_daily_trx_is_not_possible already exists')
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_assign_collector | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'WHERE delinq_id = p_delinq_id;\\nEND' (line 8)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_mark_delinquent | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'LIMIT 1;\\n\\tEND' (line 25)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_approve_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_contract | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_reject_application | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_deactivate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_merge_customer | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_close_branch | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_update_employee_status | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_process_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'WHERE contract_id = p_contract_id;\\n\\n    COMMIT;\\nEND' (line 34)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_calc_monthly_payment | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+## 2026-04-28 13:57:28 [FUNCTION] tvf_contract_events
+- [R-10] MySQL 은 RETURNS TABLE (Table-Valued Function) 을 지원하지 않습니다
+  → 이 객체는 VIEW 로 변환하거나, CALL 가능한 PROCEDURE + OUT 결과셋 으로 변환하세요. FUNCTION 으로는 표현 불가.
+
+[2026-04-28] tvf_contract_events | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_next_business_day | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END IF;\\n    END LOOP loop_label;\\n    RETURN v_d;\\nEND' (line 24)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] sp_mark_delinquent | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: 'LIMIT 1;\\n\\tEND' (line 25)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] trg_profile_updated | (1362) (1362, 'Updating of NEW row is not allowed in after trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] fn_age | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'END' (line 12)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] FN_GETPROCESSLIST | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] FN_GETPROCESSLIST | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] FN_GETPROCESSLIST | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] view_test_daily | (1146) (1146, "Table 'testdb.tbl_test_sales' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] FN_GETPROCESSLIST | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] view_test_daily | (1146) (1146, "Table 'testdb.tbl_test_sales' doesn't exist")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] FN_GETPROCESSLIST | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-04-28] FN_GETPROCESSLIST | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결

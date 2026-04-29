@@ -1,0 +1,152 @@
+{
+  "47e144d6": {
+    "id": "47e144d6",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "NVARCHAR",
+    "tgt_type": "VARCHAR({n}) CHARACTER SET utf8mb4",
+    "note": "Collation 필수",
+    "warning": true,
+    "custom": false
+  },
+  "b319556b": {
+    "id": "b319556b",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "INT IDENTITY",
+    "tgt_type": "INT AUTO_INCREMENT",
+    "note": "Seed 값 확인",
+    "warning": true,
+    "custom": false
+  },
+  "3e4af52a": {
+    "id": "3e4af52a",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "DATETIME",
+    "tgt_type": "DATETIME(3)",
+    "note": "ms 손실 주의",
+    "warning": true,
+    "custom": false
+  },
+  "c69b68dc": {
+    "id": "c69b68dc",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "BIT",
+    "tgt_type": "TINYINT(1)",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "8cb30363": {
+    "id": "8cb30363",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "MONEY",
+    "tgt_type": "DECIMAL(19,4)",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "cdac0069": {
+    "id": "cdac0069",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "UNIQUEIDENTIFIER",
+    "tgt_type": "CHAR(36)",
+    "note": "UUID 형식",
+    "warning": false,
+    "custom": false
+  },
+  "14888891": {
+    "id": "14888891",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "src_type": "VARBINARY(MAX)",
+    "tgt_type": "LONGBLOB",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "f57c4a14": {
+    "id": "f57c4a14",
+    "src_db": "oracle",
+    "tgt_db": "postgresql",
+    "src_type": "NUMBER",
+    "tgt_type": "NUMERIC({p},{s})",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "221a933c": {
+    "id": "221a933c",
+    "src_db": "oracle",
+    "tgt_db": "postgresql",
+    "src_type": "DATE",
+    "tgt_type": "TIMESTAMP",
+    "note": "시간 포함 여부 확인",
+    "warning": true,
+    "custom": false
+  },
+  "4bcd6669": {
+    "id": "4bcd6669",
+    "src_db": "oracle",
+    "tgt_db": "postgresql",
+    "src_type": "VARCHAR2",
+    "tgt_type": "VARCHAR",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "cf03b3f6": {
+    "id": "cf03b3f6",
+    "src_db": "oracle",
+    "tgt_db": "postgresql",
+    "src_type": "CLOB",
+    "tgt_type": "TEXT",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "7fb642bb": {
+    "id": "7fb642bb",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "src_type": "TINYINT(1)",
+    "tgt_type": "BIT",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "826c83c9": {
+    "id": "826c83c9",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "src_type": "TEXT",
+    "tgt_type": "NVARCHAR(MAX)",
+    "note": null,
+    "warning": false,
+    "custom": false
+  },
+  "33764e2a": {
+    "id": "33764e2a",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "src_type": "DATETIME",
+    "tgt_type": "DATETIME2(6)",
+    "note": "정밀도 향상",
+    "warning": false,
+    "custom": false
+  },
+  "39d7b3f7": {
+    "id": "39d7b3f7",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "src_type": "AUTO_INCREMENT",
+    "tgt_type": "IDENTITY(1,1)",
+    "note": null,
+    "warning": false,
+    "custom": false
+  }
+}

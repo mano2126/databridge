@@ -1,0 +1,307 @@
+{
+  "_meta": {
+    "title": "MySQL → MSSQL 데이터 타입 변환",
+    "category": "DATATYPE",
+    "src_db": "mysql",
+    "tgt_db": "mssql",
+    "version": "1.0",
+    "description": "MySQL 데이터 타입을 SQL Server 동등 타입으로 변환"
+  },
+  "rules": [
+    {
+      "id": "dt_tinyint1",
+      "src": "TINYINT(1)",
+      "tgt": "BIT",
+      "note": "TINYINT(1) bool → BIT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_tinyint_unsigned",
+      "src": "TINYINT UNSIGNED",
+      "tgt": "SMALLINT",
+      "note": "UNSIGNED TINYINT(0~255) → SMALLINT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_smallint_unsigned",
+      "src": "SMALLINT UNSIGNED",
+      "tgt": "INT",
+      "note": "UNSIGNED SMALLINT → INT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_mediumint_unsigned",
+      "src": "MEDIUMINT UNSIGNED",
+      "tgt": "INT",
+      "note": "UNSIGNED MEDIUMINT → INT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_int_unsigned",
+      "src": "INT UNSIGNED",
+      "tgt": "BIGINT",
+      "note": "UNSIGNED INT → BIGINT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_bigint_unsigned",
+      "src": "BIGINT UNSIGNED",
+      "tgt": "DECIMAL(20,0)",
+      "note": "UNSIGNED BIGINT → DECIMAL(20,0). MSSQL BIGINT는 부호있음",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_mediumint",
+      "src": "MEDIUMINT",
+      "tgt": "INT",
+      "note": "MEDIUMINT → INT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_int_auto",
+      "src": "INT AUTO_INCREMENT",
+      "tgt": "INT IDENTITY(1,1)",
+      "note": "AUTO_INCREMENT → IDENTITY",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_bigint_auto",
+      "src": "BIGINT AUTO_INCREMENT",
+      "tgt": "BIGINT IDENTITY(1,1)",
+      "note": "BIGINT AUTO_INCREMENT → BIGINT IDENTITY",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_smallint_auto",
+      "src": "SMALLINT AUTO_INCREMENT",
+      "tgt": "SMALLINT IDENTITY(1,1)",
+      "note": "SMALLINT AUTO_INCREMENT → SMALLINT IDENTITY",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_auto_increment",
+      "src": "AUTO_INCREMENT",
+      "tgt": "IDENTITY(1,1)",
+      "note": "AUTO_INCREMENT → IDENTITY(1,1)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_longtext",
+      "src": "LONGTEXT",
+      "tgt": "NVARCHAR(MAX)",
+      "note": "LONGTEXT(4GB) → NVARCHAR(MAX)(2GB). 2GB 초과 데이터 주의",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_mediumtext",
+      "src": "MEDIUMTEXT",
+      "tgt": "NVARCHAR(MAX)",
+      "note": "MEDIUMTEXT(16MB) → NVARCHAR(MAX)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_tinytext",
+      "src": "TINYTEXT",
+      "tgt": "NVARCHAR(255)",
+      "note": "TINYTEXT(255B) → NVARCHAR(255)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_text",
+      "src": "TEXT",
+      "tgt": "NVARCHAR(MAX)",
+      "note": "TEXT(65KB) → NVARCHAR(MAX)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_longblob",
+      "src": "LONGBLOB",
+      "tgt": "VARBINARY(MAX)",
+      "note": "LONGBLOB → VARBINARY(MAX)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_mediumblob",
+      "src": "MEDIUMBLOB",
+      "tgt": "VARBINARY(MAX)",
+      "note": "MEDIUMBLOB → VARBINARY(MAX)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_tinyblob",
+      "src": "TINYBLOB",
+      "tgt": "VARBINARY(255)",
+      "note": "TINYBLOB → VARBINARY(255)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_blob",
+      "src": "BLOB",
+      "tgt": "VARBINARY(MAX)",
+      "note": "BLOB → VARBINARY(MAX)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_varchar",
+      "src": "\\bVARCHAR\\b",
+      "tgt": "NVARCHAR",
+      "note": "VARCHAR → NVARCHAR (유니코드 보존)",
+      "category": "DATATYPE",
+      "regex": true
+    },
+    {
+      "id": "dt_char",
+      "src": "\\bCHAR\\b(?!_LENGTH|ACTER|SET)",
+      "tgt": "NCHAR",
+      "note": "CHAR → NCHAR",
+      "category": "DATATYPE",
+      "regex": true
+    },
+    {
+      "id": "dt_datetime6",
+      "src": "DATETIME(6)",
+      "tgt": "DATETIME2(6)",
+      "regex": true,
+      "note": "DATETIME(6) → DATETIME2(6)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_datetime_n",
+      "src": "DATETIME(\\d)",
+      "tgt": "DATETIME2(\\1)",
+      "regex": true,
+      "note": "DATETIME(n) → DATETIME2(n)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_datetime",
+      "src": "DATETIME",
+      "tgt": "DATETIME2(3)",
+      "note": "DATETIME → DATETIME2(3)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_timestamp",
+      "src": "TIMESTAMP",
+      "tgt": "DATETIME2(6)",
+      "note": "TIMESTAMP(자동갱신) → DATETIME2(6). 자동갱신은 DEFAULT/트리거로",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_double",
+      "src": "DOUBLE",
+      "tgt": "FLOAT",
+      "note": "DOUBLE(8B) → FLOAT (MSSQL FLOAT=8B)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_double_precision",
+      "src": "DOUBLE PRECISION",
+      "tgt": "FLOAT",
+      "note": "DOUBLE PRECISION → FLOAT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_enum",
+      "src": "ENUM([^)]+)",
+      "tgt": "NVARCHAR(255)",
+      "regex": true,
+      "note": "ENUM → NVARCHAR(255). CHECK 제약조건 수동 추가 권장",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_set",
+      "src": "SET([^)]+)",
+      "tgt": "NVARCHAR(255)",
+      "regex": true,
+      "note": "SET → NVARCHAR(255)",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_json",
+      "src": "JSON",
+      "tgt": "NVARCHAR(MAX)",
+      "note": "JSON → NVARCHAR(MAX). MSSQL 2016+ JSON 함수 사용 가능",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_year",
+      "src": "YEAR",
+      "tgt": "SMALLINT",
+      "note": "YEAR(1901~2155) → SMALLINT",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_bit_n",
+      "src": "BIT(\\d+)",
+      "tgt": "BINARY(1)",
+      "regex": true,
+      "note": "BIT(n) → BINARY. MySQL BIT(n)은 비트필드",
+      "warning": true,
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_decimal",
+      "src": "DECIMAL",
+      "tgt": "DECIMAL",
+      "note": "DECIMAL OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_numeric",
+      "src": "NUMERIC",
+      "tgt": "NUMERIC",
+      "note": "NUMERIC OK",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_float",
+      "src": "FLOAT",
+      "tgt": "REAL",
+      "note": "MySQL FLOAT(4B) → MSSQL REAL(4B)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_geometry",
+      "src": "GEOMETRY",
+      "tgt": "GEOMETRY",
+      "note": "GEOMETRY OK — MSSQL 지원",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_point",
+      "src": "POINT",
+      "tgt": "GEOMETRY",
+      "note": "POINT → GEOMETRY",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_polygon",
+      "src": "POLYGON",
+      "tgt": "GEOMETRY",
+      "note": "POLYGON → GEOMETRY",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_unsigned_remove",
+      "src": "\\s+UNSIGNED\\b",
+      "tgt": "",
+      "regex": true,
+      "note": "UNSIGNED 제거 (타입 변환 후 남은 것)",
+      "category": "DATATYPE"
+    },
+    {
+      "id": "dt_zerofill_remove",
+      "src": "\\s+ZEROFILL\\b",
+      "tgt": "",
+      "regex": true,
+      "note": "ZEROFILL → MSSQL 미지원, 제거",
+      "category": "DATATYPE"
+    }
+  ]
+}

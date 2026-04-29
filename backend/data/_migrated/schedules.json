@@ -1,0 +1,125 @@
+{
+  "3f41e7db": {
+    "id": "3f41e7db",
+    "name": "crec → crec 이관",
+    "type": "once",
+    "run_at": "2026-04-10T23:41",
+    "cron_expr": "",
+    "interval_min": 60,
+    "status": "done",
+    "created_at": "2026-04-10T14:38:59.007510Z",
+    "next_run": "2026-04-10T23:41:00+09:00",
+    "run_count": 1,
+    "job_config": {
+      "name": "crec → crec 이관",
+      "src_db": "mssql",
+      "tgt_db": "mysql",
+      "src_host": "127.0.0.1",
+      "src_port": 1434,
+      "src_database": "crec",
+      "src_username": "sa",
+      "src_password": "0000",
+      "tgt_host": "127.0.0.1",
+      "tgt_port": 3306,
+      "tgt_database": "crec",
+      "tgt_username": "root",
+      "tgt_password": "mano212643@!",
+      "tables": [
+        "crec_ip_info"
+      ],
+      "objects": {
+        "procedures": [
+          "SP_INSERTERRORLOG",
+          "SP_SET_TABLE_COMMENT",
+          "sp_Softphone_UpdateRecord",
+          "SP_STATRECORD",
+          "SP_STATSYSTEM",
+          "SP_USER_INFO"
+        ],
+        "functions": [
+          "FN_GETCODENAME",
+          "FN_GETPROCESSLIST",
+          "FN_NVL2"
+        ],
+        "triggers": [
+          "crec_recfile_ins",
+          "crec_recfile_upd",
+          "crec_recfile_upd_SELECT"
+        ],
+        "views": [
+          "view_record",
+          "view_record_select"
+        ]
+      },
+      "convert_objects": true,
+      "ddl_engine": "claude",
+      "obj_engine": "claude",
+      "table_mode": "schema_data",
+      "view_mode": "skip_existing",
+      "obj_mode": "skip_existing",
+      "batch_size": 5000,
+      "parallel_workers": 4,
+      "on_error": "skip",
+      "drop_table": false,
+      "truncate_target": true,
+      "create_table": true,
+      "auto_fix_actions": []
+    },
+    "last_run": "2026-04-10T14:41:00.840377Z"
+  },
+  "24ea9061": {
+    "id": "24ea9061",
+    "job_config": {
+      "job_type": "cdc",
+      "cdc_cfg_id": "413e6816",
+      "cdc_config": {
+        "name": "변경분 테스트",
+        "src_conn": {
+          "db_type": "mssql",
+          "host": "127.0.0.1",
+          "port": 1433,
+          "database": "crec",
+          "username": "sa",
+          "password": "Bridge@1234"
+        },
+        "tgt_conn": {
+          "db_type": "mysql",
+          "host": "127.0.0.1",
+          "port": 3306,
+          "database": "testdb",
+          "username": "bridge",
+          "password": "bridge1234"
+        },
+        "batch_size": 5000,
+        "tables": [
+          {
+            "table": "CREC_monitoring",
+            "ts_col": "DATETIME",
+            "extra_where": "",
+            "strategy": "append"
+          },
+          {
+            "table": "tbl_abort_hist",
+            "ts_col": "abort_datm",
+            "extra_where": "",
+            "strategy": "append"
+          }
+        ],
+        "id": "413e6816",
+        "updated_at": "2026-04-12 22:12:50"
+      },
+      "name": "변경분 테스트 (CDC)"
+    },
+    "type": "cron",
+    "run_at": "",
+    "cron_expr": "0 * * * *",
+    "interval_min": 60,
+    "name": "변경분 테스트 (CDC)",
+    "status": "paused",
+    "created_at": "2026-04-13T15:56:21.135159+09:00",
+    "next_run": "2026-04-13T17:00:00",
+    "run_count": 1,
+    "job_type": "cdc",
+    "last_run": "2026-04-13T16:00:30.892588+09:00"
+  }
+}

@@ -1,0 +1,593 @@
+<!--
+  ScenarioSelector.vue v2 (v90.1) — 본부장님 통찰 반영
+  
+  변경:
+  - "권장" 강제 제거 (사용자 패턴 우선)
+  - 좌측: 최근 사용 2개 (큰 카드)
+  - 우측: 전체 시나리오 리스트
+  - 사용자 계정 기반 이력 저장 (백엔드 동기화)
+  
+  Props:
+    modelValue: 현재 선택된 시나리오 id (v-model)
+  
+  Emits:
+    update:modelValue: 선택 변경
+-->
+<template>
+  <div class="ms-container">
+    <div class="ms-header">
+      <div class="ms-title">
+        <span class="ms-title-icon">🎯</span>
+        <span>이관 시나리오 선택</span>
+        <span class="ms-required">*</span>
+      </div>
+      <div class="ms-subtitle">
+        왜 이관하는지를 먼저 선언하면 → AI DBA + PII 정책이 자동 적용됩니다.
+        <span class="ms-step4-note">(Step 4 에서 수정 가능)</span>
+      </div>
+    </div>
+
+    <div class="ms-layout">
+      <!-- ════ 좌측: 최근 사용 ════ -->
+      <div class="ms-recent-section">
+        <div class="ms-section-title">
+          <span class="ms-section-icon">⏱️</span>
+          <span>최근 사용</span>
+          <span v-if="loading" class="ms-loading">불러오는 중...</span>
+        </div>
+        
+        <div v-if="recentScenarios.length === 0" class="ms-recent-empty">
+          <div class="ms-empty-icon">📋</div>
+          <div class="ms-empty-text">
+            아직 사용 이력이 없습니다.<br>
+            <span class="ms-empty-hint">우측에서 시나리오를 선택하세요.</span>
+          </div>
+        </div>
+        
+        <div v-else class="ms-recent-cards">
+          <div v-for="rec in recentScenarios" :key="rec.scenario_id"
+               class="ms-card ms-card-recent"
+               :class="{ 'ms-sel': modelValue === rec.scenario_id }"
+               @click="selectScenario(rec.scenario_id)">
+            
+            <span class="ms-recent-badge">
+              ⏱️ {{ formatRelativeTime(rec.used_at) }}
+            </span>
+            
+            <div class="ms-card-icon-large">{{ getScenario(rec.scenario_id)?.icon }}</div>
+            <div class="ms-card-name-large">{{ getScenario(rec.scenario_id)?.name }}</div>
+            <div class="ms-card-desc">
+              {{ getScenario(rec.scenario_id)?.description }}
+            </div>
+            <div class="ms-use-count">
+              {{ rec.use_count }}회 사용
+            </div>
+            
+            <span class="ms-card-cat-badge"
+                  :style="`background:${getScenario(rec.scenario_id)?.badge.color}; color:#fff`">
+              {{ getScenario(rec.scenario_id)?.badge.text }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ════ 우측: 전체 리스트 ════ -->
+      <div class="ms-list-section">
+        <div class="ms-section-title">
+          <span class="ms-section-icon">📚</span>
+          <span>모든 시나리오</span>
+        </div>
+        
+        <div class="ms-list">
+          <div v-for="sc in allScenarios" :key="sc.id"
+               class="ms-list-item"
+               :class="{
+                 'ms-sel': modelValue === sc.id,
+                 [`ms-risk-${sc.riskLevel}`]: true,
+               }"
+               @click="selectScenario(sc.id)">
+            
+            <span class="ms-list-icon">{{ sc.icon }}</span>
+            <b class="ms-list-name">{{ sc.name }}</b>
+            <span class="ms-list-desc">{{ sc.description }}</span>
+            <span class="ms-list-badge"
+                  :style="`background:${sc.badge.color}; color:#fff`">
+              {{ sc.badge.text }}
+            </span>
+            <span class="ms-list-arrow">›</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 선택된 시나리오 디테일 (하단) -->
+    <div v-if="modelValue && selectedScenario" class="ms-selected-detail">
+      <div class="ms-sd-header">
+        <span class="ms-sd-icon">{{ selectedScenario.icon }}</span>
+        <span class="ms-sd-name">{{ selectedScenario.name }} 선택됨</span>
+      </div>
+      
+      <div class="ms-sd-grid">
+        <div class="ms-sd-cell">
+          <div class="ms-sd-label">PII 정책</div>
+          <code class="ms-sd-val">{{ selectedScenario.piiPreset }}</code>
+        </div>
+        <div class="ms-sd-cell">
+          <div class="ms-sd-label">자동 탐지</div>
+          <span class="ms-sd-val">
+            {{ selectedScenario.piiAutoStart ? '✅ Step 4 진입 시 자동' : '⏸ 수동' }}
+          </span>
+        </div>
+        <div class="ms-sd-cell">
+          <div class="ms-sd-label">법조문</div>
+          <span class="ms-sd-val ms-sd-legal">📜 {{ selectedScenario.legalNote }}</span>
+        </div>
+      </div>
+      
+      <div v-if="selectedScenario.warning" class="ms-sd-warning">
+        {{ selectedScenario.warning }}
+      </div>
+      
+      <div class="ms-sd-tooltip">
+        💡 {{ selectedScenario.tooltip }}
+      </div>
+    </div>
+
+    <!-- 선택 안 됐을 때 -->
+    <div v-if="!modelValue" class="ms-empty-warn">
+      ⚠️ 시나리오를 선택해야 다음 단계로 진행할 수 있습니다.
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, watch } from 'vue'
+import { MIGRATION_SCENARIOS, getScenario as getScenarioDef } from '@/utils/migrationScenarios.js'
+
+const props = defineProps({
+  modelValue: {
+    type: String,
+    default: '',
+  },
+})
+
+const emit = defineEmits(['update:modelValue'])
+
+// 상태
+const recentHistory = ref([])  // 백엔드에서 가져온 사용 이력
+const loading = ref(false)
+
+// 전체 시나리오 (recommended 표시 제거 - 본부장님 의견)
+const allScenarios = computed(() => MIGRATION_SCENARIOS)
+
+// 최근 사용 2개 (백엔드 응답 기반)
+const recentScenarios = computed(() => recentHistory.value.slice(0, 2))
+
+// 선택된 시나리오 정의
+const selectedScenario = computed(() => 
+  props.modelValue ? getScenarioDef(props.modelValue) : null
+)
+
+// 시나리오 ID → 정의 (헬퍼)
+function getScenario(id) {
+  return getScenarioDef(id)
+}
+
+// 시나리오 선택 (+ 백엔드에 사용 기록)
+async function selectScenario(scenarioId) {
+  emit('update:modelValue', scenarioId)
+  
+  // v90.5: 백엔드 응답 기다리지 않고 즉시 좌측에 추가 (낙관적 업데이트)
+  const now = Date.now() / 1000
+  const existing = recentHistory.value.findIndex(h => h.scenario_id === scenarioId)
+  if (existing >= 0) {
+    // 이미 있으면 used_at + use_count 업데이트 + 맨 앞으로
+    const item = recentHistory.value[existing]
+    item.used_at = now
+    item.use_count = (item.use_count || 0) + 1
+    recentHistory.value.splice(existing, 1)
+    recentHistory.value.unshift(item)
+  } else {
+    // 새로 추가 - 맨 앞에
+    recentHistory.value.unshift({
+      scenario_id: scenarioId,
+      used_at: now,
+      use_count: 1,
+    })
+  }
+  
+  // 백엔드에 사용 기록 (404 나도 무시 - main.py 라우터 미등록 시)
+  try {
+    const r = await fetch('/api/v1/user/preferences/scenarios', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ scenario_id: scenarioId }),
+    })
+    if (r.ok) {
+      const data = await r.json()
+      // 백엔드 응답으로 동기화 (다른 사용자가 변경했을 수도 있음)
+      recentHistory.value = data.items || recentHistory.value
+    }
+  } catch (e) {
+    // 404 (라우터 미등록) 또는 네트워크 에러 - 낙관적 업데이트 유지
+    console.warn('[Scenario] 사용 기록 동기화 실패 (낙관적 업데이트 유지):', e.message)
+  }
+}
+
+// 사용 이력 로드
+async function loadHistory() {
+  loading.value = true
+  try {
+    const r = await fetch('/api/v1/user/preferences/scenarios', {
+      credentials: 'include',
+    })
+    if (r.ok) {
+      const data = await r.json()
+      recentHistory.value = data.items || []
+    }
+  } catch (e) {
+    console.warn('[Scenario] 이력 로드 실패:', e.message)
+    recentHistory.value = []
+  } finally {
+    loading.value = false
+  }
+}
+
+// 상대 시간 포맷 (5분 전, 어제, 3일 전 등)
+function formatRelativeTime(timestamp) {
+  if (!timestamp) return '—'
+  const now = Date.now() / 1000
+  const diff = now - timestamp
+  
+  if (diff < 60) return '방금'
+  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`
+  if (diff < 86400 * 2) return '어제'
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}일 전`
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400 / 7)}주 전`
+  return `${Math.floor(diff / 86400 / 30)}개월 전`
+}
+
+onMounted(loadHistory)
+</script>
+
+<style scoped>
+.ms-container {
+  margin-top: 18px;
+  padding: 16px 18px;
+  background: var(--bg-secondary, #f8fafc);
+  border: 2px solid var(--border-light, #e2e8f0);
+  border-radius: 10px;
+}
+
+/* ── 헤더 ── */
+.ms-header {
+  margin-bottom: 14px;
+}
+.ms-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary, #1e293b);
+  margin-bottom: 4px;
+}
+.ms-title-icon {
+  font-size: 20px;
+}
+.ms-required {
+  color: #ef4444;
+}
+.ms-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
+  line-height: 1.5;
+}
+.ms-step4-note {
+  font-style: italic;
+}
+
+/* ── 레이아웃: 좌(최근) + 우(리스트) ── */
+.ms-layout {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+@media (max-width: 1024px) {
+  .ms-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 섹션 타이틀 (왼쪽 + 오른쪽 공통) */
+.ms-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary, #475569);
+  margin-bottom: 8px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.ms-section-icon {
+  font-size: 14px;
+}
+.ms-loading {
+  margin-left: 6px;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  font-style: italic;
+}
+
+/* ════ 좌측: 최근 사용 ════ */
+.ms-recent-empty {
+  padding: 30px 20px;
+  background: #fff;
+  border: 2px dashed var(--border-light, #e2e8f0);
+  border-radius: 8px;
+  text-align: center;
+}
+.ms-empty-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+  opacity: 0.4;
+}
+.ms-empty-text {
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
+  line-height: 1.6;
+}
+.ms-empty-hint {
+  font-size: 11px;
+  color: var(--text-secondary, #94a3b8);
+}
+
+.ms-recent-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ms-card {
+  position: relative;
+  padding: 14px 16px;
+  background: #fff;
+  border: 2px solid var(--border-light, #e2e8f0);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ms-card:hover {
+  border-color: #94a3b8;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.ms-sel {
+  border-color: #14b8a6 !important;
+  background: #f0fdfa !important;
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.12);
+}
+.ms-card-recent {
+  padding: 16px 18px;
+}
+
+.ms-recent-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #14b8a6;
+  background: #f0fdfa;
+  padding: 3px 8px;
+  border-radius: 99px;
+  border: 1px solid #5eead4;
+}
+
+.ms-card-icon-large {
+  font-size: 28px;
+  margin-bottom: 6px;
+}
+.ms-card-name-large {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary, #1e293b);
+  margin-bottom: 4px;
+}
+.ms-card-desc {
+  font-size: 11px;
+  color: var(--text-secondary, #64748b);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.ms-use-count {
+  font-size: 10px;
+  color: var(--text-secondary, #94a3b8);
+  margin-bottom: 8px;
+}
+.ms-card-cat-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 99px;
+  letter-spacing: 0.3px;
+}
+
+/* ════ 우측: 전체 리스트 ════ */
+.ms-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #fff;
+  border: 1px solid var(--border-light, #e2e8f0);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ms-list-item {
+  /* v90.2: 컬럼 정렬 그리드 - 아이콘 / 이름 / 설명 / 배지 / 화살표 */
+  display: grid;
+  grid-template-columns: 24px 110px 1fr 110px 16px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: all 0.12s;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--border-light, #f1f5f9);
+}
+.ms-list-item:last-child {
+  border-bottom: none;
+}
+.ms-list-item:hover {
+  background: var(--bg-tertiary, #f8fafc);
+}
+.ms-list-item.ms-sel {
+  background: #f0fdfa !important;
+  border-left-color: #14b8a6 !important;
+  box-shadow: none;
+}
+
+/* 위험도별 좌측 컬러 */
+.ms-list-item.ms-risk-low { border-left-color: #10b981; }
+.ms-list-item.ms-risk-medium { border-left-color: #f59e0b; }
+.ms-list-item.ms-risk-high { border-left-color: #3b82f6; }
+.ms-list-item.ms-risk-critical { border-left-color: #dc2626; }
+.ms-list-item.ms-risk-unknown { border-left-color: #64748b; }
+
+.ms-list-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.ms-list-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary, #1e293b);
+  white-space: nowrap;
+}
+.ms-list-desc {
+  font-size: 11px;
+  color: var(--text-secondary, #64748b);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ms-list-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 99px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  text-align: center;
+}
+.ms-list-arrow {
+  font-size: 18px;
+  color: var(--text-secondary, #94a3b8);
+  flex-shrink: 0;
+}
+.ms-list-item.ms-sel .ms-list-arrow {
+  color: #14b8a6;
+  font-weight: 700;
+}
+
+/* ════ 선택 후 디테일 (하단) ════ */
+.ms-selected-detail {
+  margin-top: 12px;
+  padding: 14px 16px;
+  background: #fff;
+  border: 2px solid #14b8a6;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(20, 184, 166, 0.1);
+}
+.ms-sd-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border-light, #e2e8f0);
+}
+.ms-sd-icon {
+  font-size: 22px;
+}
+.ms-sd-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #14b8a6;
+}
+
+.ms-sd-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.ms-sd-cell {
+}
+.ms-sd-label {
+  font-size: 10px;
+  color: var(--text-secondary, #94a3b8);
+  margin-bottom: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  font-weight: 600;
+}
+.ms-sd-val {
+  font-size: 12px;
+  color: var(--text-primary, #1e293b);
+  font-weight: 600;
+}
+code.ms-sd-val {
+  background: var(--bg-tertiary, #f1f5f9);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 11px;
+}
+.ms-sd-legal {
+  color: var(--text-secondary, #64748b);
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.ms-sd-warning {
+  padding: 8px 12px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.ms-sd-tooltip {
+  padding: 8px 10px;
+  background: #f0fdfa;
+  border-left: 3px solid #14b8a6;
+  border-radius: 0 4px 4px 0;
+  font-size: 11px;
+  color: #115e59;
+  line-height: 1.5;
+}
+
+/* 경고 */
+.ms-empty-warn {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+</style>

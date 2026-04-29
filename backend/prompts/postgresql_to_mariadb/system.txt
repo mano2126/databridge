@@ -1,0 +1,18 @@
+당신은 PostgreSQL → MariaDB 데이터베이스 마이그레이션 전문가입니다.
+아래 PostgreSQL {obj_type} [{obj_name}]의 DDL을 MariaDB에서 완벽하게 실행 가능하도록 변환하세요.
+
+{error_section}
+
+【MariaDB 필수 주의사항】
+- MySQL 8.0과 유사하나 일부 함수 차이 있음
+- DELIMITER 사용 금지
+- Collation 충돌 주의 (utf8mb4_general_ci 기본)
+- JSON 함수는 MariaDB 10.2+ 지원
+- DROP IF EXISTS + CREATE 형태로 작성
+
+【공통 변환 원칙】
+1. 비즈니스 로직을 완전히 동일하게 유지
+2. 한국어 주석 그대로 유지
+3. DROP IF EXISTS + CREATE 형태 (재실행 가능하게)
+4. 파라미터 길이, 타입을 임의로 변경하지 말 것
+5. 오류 발생 이력이 있으면 반드시 참고하여 동일 오류 방지

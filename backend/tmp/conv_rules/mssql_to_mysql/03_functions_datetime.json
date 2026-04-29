@@ -1,0 +1,392 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 날짜/시간 함수 변환",
+    "category": "FUNCTION_DATETIME",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "모든 날짜/시간 관련 함수 변환 — 인자 순서 차이 주의"
+  },
+  "rules": [
+    {
+      "id": "fn_dt_getdate",
+      "src": "GETDATE()",
+      "tgt": "NOW()",
+      "note": "현재 날짜+시간. SYSDATE()는 함수 실행 시점, NOW()는 문장 시작 시점",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_sysdatetime",
+      "src": "SYSDATETIME()",
+      "tgt": "NOW(6)",
+      "note": "나노초 정밀도 현재시간 → NOW(6) 마이크로초",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_sysdatetimeoffset",
+      "src": "SYSDATETIMEOFFSET()",
+      "tgt": "NOW(6)",
+      "note": "시간대 포함 현재시간 → NOW(6). 시간대 정보 손실",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_getutcdate",
+      "src": "GETUTCDATE()",
+      "tgt": "UTC_TIMESTAMP()",
+      "note": "UTC 현재시간",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_sysutcdatetime",
+      "src": "SYSUTCDATETIME()",
+      "tgt": "UTC_TIMESTAMP(6)",
+      "note": "UTC 마이크로초 정밀도",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_current_timestamp",
+      "src": "CURRENT_TIMESTAMP",
+      "tgt": "CURRENT_TIMESTAMP",
+      "note": "CURRENT_TIMESTAMP OK",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_year",
+      "src": "DATEADD(year, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n YEAR)",
+      "note": "DATEADD 인자 순서: (단위,값,날짜) → DATE_ADD(날짜, INTERVAL 값 단위)",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_month",
+      "src": "DATEADD(month, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n MONTH)",
+      "note": "월 더하기",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_day",
+      "src": "DATEADD(day, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n DAY)",
+      "note": "일 더하기",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_hour",
+      "src": "DATEADD(hour, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n HOUR)",
+      "note": "시간 더하기",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_minute",
+      "src": "DATEADD(minute, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n MINUTE)",
+      "note": "분 더하기",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_second",
+      "src": "DATEADD(second, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n SECOND)",
+      "note": "초 더하기",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_week",
+      "src": "DATEADD(week, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n WEEK)",
+      "note": "주 더하기",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_quarter",
+      "src": "DATEADD(quarter, n, date)",
+      "tgt": "DATE_ADD(date, INTERVAL n*3 MONTH)",
+      "note": "분기 더하기 → 3개월 곱셈으로 변환",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_dateadd_negative",
+      "src": "DATEADD(day, -n, date)",
+      "tgt": "DATE_SUB(date, INTERVAL n DAY)",
+      "note": "음수 DATEADD → DATE_SUB",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datediff_day",
+      "src": "DATEDIFF(day, start_date, end_date)",
+      "tgt": "DATEDIFF(end_date, start_date)",
+      "note": "⚠ MSSQL: (단위, 시작, 끝) → MySQL: DATEDIFF(끝, 시작). 인자 순서 반대! 단위는 항상 DAY",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datediff_hour",
+      "src": "DATEDIFF(hour, start_date, end_date)",
+      "tgt": "TIMESTAMPDIFF(HOUR, start_date, end_date)",
+      "note": "시간 차이 → TIMESTAMPDIFF 사용. 인자 순서 동일",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datediff_minute",
+      "src": "DATEDIFF(minute, start_date, end_date)",
+      "tgt": "TIMESTAMPDIFF(MINUTE, start_date, end_date)",
+      "note": "분 차이",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datediff_second",
+      "src": "DATEDIFF(second, start_date, end_date)",
+      "tgt": "TIMESTAMPDIFF(SECOND, start_date, end_date)",
+      "note": "초 차이",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datediff_month",
+      "src": "DATEDIFF(month, start_date, end_date)",
+      "tgt": "TIMESTAMPDIFF(MONTH, start_date, end_date)",
+      "note": "월 차이",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datediff_year",
+      "src": "DATEDIFF(year, start_date, end_date)",
+      "tgt": "TIMESTAMPDIFF(YEAR, start_date, end_date)",
+      "note": "년 차이",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_year",
+      "src": "DATEPART(year, date)",
+      "tgt": "YEAR(date)",
+      "note": "년도 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_month",
+      "src": "DATEPART(month, date)",
+      "tgt": "MONTH(date)",
+      "note": "월 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_day",
+      "src": "DATEPART(day, date)",
+      "tgt": "DAY(date)",
+      "note": "일 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_hour",
+      "src": "DATEPART(hour, date)",
+      "tgt": "HOUR(date)",
+      "note": "시간 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_minute",
+      "src": "DATEPART(minute, date)",
+      "tgt": "MINUTE(date)",
+      "note": "분 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_second",
+      "src": "DATEPART(second, date)",
+      "tgt": "SECOND(date)",
+      "note": "초 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_week",
+      "src": "DATEPART(week, date)",
+      "tgt": "WEEK(date)",
+      "note": "주번호 추출. 주 시작요일 설정(@@DATEFIRST) 차이 주의",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_weekday",
+      "src": "DATEPART(weekday, date)",
+      "tgt": "DAYOFWEEK(date)",
+      "note": "요일: MSSQL(1=일요일~7=토요일) vs MySQL(1=일요일~7=토요일). 동일",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_quarter",
+      "src": "DATEPART(quarter, date)",
+      "tgt": "QUARTER(date)",
+      "note": "분기 추출",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datepart_dayofyear",
+      "src": "DATEPART(dayofyear, date)",
+      "tgt": "DAYOFYEAR(date)",
+      "note": "연중 일수",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_year",
+      "src": "YEAR(date)",
+      "tgt": "YEAR(date)",
+      "note": "YEAR() OK",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_month",
+      "src": "MONTH(date)",
+      "tgt": "MONTH(date)",
+      "note": "MONTH() OK",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_day",
+      "src": "DAY(date)",
+      "tgt": "DAY(date)",
+      "note": "DAY() OK",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datename_month",
+      "src": "DATENAME(month, date)",
+      "tgt": "MONTHNAME(date)",
+      "note": "월 이름 반환 (언어 설정 차이 주의)",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datename_weekday",
+      "src": "DATENAME(weekday, date)",
+      "tgt": "DAYNAME(date)",
+      "note": "요일 이름 반환",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_convert_date",
+      "src": "CONVERT(DATE, date_expr)",
+      "tgt": "DATE(date_expr)",
+      "note": "날짜 형식 변환 → DATE() 함수",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_convert_format_120",
+      "src": "CONVERT(VARCHAR, date, 120)",
+      "tgt": "DATE_FORMAT(date, '%Y-%m-%d %H:%i:%s')",
+      "note": "YYYY-MM-DD HH:MI:SS 형식",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_convert_format_112",
+      "src": "CONVERT(VARCHAR, date, 112)",
+      "tgt": "DATE_FORMAT(date, '%Y%m%d')",
+      "note": "YYYYMMDD 형식",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_convert_format_101",
+      "src": "CONVERT(VARCHAR, date, 101)",
+      "tgt": "DATE_FORMAT(date, '%m/%d/%Y')",
+      "note": "MM/DD/YYYY 형식",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_convert_format_103",
+      "src": "CONVERT(VARCHAR, date, 103)",
+      "tgt": "DATE_FORMAT(date, '%d/%m/%Y')",
+      "note": "DD/MM/YYYY 형식",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_format_date",
+      "src": "FORMAT(date, 'yyyy-MM-dd')",
+      "tgt": "DATE_FORMAT(date, '%Y-%m-%d')",
+      "note": "FORMAT → DATE_FORMAT. 포맷 문자열 차이: yyyy→%Y, MM→%m, dd→%d",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_format_datetime",
+      "src": "FORMAT(date, 'yyyy-MM-dd HH:mm:ss')",
+      "tgt": "DATE_FORMAT(date, '%Y-%m-%d %H:%i:%s')",
+      "note": "분은 mm→%i (MySQL에서 %m은 월!)",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_cast_date",
+      "src": "CAST(date AS DATE)",
+      "tgt": "DATE(date)",
+      "note": "DATE 캐스트 → DATE() 함수",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_cast_datetime",
+      "src": "CAST(expr AS DATETIME2)",
+      "tgt": "CAST(expr AS DATETIME)",
+      "note": "DATETIME2 → DATETIME",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_isdate",
+      "src": "ISDATE(expr)",
+      "tgt": "IF(STR_TO_DATE(expr, '%Y-%m-%d') IS NULL, 0, 1)",
+      "note": "ISDATE → STR_TO_DATE로 검증",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_eomonth",
+      "src": "EOMONTH(date)",
+      "tgt": "LAST_DAY(date)",
+      "note": "월의 마지막 날",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_eomonth_offset",
+      "src": "EOMONTH(date, n)",
+      "tgt": "LAST_DAY(DATE_ADD(date, INTERVAL n MONTH))",
+      "note": "n개월 후 마지막 날",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datefromparts",
+      "src": "DATEFROMPARTS(year, month, day)",
+      "tgt": "MAKEDATE(year, 1) + INTERVAL (month-1) MONTH + INTERVAL (day-1) DAY",
+      "note": "날짜 생성 → MAKEDATE + INTERVAL 조합",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_datetimefromparts",
+      "src": "DATETIMEFROMPARTS(y, mo, d, h, mi, s, ms)",
+      "tgt": "STR_TO_DATE(CONCAT(y,'-',mo,'-',d,' ',h,':',mi,':',s), '%Y-%m-%d %H:%i:%s')",
+      "note": "날짜시간 생성 → STR_TO_DATE + CONCAT",
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_switchoffset",
+      "src": "SWITCHOFFSET(date, offset)",
+      "tgt": "CONVERT_TZ(date, '+00:00', offset)",
+      "note": "시간대 변환 — CONVERT_TZ는 mysql.time_zone 테이블 필요",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_todatetimeoffset",
+      "src": "TODATETIMEOFFSET(date, offset)",
+      "tgt": "CONVERT_TZ(date, '+00:00', offset)",
+      "note": "시간대 오프셋 적용",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    },
+    {
+      "id": "fn_dt_at_time_zone",
+      "src": "date AT TIME ZONE 'timezone'",
+      "tgt": "CONVERT_TZ(date, 'UTC', 'timezone')",
+      "note": "AT TIME ZONE → CONVERT_TZ",
+      "warning": true,
+      "category": "FUNCTION_DATETIME"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+【FUNCTION 전용 추가 규칙 — PostgreSQL】
+
+1. RETURNS 타입 명시 필수
+2. RETURN 문 필수 (모든 실행 경로에서)
+3. 부작용 없는 함수: DETERMINISTIC 또는 READS SQL DATA 명시
+4. SELECT 변수 할당: SELECT col INTO v_var FROM tbl LIMIT 1
+5. 함수 내 DML(INSERT/UPDATE/DELETE) 사용 시 MODIFIES SQL DATA 명시

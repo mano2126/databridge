@@ -1,0 +1,373 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 수학/시스템/변환 함수",
+    "category": "FUNCTION_MATH_SYSTEM",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "수학, 집계, 변환, 시스템 함수 변환"
+  },
+  "rules": [
+    {
+      "id": "fn_math_abs",      "src": "ABS(n)",         "tgt": "ABS(n)",         "note": "절대값 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_ceiling",  "src": "CEILING(n)",    "tgt": "CEILING(n)",    "note": "올림 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_floor",    "src": "FLOOR(n)",      "tgt": "FLOOR(n)",      "note": "내림 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_round",    "src": "ROUND(n, d)",   "tgt": "ROUND(n, d)",   "note": "반올림 OK. 음수 d는 소수점 왼쪽 자리", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_round_trunc", "src": "ROUND(n, d, 1)", "tgt": "TRUNCATE(n, d)", "note": "세 번째 인자가 0이 아니면 TRUNCATE(절사)", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_sqrt",     "src": "SQRT(n)",       "tgt": "SQRT(n)",       "note": "제곱근 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_power",    "src": "POWER(n, exp)", "tgt": "POW(n, exp)",   "note": "거듭제곱 — POWER → POW", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_square",   "src": "SQUARE(n)",     "tgt": "POW(n, 2)",     "note": "제곱 → POW(n, 2)", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_exp",      "src": "EXP(n)",        "tgt": "EXP(n)",        "note": "e의 거듭제곱 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_log",      "src": "LOG(n)",        "tgt": "LN(n)",         "note": "자연로그 — LOG → LN. LOG(n, base)는 LOG(base, n)으로 인자 순서 반대!", "warning": true, "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_log_base", "src": "LOG(n, base)",  "tgt": "LOG(base, n)",  "note": "⚠ LOG(수, 밑) → LOG(밑, 수) 인자 순서 반대", "warning": true, "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_log10",    "src": "LOG10(n)",      "tgt": "LOG10(n)",      "note": "상용로그 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_pi",       "src": "PI()",          "tgt": "PI()",          "note": "원주율 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_sin",      "src": "SIN(n)",        "tgt": "SIN(n)",        "note": "사인 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_cos",      "src": "COS(n)",        "tgt": "COS(n)",        "note": "코사인 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_tan",      "src": "TAN(n)",        "tgt": "TAN(n)",        "note": "탄젠트 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_asin",     "src": "ASIN(n)",       "tgt": "ASIN(n)",       "note": "아크사인 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_acos",     "src": "ACOS(n)",       "tgt": "ACOS(n)",       "note": "아크코사인 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_atan",     "src": "ATAN(n)",       "tgt": "ATAN(n)",       "note": "아크탄젠트 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_atn2",     "src": "ATN2(y, x)",    "tgt": "ATAN2(y, x)",   "note": "ATN2 → ATAN2", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_degrees",  "src": "DEGREES(n)",    "tgt": "DEGREES(n)",    "note": "라디안→도 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_radians",  "src": "RADIANS(n)",    "tgt": "RADIANS(n)",    "note": "도→라디안 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_rand",     "src": "RAND()",        "tgt": "RAND()",        "note": "0~1 난수 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_rand_seed","src": "RAND(seed)",    "tgt": "RAND(seed)",    "note": "시드 고정 난수 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_sign",     "src": "SIGN(n)",       "tgt": "SIGN(n)",       "note": "부호 (-1/0/1) OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_math_modulo",   "src": "n % m",         "tgt": "MOD(n, m)",     "note": "나머지 연산 — % → MOD() 또는 %로도 OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+
+    {
+      "id": "fn_sys_isnull",
+      "src": "ISNULL(expr, default_val)",
+      "tgt": "IFNULL(expr, default_val)",
+      "note": "NULL 대체 — ISNULL → IFNULL",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_nullif",
+      "src": "NULLIF(expr1, expr2)",
+      "tgt": "NULLIF(expr1, expr2)",
+      "note": "NULLIF OK — 두 값이 같으면 NULL 반환",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_coalesce",
+      "src": "COALESCE(a, b, c)",
+      "tgt": "COALESCE(a, b, c)",
+      "note": "COALESCE OK",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_iif",
+      "src": "IIF(condition, true_val, false_val)",
+      "tgt": "IF(condition, true_val, false_val)",
+      "note": "IIF → IF",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_choose",
+      "src": "CHOOSE(n, val1, val2, val3)",
+      "tgt": "ELT(n, val1, val2, val3)",
+      "note": "인덱스 기반 값 선택 — CHOOSE → ELT",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_newid",
+      "src": "NEWID()",
+      "tgt": "UUID()",
+      "note": "UUID 생성 — NEWID → UUID",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_newsequentialid",
+      "src": "NEWSEQUENTIALID()",
+      "tgt": "UUID()",
+      "note": "순차 UUID → UUID(). 순서 보장 안 됨",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_cast_int",
+      "src": "CAST(expr AS INT)",
+      "tgt": "CAST(expr AS SIGNED)",
+      "note": "정수 변환 — INT → SIGNED (MySQL CAST는 SIGNED/UNSIGNED 사용)",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_cast_bigint",
+      "src": "CAST(expr AS BIGINT)",
+      "tgt": "CAST(expr AS SIGNED)",
+      "note": "BIGINT → SIGNED",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_cast_varchar",
+      "src": "CAST(expr AS VARCHAR(n))",
+      "tgt": "CAST(expr AS CHAR(n))",
+      "note": "문자 변환 — VARCHAR → CHAR (MySQL CAST에서는 CHAR 사용)",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_cast_nvarchar",
+      "src": "CAST(expr AS NVARCHAR(n))",
+      "tgt": "CAST(expr AS CHAR(n))",
+      "note": "NVARCHAR → CHAR",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_cast_decimal",
+      "src": "CAST(expr AS DECIMAL(p,s))",
+      "tgt": "CAST(expr AS DECIMAL(p,s))",
+      "note": "DECIMAL 변환 OK",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_cast_float",
+      "src": "CAST(expr AS FLOAT)",
+      "tgt": "CAST(expr AS DOUBLE)",
+      "note": "FLOAT → DOUBLE",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_convert_int",
+      "src": "CONVERT(INT, expr)",
+      "tgt": "CAST(expr AS SIGNED)",
+      "note": "CONVERT → CAST. 인자 순서 반대!",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_convert_varchar",
+      "src": "CONVERT(VARCHAR(n), expr)",
+      "tgt": "CAST(expr AS CHAR(n))",
+      "note": "CONVERT VARCHAR → CAST CHAR",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_convert_date_str",
+      "src": "CONVERT(VARCHAR, date, 23)",
+      "tgt": "DATE_FORMAT(date, '%Y-%m-%d')",
+      "note": "날짜→문자(ISO) 변환",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_try_cast",
+      "src": "TRY_CAST(expr AS INT)",
+      "tgt": "CASE WHEN expr REGEXP '^-?[0-9]+$' THEN CAST(expr AS SIGNED) ELSE NULL END",
+      "note": "실패시 NULL 반환 CAST → REGEXP 검증 후 CAST",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_try_convert",
+      "src": "TRY_CONVERT(INT, expr)",
+      "tgt": "CASE WHEN expr REGEXP '^-?[0-9]+$' THEN CAST(expr AS SIGNED) ELSE NULL END",
+      "note": "실패시 NULL 반환 CONVERT",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_try_parse",
+      "src": "TRY_PARSE(expr AS DATETIME)",
+      "tgt": "STR_TO_DATE(expr, '%Y-%m-%d')",
+      "note": "문자→날짜 파싱",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_scope_identity",
+      "src": "SCOPE_IDENTITY()",
+      "tgt": "LAST_INSERT_ID()",
+      "note": "마지막 삽입 AUTO_INCREMENT 값",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_identity_fn",
+      "src": "@@IDENTITY",
+      "tgt": "LAST_INSERT_ID()",
+      "note": "@@IDENTITY → LAST_INSERT_ID()",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_rowcount",
+      "src": "@@ROWCOUNT",
+      "tgt": "ROW_COUNT()",
+      "note": "영향받은 행 수",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_error",
+      "src": "@@ERROR",
+      "tgt": "-- @@ERROR: MySQL은 GET DIAGNOSTICS 또는 SQLSTATE 사용",
+      "note": "오류 번호 → HANDLER에서 SQLSTATE 확인",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_version",
+      "src": "@@VERSION",
+      "tgt": "VERSION()",
+      "note": "DB 버전 정보",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_servername",
+      "src": "@@SERVERNAME",
+      "tgt": "@@hostname",
+      "note": "서버 이름",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_trancount",
+      "src": "@@TRANCOUNT",
+      "tgt": "-- @@TRANCOUNT: MySQL 미지원. 트랜잭션 중첩 카운트 없음",
+      "note": "트랜잭션 중첩 수 → MySQL은 중첩 트랜잭션 없음",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_spid",
+      "src": "@@SPID",
+      "tgt": "CONNECTION_ID()",
+      "note": "현재 세션 ID",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_db_name",
+      "src": "DB_NAME()",
+      "tgt": "DATABASE()",
+      "note": "현재 DB명",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_user_name",
+      "src": "USER_NAME()",
+      "tgt": "CURRENT_USER()",
+      "note": "현재 사용자명",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_suser_name",
+      "src": "SUSER_NAME()",
+      "tgt": "USER()",
+      "note": "로그인 사용자명",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_host_name",
+      "src": "HOST_NAME()",
+      "tgt": "@@hostname",
+      "note": "호스트명",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_app_name",
+      "src": "APP_NAME()",
+      "tgt": "-- MySQL 미지원",
+      "note": "애플리케이션 이름 → MySQL 미지원",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_object_id",
+      "src": "OBJECT_ID('table_name')",
+      "tgt": "-- 테이블 존재 확인: SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_NAME='table_name'",
+      "note": "객체 ID → MySQL은 information_schema로 존재 확인",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_sys_col_length",
+      "src": "COL_LENGTH('table', 'column')",
+      "tgt": "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_NAME='table' AND COLUMN_NAME='column'",
+      "note": "컬럼 길이 조회",
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_count",    "src": "COUNT(*)",         "tgt": "COUNT(*)",         "note": "COUNT OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_sum",      "src": "SUM(col)",         "tgt": "SUM(col)",         "note": "SUM OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_avg",      "src": "AVG(col)",         "tgt": "AVG(col)",         "note": "AVG OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_max",      "src": "MAX(col)",         "tgt": "MAX(col)",         "note": "MAX OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_min",      "src": "MIN(col)",         "tgt": "MIN(col)",         "note": "MIN OK", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_stdev",    "src": "STDEV(col)",       "tgt": "STD(col)",         "note": "표준편차 — STDEV → STD 또는 STDDEV", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_var",      "src": "VAR(col)",         "tgt": "VARIANCE(col)",    "note": "분산 — VAR → VARIANCE", "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_checksum_agg",
+      "src": "CHECKSUM_AGG(col)",
+      "tgt": "BIT_XOR(col)",
+      "note": "체크섬 집계 → BIT_XOR (근사치)",
+      "warning": true,
+      "category": "FUNCTION_MATH_SYSTEM"
+    },
+    {
+      "id": "fn_agg_grouping",
+      "src": "GROUPING(col)",
+      "tgt": "GROUPING(col)",
+      "note": "ROLLUP/CUBE에서 소계 행 식별 — MySQL 8.0+ GROUPING() 지원",
+      "category": "FUNCTION_MATH_SYSTEM"
+    }
+  ]
+}

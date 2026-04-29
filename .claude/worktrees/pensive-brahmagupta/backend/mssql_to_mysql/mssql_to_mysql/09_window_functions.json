@@ -1,0 +1,170 @@
+{
+  "_meta": {
+    "title": "MSSQL → MySQL 윈도우 함수 변환",
+    "category": "WINDOW_FUNCTION",
+    "src_db": "mssql",
+    "tgt_db": "mysql",
+    "version": "1.0",
+    "description": "분석/윈도우 함수 — MySQL 8.0+ 지원. 이전 버전은 변수로 구현"
+  },
+  "rules": [
+    {
+      "id": "wf_row_number",
+      "src": "ROW_NUMBER() OVER (ORDER BY col)",
+      "tgt": "ROW_NUMBER() OVER (ORDER BY col)",
+      "note": "ROW_NUMBER OK — MySQL 8.0+",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_row_number_partition",
+      "src": "ROW_NUMBER() OVER (PARTITION BY col1 ORDER BY col2)",
+      "tgt": "ROW_NUMBER() OVER (PARTITION BY col1 ORDER BY col2)",
+      "note": "PARTITION BY 포함 ROW_NUMBER OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_rank",
+      "src": "RANK() OVER (ORDER BY col)",
+      "tgt": "RANK() OVER (ORDER BY col)",
+      "note": "RANK OK — 동점 시 같은 순위, 다음 순위 건너뜀",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_dense_rank",
+      "src": "DENSE_RANK() OVER (ORDER BY col)",
+      "tgt": "DENSE_RANK() OVER (ORDER BY col)",
+      "note": "DENSE_RANK OK — 동점 시 같은 순위, 건너뛰지 않음",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_ntile",
+      "src": "NTILE(n) OVER (ORDER BY col)",
+      "tgt": "NTILE(n) OVER (ORDER BY col)",
+      "note": "NTILE OK — n등분",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_lag",
+      "src": "LAG(col, n, default) OVER (ORDER BY col2)",
+      "tgt": "LAG(col, n, default) OVER (ORDER BY col2)",
+      "note": "LAG OK — 이전 행 값",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_lead",
+      "src": "LEAD(col, n, default) OVER (ORDER BY col2)",
+      "tgt": "LEAD(col, n, default) OVER (ORDER BY col2)",
+      "note": "LEAD OK — 다음 행 값",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_first_value",
+      "src": "FIRST_VALUE(col) OVER (ORDER BY col2)",
+      "tgt": "FIRST_VALUE(col) OVER (ORDER BY col2)",
+      "note": "FIRST_VALUE OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_last_value",
+      "src": "LAST_VALUE(col) OVER (ORDER BY col2 ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)",
+      "tgt": "LAST_VALUE(col) OVER (ORDER BY col2 ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)",
+      "note": "LAST_VALUE OK — 프레임 지정 필수",
+      "warning": true,
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_sum_over",
+      "src": "SUM(col) OVER (PARTITION BY col2 ORDER BY col3)",
+      "tgt": "SUM(col) OVER (PARTITION BY col2 ORDER BY col3)",
+      "note": "누적 합계 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_avg_over",
+      "src": "AVG(col) OVER (PARTITION BY col2)",
+      "tgt": "AVG(col) OVER (PARTITION BY col2)",
+      "note": "이동 평균 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_count_over",
+      "src": "COUNT(*) OVER (PARTITION BY col)",
+      "tgt": "COUNT(*) OVER (PARTITION BY col)",
+      "note": "그룹별 카운트 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_max_over",
+      "src": "MAX(col) OVER (PARTITION BY col2)",
+      "tgt": "MAX(col) OVER (PARTITION BY col2)",
+      "note": "그룹별 최대 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_min_over",
+      "src": "MIN(col) OVER (PARTITION BY col2)",
+      "tgt": "MIN(col) OVER (PARTITION BY col2)",
+      "note": "그룹별 최소 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_percent_rank",
+      "src": "PERCENT_RANK() OVER (ORDER BY col)",
+      "tgt": "PERCENT_RANK() OVER (ORDER BY col)",
+      "note": "백분율 순위 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_cume_dist",
+      "src": "CUME_DIST() OVER (ORDER BY col)",
+      "tgt": "CUME_DIST() OVER (ORDER BY col)",
+      "note": "누적 분포 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_rows_between",
+      "src": "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+      "tgt": "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+      "note": "프레임 지정 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_rows_between_all",
+      "src": "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING",
+      "tgt": "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING",
+      "note": "전체 파티션 프레임 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_range_between",
+      "src": "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+      "tgt": "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+      "note": "RANGE 프레임 OK",
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_mysql57_row_number",
+      "src": "ROW_NUMBER() OVER (ORDER BY col)",
+      "tgt": "-- MySQL 5.7 이하: SET @rn=0; SELECT @rn:=@rn+1 AS rn, col FROM table ORDER BY col",
+      "note": "MySQL 5.7 이하 호환 ROW_NUMBER 구현",
+      "warning": true,
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_mysql57_partition_row_number",
+      "src": "ROW_NUMBER() OVER (PARTITION BY g ORDER BY col)",
+      "tgt": "-- MySQL 5.7: SET @rn=0, @grp=''; SELECT @rn:=IF(@grp=g,@rn+1,1) AS rn, @grp:=g AS grp, col FROM table ORDER BY g, col",
+      "note": "MySQL 5.7 이하 PARTITION BY ROW_NUMBER",
+      "warning": true,
+      "category": "WINDOW_FUNCTION"
+    },
+    {
+      "id": "wf_running_total_mysql57",
+      "src": "SUM(col) OVER (ORDER BY id) AS running_total",
+      "tgt": "-- MySQL 5.7: SET @rt=0; SELECT @rt:=@rt+col AS running_total FROM table ORDER BY id",
+      "note": "MySQL 5.7 이하 누적 합계",
+      "warning": true,
+      "category": "WINDOW_FUNCTION"
+    }
+  ]
+}

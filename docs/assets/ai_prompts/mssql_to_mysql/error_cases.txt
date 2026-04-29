@@ -1,0 +1,67 @@
+# MSSQL → MySQL 변환 시 발생한 실제 오류 누적 기록
+# 형식: [날짜] 오브젝트명 | 오류 | 원인 | 해결책
+
+[2026-04-10] FN_GETCODENAME | Undeclared variable: 1RETURN
+  원인: LIMIT 1 뒤에 줄바꿈 없이 RETURN이 붙음 (LIMIT 1RETURN)
+  해결: LIMIT n 은 반드시 별도 줄 + 세미콜론 필수
+       예) LIMIT 1;\n  RETURN v_result;
+
+[2026-04-10] FN_GETCODENAME | near 'SET p_code_name'
+  원인: DECLARE 뒤 세미콜론 누락으로 SET이 이전 문장에 붙음
+  해결: DECLARE v_name TYPE; ← 세미콜론 필수
+
+[2026-04-10] FN_GETCODENAME | near '(('
+  원인: CREATE FUNCTION name\n( 패턴 + 소스의 ( = 이중 괄호 ((
+  해결: CREATE FUNCTION `name` 만 쓰고 소스의 ( 그대로 유지
+
+[2026-04-10] 다수 | SELECT code_name INTO p_p_code_name
+  원인: @code_name → p_code_name 치환 후 SELECT INTO 변환에서 또 p_ 추가
+  해결: SELECT @var = col → SELECT col INTO p_var (@ 치환 이전에 처리)
+
+[2026-04-10] 다수 | MULTI_STATEMENTS ; 문제
+  원인: pymysql conn.query() + MULTI_STATEMENTS 모드에서
+        BEGIN...END 내부 ;를 문장 끝으로 해석
+  해결: BEGIN...END 있으면 cur.execute() 단순 실행, 끝 ; 제거 후 전달
+
+[2026-04-11] SP_STATRECORD, SP_STATSYSTEM | (1406) Data too long for column 'p_rec_sdate' at row 1
+  원인: MSSQL VARCHAR(8) 날짜 파라미터(YYYYMMDD)를 AI가 VARCHAR(10) 또는 DATE로 변환
+  해결: VARCHAR 날짜 파라미터는 원본 길이 그대로 유지
+       YYYYMMDD → VARCHAR(8), YYYYMM → VARCHAR(6), YYYY-MM-DD → VARCHAR(10)
+       DATE 타입으로 변환 금지
+
+[2026-04-11] SP_STATRECORD, SP_STATSYSTEM | (1270) Illegal mix of collations
+  오류: utf8mb4_0900_ai_ci IMPLICIT, utf8mb4_unicode_ci IMPLICIT for operation 'between'
+  원인: MySQL 서버 collation(utf8mb4_unicode_ci)과 테이블 컬럼 collation(utf8mb4_0900_ai_ci) 충돌
+        VARCHAR 파라미터를 테이블 컬럼과 BETWEEN 비교 시 발생
+  해결: WHERE/BETWEEN 절에서 VARCHAR 파라미터에 COLLATE utf8mb4_unicode_ci 명시
+       예) WHERE rec_datm BETWEEN CONCAT(p_rec_sdate COLLATE utf8mb4_unicode_ci, ' 00:00:00')
+                               AND CONCAT(p_rec_edate COLLATE utf8mb4_unicode_ci, ' 23:59:59')
+
+[2026-04-11] SP_STATRECORD, SP_STATSYSTEM | (1292) Incorrect datetime value: '20240101 00:00:00'
+  원인: VARCHAR(8) YYYYMMDD 파라미터를 CONCAT으로 DATETIME 문자열 조합 시
+        '20240101 00:00:00' 형식은 MySQL DATETIME이 인식 불가
+        MySQL은 반드시 'YYYY-MM-DD HH:MM:SS' 형식만 허용
+  해결: CONCAT 시 DATE_FORMAT 또는 INSERT 함수로 하이픈 삽입
+        예) CONCAT(INSERT(INSERT(p_sdate,5,0,'-'),8,0,'-'), ' 00:00:00')
+            → '20240101' → '2024-01-01 00:00:00'
+        또는 STR_TO_DATE(CONCAT(p_sdate,' 000000'), '%Y%m%d %H%i%s')
+
+[2026-04-11] SP_STATSYSTEM | (1270) Collation 충돌 — COLLATE를 INSERT/CONCAT 함수 안에 사용 불가
+  원인: COLLATE utf8mb4_unicode_ci를 INSERT() 또는 CONCAT() 함수 인자 안에 넣으면 MySQL이 인식 못함
+  해결: COLLATE 방식 대신 DECLARE로 지역변수 선언 후 SUBSTRING으로 날짜 형식 직접 조립
+        DECLARE v_sdate VARCHAR(19);
+        SET v_sdate = CONCAT(SUBSTRING(p_sdate,1,4),'-',SUBSTRING(p_sdate,5,2),'-',SUBSTRING(p_sdate,7,2),' 00:00:00');
+        → Collation 충돌 완전 회피, DATETIME 형식 오류도 동시 해결
+        이 방식이 1270, 1292 두 오류를 동시에 해결하는 최선책
+
+[2026-04-11] SP_STATSYSTEM | (1270) Collation 충돌 — VARCHAR 파라미터 vs VARCHAR(8) 테이블 컬럼
+  원인: 프로시저 파라미터(utf8mb4_unicode_ci)를 테이블 VARCHAR 컬럼(utf8mb4_0900_ai_ci)과
+        BETWEEN/WHERE 비교 시 Collation 충돌 발생
+        v_sdate 지역변수로 바꿔도 선언 시 COLLATE 미지정이면 서버 기본값(unicode_ci) 적용됨
+  해결: 지역변수 선언 시 테이블 컬럼과 동일한 Collation 명시
+        DECLARE v_sdate VARCHAR(8) CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+        → 파라미터 값을 이 변수에 복사 후 컬럼과 비교하면 Collation 통일
+  원칙: VARCHAR 파라미터를 테이블 컬럼과 비교할 때는
+        반드시 테이블 컬럼의 Collation을 확인 후 지역변수에 동일하게 지정
+        MySQL 8.0 테이블 기본 Collation: utf8mb4_0900_ai_ci
+        MySQL 서버(docker) 설정 Collation: utf8mb4_unicode_ci → 충돌 발생 구조

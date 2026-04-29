@@ -1,0 +1,520 @@
+{
+  "total": {
+    "calls": 69,
+    "input_tokens": 90670,
+    "output_tokens": 71997,
+    "objects": [
+      {
+        "name": "FN_GETPROCESSLIST",
+        "type": "OBJ_FUNCTION",
+        "in": 2961,
+        "out": 1514,
+        "ts": "04-10 17:26:26",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "FN_GETCODENAME",
+        "type": "OBJ_FUNCTION",
+        "in": 2756,
+        "out": 795,
+        "ts": "04-10 17:30:45",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "FN_GETCODENAME",
+        "type": "OBJ_FUNCTION",
+        "in": 2756,
+        "out": 880,
+        "ts": "2026-04-10 17:38:38",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "FN_GETCODENAME",
+        "type": "OBJ_FUNCTION",
+        "in": 2756,
+        "out": 806,
+        "ts": "2026-04-10 17:38:58",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "ts": "2026-04-10T09:01:37.403505",
+        "name": "FN_GETPROCESSLIST",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 619,
+        "out": 954
+      },
+      {
+        "ts": "2026-04-10T09:01:45.728623",
+        "name": "FN_NVL2",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 394,
+        "out": 437
+      },
+      {
+        "ts": "2026-04-10T09:01:53.409292",
+        "name": "SP_INSERTERRORLOG",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 465,
+        "out": 409
+      },
+      {
+        "ts": "2026-04-10T09:02:12.690363",
+        "name": "SP_SET_TABLE_COMMENT",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 644,
+        "out": 1454
+      },
+      {
+        "ts": "2026-04-10T09:02:33.112141",
+        "name": "sp_Softphone_UpdateRecord",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1244,
+        "out": 1590
+      },
+      {
+        "ts": "2026-04-10T09:02:53.587611",
+        "name": "SP_STATRECORD",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1460,
+        "out": 1644
+      },
+      {
+        "ts": "2026-04-10T09:03:10.234399",
+        "name": "SP_STATSYSTEM",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 976,
+        "out": 1104
+      },
+      {
+        "ts": "2026-04-10T09:03:18.868698",
+        "name": "SP_USER_INFO",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 445,
+        "out": 425
+      },
+      {
+        "ts": "2026-04-10T09:03:31.022330",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1061,
+        "out": 950
+      },
+      {
+        "ts": "2026-04-10T09:03:37.425334",
+        "name": "view_record_select",
+        "type": "AI_TABLE_VIEW",
+        "in": 324,
+        "out": 276
+      },
+      {
+        "ts": "2026-04-10T09:04:00.149041",
+        "name": "crec_recfile_ins",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1660,
+        "out": 1928
+      },
+      {
+        "ts": "2026-04-10T09:04:11.029903",
+        "name": "crec_recfile_upd",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1059,
+        "out": 803
+      },
+      {
+        "ts": "2026-04-10T09:04:15.830078",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 473,
+        "out": 216
+      },
+      {
+        "ts": "2026-04-10T09:04:33.458750",
+        "name": "sp_Softphone_UpdateRecord",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1323,
+        "out": 1394
+      },
+      {
+        "ts": "2026-04-10T09:05:09.241839",
+        "name": "sp_Softphone_UpdateRecord",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1326,
+        "out": 1371
+      },
+      {
+        "ts": "2026-04-11T04:03:06.549256",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 414,
+        "out": 347
+      },
+      {
+        "ts": "2026-04-11T04:03:20.257669",
+        "name": "FN_GETPROCESSLIST",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 619,
+        "out": 846
+      },
+      {
+        "ts": "2026-04-11T04:03:27.921222",
+        "name": "FN_NVL2",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 394,
+        "out": 406
+      },
+      {
+        "ts": "2026-04-11T04:03:35.280800",
+        "name": "SP_INSERTERRORLOG",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 465,
+        "out": 407
+      },
+      {
+        "ts": "2026-04-11T04:03:55.684010",
+        "name": "SP_SET_TABLE_COMMENT",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 644,
+        "out": 1423
+      },
+      {
+        "ts": "2026-04-11T04:04:15.195986",
+        "name": "sp_Softphone_UpdateRecord",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1244,
+        "out": 1556
+      },
+      {
+        "ts": "2026-04-11T04:04:33.455359",
+        "name": "SP_STATRECORD",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1460,
+        "out": 1587
+      },
+      {
+        "ts": "2026-04-11T04:04:47.834806",
+        "name": "SP_STATSYSTEM",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 976,
+        "out": 1087
+      },
+      {
+        "ts": "2026-04-11T04:04:56.149569",
+        "name": "SP_USER_INFO",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 445,
+        "out": 480
+      },
+      {
+        "ts": "2026-04-11T04:05:09.270010",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1061,
+        "out": 1005
+      },
+      {
+        "ts": "2026-04-11T04:05:15.695972",
+        "name": "view_record_select",
+        "type": "AI_TABLE_VIEW",
+        "in": 324,
+        "out": 287
+      },
+      {
+        "ts": "2026-04-11T04:05:38.381352",
+        "name": "crec_recfile_ins",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1660,
+        "out": 1872
+      },
+      {
+        "ts": "2026-04-11T04:05:49.017023",
+        "name": "crec_recfile_upd",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1059,
+        "out": 807
+      },
+      {
+        "ts": "2026-04-11T04:05:53.498673",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 473,
+        "out": 197
+      },
+      {
+        "ts": "2026-04-11T04:06:02.458651",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 483,
+        "out": 428
+      },
+      {
+        "ts": "2026-04-11T04:06:15.346053",
+        "name": "FN_GETPROCESSLIST",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 688,
+        "out": 876
+      },
+      {
+        "ts": "2026-04-11T04:06:23.575183",
+        "name": "FN_NVL2",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 463,
+        "out": 375
+      },
+      {
+        "ts": "2026-04-11T04:06:42.281498",
+        "name": "sp_Softphone_UpdateRecord",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1323,
+        "out": 1391
+      },
+      {
+        "ts": "2026-04-11T04:07:06.296707",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1111,
+        "out": 2212
+      },
+      {
+        "ts": "2026-04-11T04:07:28.656738",
+        "name": "crec_recfile_ins",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1729,
+        "out": 1967
+      },
+      {
+        "ts": "2026-04-11T04:07:33.775419",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 545,
+        "out": 256
+      },
+      {
+        "ts": "2026-04-11T04:07:38.823283",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 473,
+        "out": 223
+      },
+      {
+        "ts": "2026-04-11T04:07:40.461272",
+        "name": "crec_recfile_upd",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1128,
+        "out": 880
+      },
+      {
+        "ts": "2026-04-11T04:07:45.269855",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 542,
+        "out": 250
+      },
+      {
+        "ts": "2026-04-11T04:07:45.910931",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 542,
+        "out": 247
+      },
+      {
+        "ts": "2026-04-11T04:08:09.002267",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 486,
+        "out": 365
+      },
+      {
+        "ts": "2026-04-11T04:08:15.665469",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 414,
+        "out": 341
+      },
+      {
+        "ts": "2026-04-11T04:08:23.655366",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 483,
+        "out": 410
+      },
+      {
+        "ts": "2026-04-11T04:18:46.714099",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 452,
+        "out": 434
+      },
+      {
+        "ts": "2026-04-11T04:18:54.391097",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 414,
+        "out": 375
+      },
+      {
+        "ts": "2026-04-11T04:19:03.030057",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 483,
+        "out": 381
+      },
+      {
+        "ts": "2026-04-11T04:31:24.718458",
+        "name": "FN_GETCODENAME",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 486,
+        "out": 370
+      },
+      {
+        "ts": "2026-04-11T04:31:53.361648",
+        "name": "FN_GETPROCESSLIST",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 691,
+        "out": 940
+      },
+      {
+        "ts": "2026-04-11T04:43:11.688566",
+        "name": "FN_NVL2",
+        "type": "AI_TABLE_FUNCTION",
+        "in": 466,
+        "out": 366
+      },
+      {
+        "ts": "2026-04-11T04:43:12.961486",
+        "name": "crec_recfile_upd_SELECT",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 545,
+        "out": 257
+      },
+      {
+        "ts": "2026-04-11T04:43:18.413481",
+        "name": "crec_recfile_upd",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1143,
+        "out": 851
+      },
+      {
+        "ts": "2026-04-11T04:43:20.652923",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1152,
+        "out": 1239
+      },
+      {
+        "ts": "2026-04-11T04:43:22.574322",
+        "name": "sp_Softphone_UpdateRecord",
+        "type": "AI_TABLE_PROCEDURE",
+        "in": 1326,
+        "out": 1388
+      },
+      {
+        "ts": "2026-04-11T04:43:29.285743",
+        "name": "crec_recfile_ins",
+        "type": "AI_TABLE_TRIGGER",
+        "in": 1732,
+        "out": 2015
+      },
+      {
+        "ts": "2026-04-11T04:43:32.811705",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1061,
+        "out": 969
+      },
+      {
+        "ts": "2026-04-11T04:43:56.357681",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1111,
+        "out": 2241
+      },
+      {
+        "ts": "2026-04-11T04:53:13.386311",
+        "name": "view_record",
+        "type": "AI_TABLE_VIEW",
+        "in": 1148,
+        "out": 937
+      },
+      {
+        "name": "SP_STATRECORD",
+        "type": "OBJ_PROCEDURE",
+        "in": 3838,
+        "out": 2547,
+        "ts": "2026-04-11 19:57:37",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "SP_STATSYSTEM",
+        "type": "OBJ_PROCEDURE",
+        "in": 3354,
+        "out": 1942,
+        "ts": "2026-04-11 19:58:04",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "FN_GETCODENAME",
+        "type": "OBJ_FUNCTION",
+        "in": 2867,
+        "out": 1065,
+        "ts": "2026-04-11 19:58:22",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "SP_STATRECORD",
+        "type": "OBJ_PROCEDURE",
+        "in": 3838,
+        "out": 2450,
+        "ts": "2026-04-11 20:04:05",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "SP_STATSYSTEM",
+        "type": "OBJ_PROCEDURE",
+        "in": 3354,
+        "out": 2292,
+        "ts": "2026-04-11 20:04:38",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "SP_STATRECORD",
+        "type": "OBJ_PROCEDURE",
+        "in": 4710,
+        "out": 2524,
+        "ts": "2026-04-11 20:39:30",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "SP_STATSYSTEM",
+        "type": "OBJ_PROCEDURE",
+        "in": 4226,
+        "out": 1868,
+        "ts": "2026-04-11 20:39:51",
+        "src": "mssql",
+        "tgt": "mysql"
+      },
+      {
+        "name": "SP_STATRECORD",
+        "type": "OBJ_PROCEDURE",
+        "in": 5923,
+        "out": 3068,
+        "ts": "2026-04-11 21:00:07",
+        "src": "mssql",
+        "tgt": "mysql"
+      }
+    ]
+  },
+  "total_tokens": {
+    "input": 20757,
+    "output": 22214
+  }
+}

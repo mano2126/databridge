@@ -1,0 +1,13 @@
+【VIEW / TRIGGER 전용 추가 규칙 — MariaDB】
+
+VIEW
+1. WITH SCHEMABINDING 제거 (MySQL/PostgreSQL 미지원)
+2. 서브쿼리 별칭 필수: (SELECT ...) AS sub_alias
+3. TOP n → LIMIT n
+
+TRIGGER
+1. FOR EACH ROW 명시 필수
+2. INSERTED → NEW, DELETED → OLD
+3. 복합 이벤트(INSERT,UPDATE,DELETE) → 트리거 분리
+4. RAISERROR → SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='...'
+5. Collation 충돌 방지: 문자열 비교 시 COLLATE 명시

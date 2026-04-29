@@ -1,0 +1,58 @@
+# ============================================================
+# DataBridge — MySQL Bulk Load 성능 튜닝
+# ============================================================
+# 이 파일은 MySQL 컨테이너 내 /etc/mysql/conf.d/ 에 마운트되어
+# 기본 my.cnf 위에 덮어쓰기 적용됩니다.
+#
+# 용도: DataBridge 이관 작업 시 LOAD DATA LOCAL INFILE 성능 향상
+# 주의: 일부 설정은 크래시 시 1초 분량 트랜잭션 손실 가능 → 이관 전용
+# ============================================================
+
+[mysqld]
+
+# ─── LOAD DATA LOCAL INFILE 영구 활성화 ─────────────────
+# 이전 실측에서 local_infile=OFF 로 인해 LOAD DATA 실패 경험
+# 서버 재시작 후에도 유지되도록 설정 파일에 명시
+local_infile = 1
+
+# ─── InnoDB 쓰기 성능 (이관 특화) ───────────────────────
+# 1=매 트랜잭션마다 fsync (가장 안전, 느림)
+# 2=1초마다 fsync (성능 우선, 크래시 시 1초분 손실)
+# 0=1초마다 log 쓰기+fsync (가장 빠름, 리스크 큼)
+# 이관 작업은 실패 시 재시도 가능하므로 2 권장
+innodb_flush_log_at_trx_commit = 2
+
+# 이중 버퍼링 제거 (Linux 에서 효과 큼, Docker/Windows 에서도 도움)
+innodb_flush_method = O_DIRECT
+
+# InnoDB 버퍼 풀 — 기본 128MB → 2GB
+# 대용량 테이블 (500만+ 행) 처리 시 I/O 왕복 감소
+# 서버 메모리의 50~70% 권장, Docker 환경에서는 보수적으로 2GB
+innodb_buffer_pool_size = 2G
+
+# Redo log 크기 — 기본 48MB → 512MB
+# 대량 INSERT 시 체크포인트 빈도 감소 → 쓰기 효율 개선
+innodb_log_file_size = 512M
+innodb_log_buffer_size = 64M
+
+# Double write 비활성화 (이관 전용 — 프로덕션에서는 주의)
+# 크래시 시 데이터 페이지 찢어짐 복구 기능 포기하고 성능 우선
+innodb_doublewrite = 0
+
+# ─── 대량 INSERT 최적화 ─────────────────────────────────
+# MyISAM 용이지만 일부 InnoDB 시나리오에도 영향
+bulk_insert_buffer_size = 256M
+
+# LOAD DATA 파일 크기 제한 — 기본 64MB → 256MB
+# DataBridge 가 5만 행 × 21컬럼 (평균 500 bytes/row) = 25MB 수준이나
+# note 같은 LONGTEXT 포함 시 배치가 커질 수 있어 여유 확보
+max_allowed_packet = 256M
+
+# ─── 연결 관련 ──────────────────────────────────────────
+# 이관 시 워커 수(4) + 메인 + 여분 확보
+max_connections = 200
+
+# ─── 기존 설정 유지 (문자셋) ────────────────────────────
+# docker-compose 의 command: 옵션과 동일. 일관성 유지.
+character_set_server = utf8mb4
+collation_server = utf8mb4_unicode_ci
