@@ -97,12 +97,14 @@
         </div>
       </div>
 
-      <div v-show="activeTab === 'preflight'" class="at-tab-content at-coming-soon">
-        <div class="at-cs-icon">🚀</div>
-        <div class="at-cs-title">Pre-Flight Assessment</div>
-        <div class="at-cs-desc">
-          이관 비용/시간/위험도 사전 진단 + 임원 보고서 자동 생성 (Phase G 예정)
-        </div>
+      <!-- v95_p15+ : Pre-Flight 본격 구현 (2026-05-03) -->
+      <div v-show="activeTab === 'preflight'" class="at-tab-content">
+        <PreflightPanel
+          :selection="selection"
+          :conn="preflightConn"
+          @analysis-complete="(d) => $emit('update:preflight-result', d)"
+          @skip="$emit('preflight-skip')"
+        />
       </div>
 
     </div>
@@ -115,6 +117,8 @@
 import { ref, computed } from 'vue'
 import AdvisorPanel from '@/components/advisor/AdvisorPanel.vue'
 import PrivacyPanel from '@/components/privacy/PrivacyPanel.vue'
+// v95_p15+ (2026-05-03): Pre-Flight 본격 구현
+import PreflightPanel from '@/components/preflight/PreflightPanel.vue'
 
 const props = defineProps({
   selection: { type: Object, default: () => ({}) },
@@ -129,6 +133,8 @@ const props = defineProps({
   initialAdvisorAnalysis: { type: Object, default: null },
   // v90.20: 마지막으로 보던 탭 복원
   initialActiveTab: { type: String, default: 'advisor' },
+  // v95_p15+ (2026-05-03): Pre-Flight 분석용 연결 정보
+  preflightConn: { type: Object, default: () => ({}) },
 })
 
 const emit = defineEmits([
@@ -141,6 +147,9 @@ const emit = defineEmits([
   'update:privacy-scan-result',
   'privacy-skip',
   'tab-visited',  // v90.12: 탭 방문 추적용
+  // v95_p15+ (2026-05-03): Pre-Flight 이벤트
+  'update:preflight-result',
+  'preflight-skip',
 ])
 
 // v90.20: 활성 탭 - 부모에서 받은 값으로 복원
@@ -190,9 +199,9 @@ const tabs = computed(() => [
     id: 'preflight',
     icon: '🚀',
     label: 'Pre-Flight',
-    badge: 'Soon',
-    badgeClass: 'at-badge-coming',
-    disabled: true,
+    badge: 'New',
+    badgeClass: 'at-badge-info',
+    disabled: false,  // v95_p15+ 본격 활성화
   },
 ])
 

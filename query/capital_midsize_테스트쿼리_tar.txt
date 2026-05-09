@@ -1,0 +1,120 @@
+-- ════════════════════════════════════════════════════════════════════
+-- DataBridge 튜닝 테스트 쿼리 (capital_midsize 실제 컬럼 반영)
+-- 변환: MSSQL → MySQL
+-- 
+-- 의도:
+--   "최근 6개월 활성 대출 중 연체 진행 고객 위험도 TOP 100"
+--   - 활성 계약 (credit.contract.status = 'ACT')
+--   - 연체 발생 이력 (collection.delinquency)
+--   - 추심 활동 진행 중 (collection.activity)
+--   - 상환 거래 이력 (settlement.trx_history)
+--   - 신용등급 + 소득 정보 (customer)
+--
+-- 8개 테이블 JOIN + 3개 서브쿼리 + 윈도우 함수 + MySQL 함수
+-- ════════════════════════════════════════════════════════════════════
+
+SELECT
+    -- 고객 정보
+    p.customer_id,
+    p.name_kor,
+    p.customer_type,
+    p.phone_mobile,
+    cs.grade            AS credit_grade,
+    cs.score            AS credit_score,
+    ii.annual_income,
+    -- 상품/지점
+    pr.product_name,
+    br.branch_name,
+    -- 계약
+    c.contract_no,
+    c.principal,
+    c.rate,
+    c.start_date,
+    c.end_date,
+    c.current_balance,
+    c.status,
+    -- 연체 통계 (서브쿼리)
+    dq_stats.delq_count,
+    dq_stats.max_delq_days,
+    dq_stats.total_overdue,
+    -- 추심 활동
+    act_stats.activity_count,
+    act_stats.last_activity_dt,
+    -- 상환 거래
+    tx_stats.total_paid,
+    tx_stats.last_paid_dt,
+    -- 잔여 개월
+    TIMESTAMPDIFF(MONTH, NOW(), c.end_date) AS remaining_months,
+    -- 위험 점수 (윈도우 함수 — 신용등급별 위험 순위)
+    ROW_NUMBER() OVER (
+        PARTITION BY cs.grade
+        ORDER BY dq_stats.max_delq_days DESC,
+                 c.principal DESC
+    ) AS risk_rank
+FROM customer.profile p
+INNER JOIN credit.contract c
+    ON p.customer_id = c.customer_id
+INNER JOIN ref.product pr
+    ON c.product_code = pr.product_code
+LEFT JOIN ref.branch br
+    ON p.branch_code = br.branch_code
+-- 신용 점수 (최신 1건 — 상관 서브쿼리)
+LEFT JOIN customer.credit_score cs
+    ON p.customer_id = cs.customer_id
+   AND cs.score_date = (
+       SELECT MAX(score_date)
+       FROM customer.credit_score
+       WHERE customer_id = p.customer_id
+   )
+-- 소득 정보 (가장 최근 연도)
+LEFT JOIN customer.income_info ii
+    ON p.customer_id = ii.customer_id
+   AND ii.report_year = (
+       SELECT MAX(report_year)
+       FROM customer.income_info
+       WHERE customer_id = p.customer_id
+   )
+-- 연체 발생 이력 (1회 이상) — 서브쿼리
+INNER JOIN (
+    SELECT
+        contract_id,
+        COUNT(*)                   AS delq_count,
+        MAX(delinq_days)           AS max_delq_days,
+        SUM(IFNULL(overdue_amount, 0)) AS total_overdue
+    FROM collection.delinquency
+    WHERE delinq_start >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+    GROUP BY contract_id
+    HAVING COUNT(*) >= 1
+) dq_stats ON c.contract_id = dq_stats.contract_id
+-- 추심 활동 통계 (delinq_id 기반 → contract_id 매핑)
+LEFT JOIN (
+    SELECT
+        d.contract_id,
+        COUNT(a.activity_id)       AS activity_count,
+        MAX(a.activity_date)       AS last_activity_dt
+    FROM collection.activity d_a
+    INNER JOIN collection.delinquency d
+        ON d_a.delinq_id = d.delinq_id
+    INNER JOIN collection.activity a
+        ON a.delinq_id = d.delinq_id
+    WHERE a.activity_date >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+    GROUP BY d.contract_id
+) act_stats ON c.contract_id = act_stats.contract_id
+-- 상환 거래 통계
+LEFT JOIN (
+    SELECT
+        contract_id,
+        SUM(CASE WHEN status = 'OK' THEN amount ELSE 0 END) AS total_paid,
+        MAX(trx_date)              AS last_paid_dt
+    FROM settlement.trx_history
+    WHERE trx_type IN ('PAYMENT', 'REPAY', 'RP')
+      AND trx_date >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+    GROUP BY contract_id
+) tx_stats ON c.contract_id = tx_stats.contract_id
+WHERE c.status = 'ACT'
+  AND c.start_date >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+  AND c.principal > 5000000
+ORDER BY
+    dq_stats.max_delq_days DESC,
+    c.principal DESC
+LIMIT 100;

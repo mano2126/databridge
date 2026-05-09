@@ -1,0 +1,60 @@
+v95_p9 main.py 패치 가이드
+═══════════════════════════════════════════════════════════════
+
+본부장님이 D:\project\databridge_full\backend\main.py 에 아래 두 군데 수정 필요.
+
+[1] 파일 상단 import 영역에 추가:
+─────────────────────────────────────────────
+from app.core.logging_setup import setup_logging
+from app.api import logs as logs_api
+─────────────────────────────────────────────
+
+[2] FastAPI 앱 생성 직후, 기존 다른 라우터 등록 근처에 추가:
+─────────────────────────────────────────────
+# v95_p9: 통합 로깅 + 로그 API
+setup_logging()  # 모든 라우터 등록 전에 호출 (가장 먼저)
+app.include_router(logs_api.router)
+─────────────────────────────────────────────
+
+[3] 기존 logging.basicConfig(...) 또는 별도 logger 초기화 코드가 있다면 제거.
+    (setup_logging() 이 단일 진입점이 되어야 좀비 부팅 메시지 사라짐)
+
+[4] 프론트엔드 라우터 등록:
+─────────────────────────────────────────────
+파일: frontend/src/router/index.js (또는 routes 정의 파일)
+
+import LogViewer from '@/views/LogViewer.vue'
+
+// routes 배열에 추가
+{
+  path: '/logs',
+  name: 'LogViewer',
+  component: LogViewer,
+  meta: { title: '로그 뷰어' }
+}
+─────────────────────────────────────────────
+
+[5] 사이드바 메뉴 추가 (선택):
+─────────────────────────────────────────────
+Sidebar.vue 의 메뉴 항목에 추가:
+  { path: '/logs', label: '로그 뷰어', icon: '📋' }
+─────────────────────────────────────────────
+
+
+검증 포인트 (apply_v95_p9.ps1 실행 후):
+─────────────────────────────────────────────
+1) 부팅 후 D:\project\databridge_full\backend\logs\ 확인:
+   - databridge_backend.log (계속 사용)
+   - archive\legacy_databridge_*.log (구 databridge.log 가 자동 이관됨)
+   - logging_settings.json (생성됨)
+
+2) 로그 첫 줄에 [v95_p9] 로깅 시작 메시지 1회만 찍히는지
+   (이전엔 동일 메시지가 50번 이상 찍힘 → 좀비 핸들러 버그 해결)
+
+3) UI /logs 접속 → 회전 설정 ⚙ 클릭 → 1MB OR 2시간 으로 변경 → 저장
+
+4) 41개 일괄 검증 재실행 → /logs 에서 'view-analyzer' 키워드 필터
+   → 6개 위험 View 의 patterns / safe_mode 결정값 확인
+
+5) 'view-test' 키워드 필터 → 소스 vs 타겟 elapsed_ms 비교
+   → 다음 턴 v95_p10 (timeout 동적 조정) 본질 진단 자료

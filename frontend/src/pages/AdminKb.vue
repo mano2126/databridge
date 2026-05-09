@@ -9,6 +9,9 @@
 
     <!-- 탭 바 (v10 #18) -->
     <div class="tab-bar">
+      <button class="tab" :class="{active: tab === 'dashboard'}" @click="tab = 'dashboard'">
+        📊 KB Dashboard
+      </button>
       <button class="tab" :class="{active: tab === 'error'}" @click="tab = 'error'">
         🚨 에러 KB
       </button>
@@ -16,6 +19,9 @@
         🔄 변환 KB (타입/오브젝트 자동 학습)
       </button>
     </div>
+
+    <!-- 탭 0: v93_D2 신규 — KB 자산 가시화 대시보드 -->
+    <AdminKbDashboard v-if="tab === 'dashboard'" />
 
     <!-- 탭 2: 변환 KB -->
     <AdminKbConversion v-if="tab === 'conversion'" />
@@ -182,10 +188,12 @@
 import { ref, computed, onMounted } from 'vue'
 import kbApi from '@/api/kb.js'
 import AdminKbConversion from './AdminKbConversion.vue'
+import AdminKbDashboard from './AdminKbDashboard.vue'
 
 defineOptions({ name: 'AdminKb' })
 
-const tab = ref('error')  // 'error' | 'conversion'  (v10 #18)
+// v93_D2 (2026-05-01): 본부장님 요청 — KB 자산 가시화 대시보드를 기본 탭으로
+const tab = ref('dashboard')  // 'dashboard' | 'error' | 'conversion'
 const days = ref(30)
 const stats = ref(null)
 const patterns = ref([])

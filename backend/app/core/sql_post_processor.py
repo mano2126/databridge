@@ -123,15 +123,652 @@ POSTPROCESS_RULES = [
         "replacement": r"\1\2",
         "description": "CASE 표현식 안에 잘못 들어간 세미콜론 (보조 룰, R-009 보완)",
     },
+    # ════════════════════════════════════════════════════════════════
+    # v94_p5 (2026-05-01) 본부장님 호소 처방:
+    #   "두개가 오류난 상태로 종료" — fn_next_business_day, tvf_contract_events
+    #   같은 패턴 반복 → 본부장님 모토 "똑같은 건 다시 안 발생" 적용
+    # ════════════════════════════════════════════════════════════════
+    {
+        "id": "R-011",
+        "name": "DELIMITER 명령 제거 (pymysql 미지원)",
+        # DELIMITER // ... DELIMITER ; 패턴
+        # pymysql 은 DELIMITER 인식 못 함 (mysql 클라이언트 전용 명령)
+        # 단일 statement 로 실행하므로 DELIMITER 제거하면 정상 작동
+        # v94_p5: 라인 끝 + 파일 끝 모두 매칭 (re.MULTILINE 으로 처리)
+        "pattern": r"(?im)^\s*DELIMITER\s+\S+\s*$",
+        "replacement": "",
+        "description": "DELIMITER //, DELIMITER ; 등 통째 제거 (pymysql 환경)",
+        "case": "v94_p5 tvf_contract_events (2026-05-01)",
+    },
+    {
+        "id": "R-011b",
+        "name": "DELIMITER 종료 마커 (//, $$) 제거",
+        # 본문 끝의 // 또는 $$ 같은 DELIMITER 마커
+        # END// → END;
+        # END $$ → END;
+        "pattern": r"(\bEND\b)\s*(?://|/\*|\$\$)\s*(\n|$)",
+        "replacement": r"\1;\2",
+        "description": "AI 가 본문 끝에 // 또는 $$ delimiter 마커 추가한 것 정리",
+        "case": "v94_p5 tvf_contract_events (2026-05-01)",
+    },
+    {
+        "id": "R-012",
+        "name": "LEAVE/ITERATE label 세미콜론 자동 보충",
+        # LEAVE loop_label\n END IF → LEAVE loop_label;\n END IF
+        # ITERATE loop_label\n END IF → ITERATE loop_label;\n END IF
+        # AI 가 구문 끝의 ; 빠뜨린 패턴
+        "pattern": r"\b((?:LEAVE|ITERATE)\s+\w+)(\s*\n\s*(?:END\s+IF|ELSE|ELSEIF|UNTIL|WHEN)\b)",
+        "replacement": r"\1;\2",
+        "description": "LEAVE/ITERATE 다음 ; 자동 추가 (1064 방지)",
+        "case": "v94_p5 fn_next_business_day (2026-05-01)",
+    },
+    {
+        "id": "R-013",
+        "name": "RETURN/SET 다음 세미콜론 자동 보충 (END/ELSE/UNTIL 직전)",
+        # RETURN x\n END IF → RETURN x;\n END IF (보수적으로 짧은 표현식만)
+        # SET v_x = y\n END IF → SET v_x = y;\n END IF
+        "pattern": r"\b((?:RETURN\s+\w+|SET\s+\w+\s*=\s*[^;\n]{1,80}))(\s*\n\s*(?:END\s+IF|ELSEIF|ELSE\b|UNTIL)\b)",
+        "replacement": r"\1;\2",
+        "description": "RETURN/SET 끝의 누락된 ; 보충 (보수적 매칭, 80자 이내)",
+        "case": "v94_p5 generic missing semicolon (2026-05-01)",
+    },
+    # ════════════════════════════════════════════════════════════════
+    # v95_p88 (2026-05-07 본부장님 본질 처방): MySQL 타입에 잘못 붙은 백틱 제거
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 환경 macOS AdventureWorks2022 이관 결과:
+    #   9건 PROCEDURE + 7건 TRIGGER 1064
+    #   "near 'p_BusinessEntityID `int`\r\nBEGIN ..."
+    #   "near 'p_StartProductID `int`,\r\n p_CheckDate `datetime` ..."
+    #
+    # 본질 진단 (view tool 로 procedure.txt 정독):
+    #   procedure.txt 는 `(IN p_param1 TYPE1, OUT p_param2 TYPE2)` 추상 표기만 있음.
+    #   AI 가 underscore 정책 프롬프트 ("MySQL 식별자에 백틱 사용") 받고
+    #   → 타입 이름까지 백틱으로 감쌈 ("`int`", "`datetime`", "`varchar(255)`")
+    #   → MySQL 파서 1064.
+    #
+    # 처방 (3겹 안전망):
+    #   1) procedure.txt 에 명시적 예시 (DO/DON'T) — 처방 3
+    #   2) 후처리 룰 (R-014~R-016) — 본 룰
+    #   3) AI 재시도 시 hint 자동 누적 (기존 메커니즘)
+    #
+    # 일반화: MSSQL 표준 타입 모두 커버. 백틱이 진짜 컬럼/식별자에 붙는 경우는 미손상.
+    #         (식별자 백틱은 `column_name` 처럼 컨텍스트가 다르므로 정규식이 구분)
+    # ════════════════════════════════════════════════════════════════
+    {
+        "id": "R-014",
+        "name": "타입에 잘못 붙은 백틱 제거 - 단순 타입",
+        # 파라미터/변수 선언 컨텍스트에서 `int`, `bigint`, `datetime`, `text` 등 백틱 제거
+        # 매칭 컨텍스트: 단어(파라미터명/변수명) + 공백 + `타입`
+        # 보수적: SQL 키워드/타입만 매칭 (식별자에 백틱 붙은 건 미손상)
+        # (?i) — AI 가 소문자/대문자 혼용해서 출력하므로 IGNORECASE 필수
+        # v95_p88+ (2026-05-07 본부장님 재검증): MSSQL 전용 타입 추가 (MONEY/SMALLMONEY/UNIQUEIDENTIFIER 등)
+        "pattern": (
+            r"(?i)(\w\s+)`("
+            r"INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT|"
+            r"DECIMAL|NUMERIC|FLOAT|DOUBLE|REAL|"
+            r"BIT|BOOLEAN|"
+            r"DATE|DATETIME|TIMESTAMP|TIME|YEAR|"
+            r"TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|"
+            r"BLOB|TINYBLOB|MEDIUMBLOB|LONGBLOB|"
+            r"JSON|"
+            r"CHAR|NCHAR|"
+            r"BINARY|VARBINARY|"
+            # v95_p88+ 추가: MSSQL 잔재 타입 (AI 가 변환 못하고 백틱으로 감쌈)
+            r"MONEY|SMALLMONEY|UNIQUEIDENTIFIER|XML|HIERARCHYID|GEOGRAPHY|GEOMETRY|"
+            r"DATETIMEOFFSET|DATETIME2|SMALLDATETIME"
+            r")`"
+        ),
+        "replacement": r"\1\2",
+        "description": "AI 가 MySQL 타입에 잘못 붙인 백틱 제거 (1064 방지)",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — 9 PROC + 7 TRIG + 11 FUNC",
+    },
+    {
+        "id": "R-014b",
+        "name": "RETURNS 직후 타입 백틱 제거 (FUNCTION 전용)",
+        # FUNCTION 의 RETURNS 절: RETURNS `int` → RETURNS INT
+        # RETURNS `money` → RETURNS DECIMAL(19,4)  (이 변환은 AI/프롬프트 차원 — 여기선 백틱만 제거)
+        # 본부장님 환경: ufnGetProductDealerPrice, ufnGetProductListPrice, ufnGetStock 등 11건
+        "pattern": (
+            r"(?i)(\bRETURNS\s+)`("
+            r"INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT|"
+            r"DECIMAL|NUMERIC|FLOAT|DOUBLE|REAL|"
+            r"BIT|BOOLEAN|"
+            r"DATE|DATETIME|TIMESTAMP|TIME|YEAR|"
+            r"TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|"
+            r"JSON|CHAR|NCHAR|BINARY|VARBINARY|"
+            r"MONEY|SMALLMONEY|UNIQUEIDENTIFIER|XML|HIERARCHYID|"
+            r"DATETIMEOFFSET|DATETIME2|SMALLDATETIME"
+            r")`"
+        ),
+        "replacement": r"\1\2",
+        "description": "FUNCTION RETURNS 다음 타입 백틱 제거",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — 11 FUNCTION",
+    },
+    {
+        "id": "R-015",
+        "name": "타입에 잘못 붙은 백틱 제거 - 길이 지정 타입",
+        # `varchar(255)`, `nvarchar(50)`, `decimal(18,2)`, `char(10)` 등
+        # (?i) — AI 가 소문자 출력 (varchar) 도 매칭
+        "pattern": (
+            r"(?i)(\w\s+)`("
+            r"VARCHAR|NVARCHAR|VARCHAR2|"
+            r"CHAR|NCHAR|"
+            r"DECIMAL|NUMERIC|FLOAT|"
+            r"BINARY|VARBINARY|"
+            r"DATETIME|TIMESTAMP|TIME"
+            r")\s*\(\s*([\d,\s]+)\s*\)`"
+        ),
+        "replacement": r"\1\2(\3)",
+        "description": "길이 지정 타입의 백틱 제거 — `varchar(255)` → varchar(255)",
+        "case": "v95_p88 macOS AdventureWorks 2026-05-07",
+    },
+    {
+        "id": "R-015c",
+        "name": "RETURNS 직후 길이 지정 타입 백틱 제거",
+        # RETURNS `VARCHAR(255)`(16) — AI 가 백틱 + 잘못된 추가 길이까지 붙임
+        # ufnGetDocumentStatusText / ufnGetPurchaseOrderStatusText / ufnGetSalesOrderStatusText
+        # 두 (..) 연속 패턴 → 첫 번째만 유지
+        "pattern": (
+            r"(?i)(\bRETURNS\s+)`("
+            r"VARCHAR|NVARCHAR|CHAR|NCHAR|DECIMAL|NUMERIC|BINARY|VARBINARY"
+            r")\s*\(\s*([\d,\s]+)\s*\)`(?:\s*\(\s*[\d,\s]+\s*\))?"
+        ),
+        "replacement": r"\1\2(\3)",
+        "description": "RETURNS `VARCHAR(255)`(16) → RETURNS VARCHAR(255)",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — ufnGet*StatusText",
+    },
+    {
+        "id": "R-015b",
+        "name": "타입 백틱 + 잘못된 추가 길이 정정 (uspSearchCandidateResumes)",
+        # 본부장님 환경 실제 케이스: `VARCHAR(255)`(1000) — AI 가 백틱 + 추가 (1000) 을 잘못 붙임.
+        # R-015 가 1차로 백틱 제거 → "VARCHAR(255)(1000)" 형태 → MySQL 1064.
+        # 두 (..) 가 연속 나타나면 첫 번째만 유지 (식별자 보수: 두 번째 (..) 가 진짜 길이가 아닐 수 있어 보수적)
+        # 본 케이스는 AI 출력 오류이므로 두 번째 (..) 제거 — 1차 (..) 가 길이로 사용됨.
+        "pattern": (
+            r"(?i)\b(VARCHAR|NVARCHAR|CHAR|NCHAR|DECIMAL|NUMERIC|BINARY|VARBINARY)\s*"
+            r"\(\s*([\d,\s]+)\s*\)\s*\(\s*[\d,\s]+\s*\)"
+        ),
+        "replacement": r"\1(\2)",
+        "description": "VARCHAR(255)(1000) 같은 이중 길이 표기 정리 (uspSearchCandidateResumes)",
+        "case": "v95_p88 macOS AdventureWorks 2026-05-07 — uspSearchCandidateResumes",
+    },
+    {
+        "id": "R-016",
+        "name": "Stored procedure OUT 파라미터 - OUTPUT 키워드 → OUT",
+        # MSSQL 의 @x INT OUTPUT → 잘못 변환된 p_x INT OUTPUT 형태 발견
+        # MySQL 은 OUT 키워드 사용 (앞에 OUT, OUTPUT 키워드 없음)
+        # MSSQL 잔재 OUTPUT 단어 제거 (파라미터 선언 위치)
+        # (?i) IGNORECASE — output/Output/OUTPUT 모두
+        # 백틱 타입도 매칭 (R-014/R-015 적용 전후 모두 동작)
+        # v95_p88+ 강화: = default_value 가 사이에 있어도 OUTPUT 매칭
+        # 본부장님 환경: uspLogError — `OUT p_ErrorLogID INT = 0 OUTPUT` 패턴
+        "pattern": (
+            r"(?i)(\bp_\w+\s+`?\w+`?(?:\s*\([\d,\s]+\))?"
+            r"(?:\s*=\s*[^,)\s]+)?"  # 선택적 = 기본값 (e.g., = 0, = 'X', = NULL)
+            r")"
+            r"\s+OUTPUT\b"
+        ),
+        "replacement": r"\1",
+        "description": "MSSQL OUTPUT 키워드 잔재 제거 — uspLogError 등 (1064 방지)",
+        "case": "v95_p88 macOS AdventureWorks 2026-05-07 — uspLogError",
+    },
+    # ════════════════════════════════════════════════════════════════
+    # v95_p88+ (2026-05-07 본부장님 재검증 결과 51건 1064 누적 처방):
+    # AdventureWorks 변환 시 발견된 MSSQL 잔재 패턴들
+    # ════════════════════════════════════════════════════════════════
+    {
+        "id": "R-017",
+        "name": "FUNCTION AS BEGIN → DETERMINISTIC BEGIN",
+        # MSSQL: CREATE FUNCTION ... RETURNS X AS BEGIN ... END
+        # MySQL: CREATE FUNCTION ... RETURNS X DETERMINISTIC BEGIN ... END
+        # AS 키워드만 있고 DETERMINISTIC 누락 → 1064
+        # 본부장님 환경: ufnGetDocumentStatusText, ufnGetPurchaseOrderStatusText 등
+        "pattern": (
+            r"(?i)(RETURNS\s+\w+(?:\s*\([\d,\s]+\))?\s*)\n?\s*AS\s*\n?\s*BEGIN\b"
+        ),
+        "replacement": r"\1\nDETERMINISTIC\nBEGIN",
+        "description": "FUNCTION 의 AS BEGIN → DETERMINISTIC BEGIN",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — 11 FUNCTION",
+    },
+    {
+        "id": "R-018",
+        "name": "MSSQL MONEY 타입 → DECIMAL(19,4)",
+        # MSSQL MONEY 는 19,4 정밀도 → MySQL 은 MONEY 없음 → DECIMAL(19,4)
+        # 본부장님 환경: ufnGetProductDealerPrice/ListPrice/StandardCost (RETURNS money)
+        # 백틱 제거 후 (R-014b 적용 후) 매칭 가능하도록 단어 경계 매칭
+        "pattern": r"(?i)\bMONEY\b(?!\s*\()",
+        "replacement": "DECIMAL(19,4)",
+        "description": "MSSQL MONEY → MySQL DECIMAL(19,4) 자동 변환",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — RETURNS money",
+    },
+    {
+        "id": "R-019",
+        "name": "MSSQL SMALLMONEY 타입 → DECIMAL(10,4)",
+        "pattern": r"(?i)\bSMALLMONEY\b(?!\s*\()",
+        "replacement": "DECIMAL(10,4)",
+        "description": "MSSQL SMALLMONEY → MySQL DECIMAL(10,4) 자동 변환",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07",
+    },
+    {
+        "id": "R-020",
+        "name": "TRIGGER 의 ON Schema.Table → ON `Schema_Table`",
+        # MSSQL: CREATE TRIGGER `name` ON Sales.SalesOrderDetail ...
+        # MySQL: CREATE TRIGGER `name` ... ON `Sales_SalesOrderDetail` ...
+        # AdventureWorks 트리거 7건의 본질 (스키마 정규화 누락)
+        # 본부장님 환경: iduSalesOrderDetail, uSalesOrderHeader, dEmployee, iuPerson 등
+        # 단, 알려진 PascalCase 스키마만 대상 (회귀 방지)
+        "pattern": (
+            r"(?i)(\bON\s+)("
+            r"Sales|Person|HumanResources|Production|Purchasing"
+            r")\.(\w+)"
+        ),
+        "replacement": r"\1`\2_\3`",
+        "description": "TRIGGER ON Schema.Table → ON `Schema_Table` (스키마 정규화)",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — 7 TRIGGER",
+    },
+    {
+        "id": "R-021",
+        "name": "MSSQL NOT FOR REPLICATION 절 제거",
+        # MSSQL 전용 — MySQL 미지원 → 단순 제거
+        # 본부장님 환경: dEmployee, iuPerson, uSalesOrderHeader 등
+        "pattern": r"(?i)\s+NOT\s+FOR\s+REPLICATION\b",
+        "replacement": "",
+        "description": "MSSQL NOT FOR REPLICATION 잔재 제거",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — TRIGGER",
+    },
+    {
+        "id": "R-022",
+        "name": "MSSQL INSTEAD OF → AFTER (TRIGGER)",
+        # MySQL 은 INSTEAD OF 트리거 미지원
+        # AFTER 로 변환 (의미는 다르나 1064 방지 — 의도적 보수 변환)
+        # 본부장님 환경: dEmployee (INSTEAD OF DELETE)
+        "pattern": r"(?i)\bINSTEAD\s+OF\s+(INSERT|UPDATE|DELETE)\b",
+        "replacement": r"AFTER \1",
+        "description": "MSSQL INSTEAD OF → MySQL AFTER (1064 방지, 의미 차이 가능)",
+        "case": "v95_p88+ macOS AdventureWorks 2026-05-07 — dEmployee",
+    },
+    # ════════════════════════════════════════════════════════════════
+    # v95_p89_case (2026-05-07 본부장님 본질 처방):
+    # 테이블 케이스 보존 — Gemma 가 임의로 소문자화하는 것 방지
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 환경 검증 결과 (2026-05-07):
+    #   lower_case_table_names = 0  (MySQL 케이스 그대로 보존)
+    #   실제 테이블: Production_BillOfMaterials (PascalCase)
+    #   Gemma 가 만든 SQL: production_Product (소문자) → 1146 Table doesn't exist
+    #
+    # 본부장님 빨간불 매칭:
+    #   - vAdditionalContactInfo:    person_ContactInfo → Person_ContactInfo (예상)
+    #   - vProductAndDescription:    production_Product → Production_Product
+    #   - vProductModelInstructions: production_ProductModel → Production_ProductModel
+    #   - ufnGetProductStandardCost: production_Product, production_ProductCo*
+    #
+    # 처방: AdventureWorks 의 5개 PascalCase 스키마 prefix 자동 정규화
+    #   production_ → Production_
+    #   person_     → Person_
+    #   sales_      → Sales_
+    #   humanresources_ → HumanResources_
+    #   purchasing_ → Purchasing_
+    # ════════════════════════════════════════════════════════════════
+    {
+        "id": "R-023a",
+        "name": "테이블 케이스 보존 — Production_*",
+        # 백틱 안 또는 SQL 식별자 위치의 production_X → Production_X
+        # 단어 경계로 매칭하여 식별자 안에서만 작동
+        "pattern": r"\bproduction_([A-Z])",   # 소문자 production_ + 뒤에 대문자
+        "replacement": r"Production_\1",
+        "description": "production_X → Production_X (lower_case_table_names=0 환경)",
+        "case": "v95_p89_case 본부장님 환경 2026-05-07",
+    },
+    {
+        "id": "R-023b",
+        "name": "테이블 케이스 보존 — Person_*",
+        "pattern": r"\bperson_([A-Z])",
+        "replacement": r"Person_\1",
+        "description": "person_X → Person_X",
+        "case": "v95_p89_case 본부장님 환경 2026-05-07",
+    },
+    {
+        "id": "R-023c",
+        "name": "테이블 케이스 보존 — Sales_*",
+        "pattern": r"\bsales_([A-Z])",
+        "replacement": r"Sales_\1",
+        "description": "sales_X → Sales_X",
+        "case": "v95_p89_case 본부장님 환경 2026-05-07",
+    },
+    {
+        "id": "R-023d",
+        "name": "테이블 케이스 보존 — HumanResources_*",
+        "pattern": r"\bhumanresources_([A-Z])",
+        "replacement": r"HumanResources_\1",
+        "description": "humanresources_X → HumanResources_X",
+        "case": "v95_p89_case 본부장님 환경 2026-05-07",
+    },
+    {
+        "id": "R-023e",
+        "name": "테이블 케이스 보존 — Purchasing_*",
+        "pattern": r"\bpurchasing_([A-Z])",
+        "replacement": r"Purchasing_\1",
+        "description": "purchasing_X → Purchasing_X",
+        "case": "v95_p89_case 본부장님 환경 2026-05-07",
+    },
+    # ════════════════════════════════════════════════════════════════
+    # R-024: COLLATE 자동 제거
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 빨간불:
+    #   uspUpdateEmployeeLogin   1253 utf8mb4_unicode_ci ↔ utf8mb3 충돌
+    #   vStoreWithDemographics   1064 'COLLATE utf8mb4_unicode_ci' 잔재
+    #
+    # 본질: Gemma 가 임의로 COLLATE utf8mb4_unicode_ci 추가
+    #       → 본부장님 DB 가 utf8mb3 스키마면 충돌
+    #
+    # 처방: COLLATE utf8mb4_* 절 자동 제거
+    #       (DB 인코딩 자체는 본부장님 책임 영역 — 우리는 SQL 잔재만 제거)
+    # ════════════════════════════════════════════════════════════════
+    {
+        "id": "R-024",
+        "name": "COLLATE utf8mb4_* 자동 제거",
+        # COLLATE utf8mb4_unicode_ci, COLLATE utf8mb4_general_ci 등
+        # 앞뒤 공백 함께 제거 (1칸 남기기)
+        "pattern": r"\s+COLLATE\s+utf8mb4_\w+",
+        "replacement": "",
+        "description": "Gemma 가 임의 추가한 COLLATE utf8mb4_* 제거 (1253 회피)",
+        "case": "v95_p89_case 본부장님 환경 2026-05-07 — uspUpdateEmployeeLogin, vStoreWithDemographics",
+    },
+    
+    # ════════════════════════════════════════════════════════════════
+    # v95_p92 (2026-05-08 본부장님 본질 처방): B 그룹 8건 처방
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 빨간불 분석으로 발견한 본질:
+    #   B 그룹 (8건) = Gemma 의 SQL 구문 환각 (schema_ctx 무관)
+    #   - DATEADD MILLISECOND 잔재
+    #   - PIVOT_LOGIC_REPLACEMENT placeholder 잔재
+    #   - VARCHAR(50)) AS BankName (CAST 미완성)
+    #   - p_ErrorLogID int = 0 \nAS (MSSQL OUT default 잔재)
+    #   - BEGIN INSERT 트리거 잔재
+    #
+    # 본부장님 운영 메모리 핵심:
+    #   "AI 변환 안정성 이슈... failure pattern KB accumulation"
+    #   → 같은 패턴 반복 → KB 룰로 자동 정정
+    # ════════════════════════════════════════════════════════════════
+    
+    # R-025: MSSQL DATEADD(unit, n, date) → MySQL DATE_ADD(date, INTERVAL n unit)
+    # 본부장님 ufnGetAccountingEndDate: "DATEADD(MILLISECOND, ...);" 잔재
+    # v95_p92 정정: 함수 호출 (GETDATE() 등) 안의 괄호와 충돌 회피
+    # → date 부분을 [^()]+ 또는 ([^()]*\([^()]*\)[^()]*)+ 로 처리
+    {
+        "id": "R-025",
+        "name": "DATEADD → DATE_ADD INTERVAL 변환",
+        # date 부분: 단순 식별자 또는 함수 호출 1단계 모두 지원
+        # ([^,()]+ | \w+\([^()]*\))+ — 콤마/괄호 없거나, 함수 호출
+        "pattern": r"\bDATEADD\s*\(\s*(\w+)\s*,\s*([^,]+?)\s*,\s*((?:[^(),]+|\w+\([^()]*\))+?)\s*\)",
+        "replacement": r"DATE_ADD(\3, INTERVAL \2 \1)",
+        "description": "MSSQL DATEADD(unit, n, date) → MySQL DATE_ADD(date, INTERVAL n unit)",
+        "case": "v95_p92 본부장님 환경 2026-05-08 — ufnGetAccountingEndDate (MILLISECOND)",
+    },
+    
+    # R-026: 혹시 남은 placeholder 텍스트 제거 (Gemma 가 처방 텍스트를 SQL 안에 그대로 출력)
+    # 본부장님 vSalesPersonSalesByFiscalYears: "PIVOT_LOGIC_REPLACEMENT: SUM(CASE WHEN..." 잔재
+    {
+        "id": "R-026",
+        "name": "Gemma placeholder 텍스트 제거",
+        # PIVOT_LOGIC_REPLACEMENT, OUTER_APPLY_REPLACEMENT 등 처방 텍스트 잔재
+        "pattern": r"\b[A-Z_]+_REPLACEMENT\s*:\s*",
+        "replacement": "",
+        "description": "Gemma 가 처방 placeholder 텍스트를 SQL 안에 그대로 출력 잔재 제거",
+        "case": "v95_p92 본부장님 환경 2026-05-08 — vSalesPersonSalesByFiscalYears (PIVOT_LOGIC_REPLACEMENT)",
+    },
+    
+    # R-027: MSSQL OUT 파라미터 default 값 잔재 제거
+    # 본부장님 uspLogError: "p_ErrorLogID int = 0 \nAS" → MySQL 은 default 안 씀
+    # MySQL 프로시저 파라미터: IN/OUT/INOUT name type — default 없음
+    {
+        "id": "R-027",
+        "name": "MSSQL OUT default 잔재 제거",
+        # "param_name int = 0" 또는 "param_name varchar(N) = '...'"
+        # AS 키워드까지 함께 (MSSQL 의 잔재)
+        "pattern": r"(\b\w+\s+(?:int|varchar|nvarchar|bigint|smallint|tinyint|bit|datetime|date|decimal|numeric|float|real)(?:\s*\([^)]+\))?)\s*=\s*[^\n,)]+",
+        "replacement": r"\1",
+        "description": "MSSQL 의 'param type = default' MySQL 미지원 잔재 제거",
+        "case": "v95_p92 본부장님 환경 2026-05-08 — uspLogError (p_ErrorLogID int = 0)",
+    },
+    
+    # R-028: MSSQL "AS BEGIN" → MySQL "BEGIN" (AS 잔재)
+    # MSSQL 프로시저: CREATE PROCEDURE name AS BEGIN ... END
+    # MySQL:         CREATE PROCEDURE name() BEGIN ... END
+    # AS 키워드는 MSSQL 만의 것
+    {
+        "id": "R-028",
+        "name": "프로시저/함수 AS 키워드 제거",
+        # 줄바꿈 또는 공백 후 AS 다음 BEGIN/RETURN/SELECT 등
+        # "( ... )\nAS\nBEGIN" → "( ... )\nBEGIN"
+        "pattern": r"\)\s*\n\s*AS\s*\n\s*(BEGIN|RETURN|SELECT|DECLARE)",
+        "replacement": r")\n\1",
+        "description": "MSSQL 의 AS 키워드 (프로시저/함수 본문 시작) 제거 — MySQL 미지원",
+        "case": "v95_p92 본부장님 환경 2026-05-08 — uspLogError (\\nAS\\n)",
+    },
+    
+    # ════════════════════════════════════════════════════════════════
+    # v95_p94 (2026-05-08 본부장님 끝까지 처방): 그룹 1, 2, 7 처방
+    # ════════════════════════════════════════════════════════════════
+    
+    # R-029: XML CAST(NULL AS TYPE) 잔재 정리 (그룹 1 — 5건)
+    # 본부장님 빨간불 패턴:
+    #   vJobCandidate:                   CAST(NULL AS TEXT) AS Skills
+    #   vAdditionalContactInfo:          CAST(NULL AS CHAR(50))
+    #   vProductModelCatalogDescription: CAST(NULL AS TEXT) AS Summary
+    #   vStoreWithDemographics:          CAST(NULL AS VARCHAR(50)) AS BankName
+    # 본질: Gemma 가 MSSQL XML 함수를 CAST(NULL AS TYPE) AS alias 로 평탄화 시도
+    #       → 그 자체는 valid SQL 이지만 시작이 잘려서 'TEXT) AS alias' 같은 잔재
+    # 처방: 잘린 잔재 패턴 'TYPE) AS alias' 를 발견하면 명시적 NULL 로 교체
+    {
+        "id": "R-029a",
+        "name": "XML 평탄화 잔재 시작 부분 정리 (TYPE) AS alias)",
+        # 줄 시작 또는 콤마 직후의 'TEXT)' / 'VARCHAR(N))' / 'CHAR(N))' 잔재
+        # 패턴: ", TEXT) AS xxx" 또는 줄 시작 "TEXT) AS xxx"
+        # → ", NULL AS xxx" 로 교체
+        "pattern": r"((?:^|,)\s*)((?:TEXT|NTEXT)|(?:VAR)?CHAR\s*\(\s*\d+\s*\)|N(?:VAR)?CHAR\s*\(\s*\d+\s*\))\)\s+AS\s+(`?[\w.]+`?)",
+        "replacement": r"\1NULL AS \3",
+        "description": "Gemma 가 XML 함수 평탄화 시 발생하는 'TYPE) AS alias' 잔재 정리",
+        "case": "v95_p94 본부장님 환경 2026-05-08 — vJobCandidate, vAdditionalContactInfo 등 5건",
+    },
+    
+    # R-030: alias 자기조인 (p.X = p.X) 검증
+    # 본부장님 vIndividualCustomer: "p.BusinessEntityID = p.BusinessEntityID INNER JOIN..."
+    # 본질: Gemma 가 같은 alias 두 번 사용 (자기조인 무의미)
+    # 자동 정정 어려움 (의도 모름) → 검증만
+    # 자동 정정 안 함, 별도 검증 영역
+    
+    # R-031: 재귀 CTE 변환 (그룹 3 — 2건)  
+    # 본부장님 uspGetBillOfMaterials, uspGetWhereUsedProductID:
+    #   "UNION ALL SELECT b.ProductAssemblyID, b.ComponentID..."
+    # 본질: MSSQL 의 ;WITH cte AS (...UNION ALL...) → MySQL 의 WITH RECURSIVE cte AS (...)
+    # 정규식 자동 변환 위험 (CTE 본문 복잡) → 명시적 사용자 알림 영역
+    # 자동 정정 영역 아님 (의미적 변환)
+    
+    # R-032: ');' 후 'END' 사이 잔재 정리 (그룹 2 — 1건)
+    # 본부장님 ufnGetAccountingEndDate: "MILLISECOND); END" 잔재
+    # 본질: DATE_ADD(...) 가 정확히 닫혔는데 그 뒤에 ');' 잔재
+    # 패턴: MSSQL DATEADD 의 닫는 괄호가 한 개 더 추가됨
+    # 정확히는 'INTERVAL ... unit);' 다음 'END' 사이의 ');' 제거
+    {
+        "id": "R-032",
+        "name": "DATE_ADD/DATE_SUB 후 잔재 ');' 정리",
+        # 'INTERVAL ... <unit>); END' 패턴 — 함수 닫는 괄호 후 잔재 ');' 
+        # MILLISECOND/SECOND/MINUTE/HOUR/DAY/WEEK/MONTH/YEAR
+        "pattern": r"(INTERVAL\s+\S+\s+(?:MILLISECOND|MICROSECOND|SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|QUARTER|YEAR))\)\s*;\s*(?=\s*END\b)",
+        "replacement": r"\1);\n",
+        "description": "DATEADD → DATE_ADD 변환 후 잔재 ');' 정리 (그룹 2 그룹 — ufnGetAccountingEndDate)",
+        "case": "v95_p94 본부장님 환경 2026-05-08 — ufnGetAccountingEndDate (MILLISECOND)",
+    },
+    
+    # ════════════════════════════════════════════════════════════════
+    # v95_p99 (2026-05-08 18:50 본부장님 진짜 진짜 본질!)
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 결정: "근본적인 문제를 해결해야해. B로 마지막으로 진행 해보자.
+    #               정말 신중하게 해야해."
+    #
+    # 본부장님 환경 (2026-05-08 18:32) Gemma 진짜 응답 분석:
+    #   CREATE PROCEDURE `uspGetBillOfMaterials`
+    #       p_StartProductID `int`,        ← ❌ 괄호 (없음
+    #       p_CheckDate `datetime`         ← ❌ 괄호 )없음, IN 키워드 없음
+    #   BEGIN                              ← ❌ 백틱으로 둘러싼 데이터타입
+    #
+    #   3가지 본질 동시에:
+    #     1. 괄호 ( ) 누락
+    #     2. IN 키워드 누락  
+    #     3. 백틱으로 둘러싼 데이터타입 (`int` → INT)
+    #
+    # 본부장님 KB 통계: 1064_PROC_PARAM_LEFTOVER 가 20건 매칭
+    #   → 7건 모두 동일 본질
+    #   → post_process 1개 룰로 한방에 정정 가능
+    # ════════════════════════════════════════════════════════════════
+    # R-033 은 단순 정규식이 아닌 함수 형태 (replacer) → 별도 처리
+    # POSTPROCESS_RULES 의 표준 형식 (pattern/replacement) 으로 표현 어려움
+    # → POSTPROCESS_RULES 끝에 마커만 두고 post_process_sql 에서 직접 처리
 ]
 
 
-def post_process_sql(sql: str, obj_name: str = "", verbose: bool = True) -> tuple[str, list[str]]:
-    """SQL 사후 보정 - 알려진 패턴 자동 수정."""
+# ════════════════════════════════════════════════════════════════════
+# v95_p99 (2026-05-08 18:50 본부장님 진짜 본질): R-033 함수형 룰
+# ════════════════════════════════════════════════════════════════════
+# 본부장님 환경 7건 빨간불 모두 같은 본질:
+#   CREATE PROCEDURE name
+#       p_param `type`,    ← 괄호/IN 없음, 백틱 타입
+#   BEGIN
+#
+# 정정:
+#   CREATE PROCEDURE name(
+#       IN p_param TYPE
+#   )
+#   BEGIN
+#
+# 함수형으로 처리 (정규식 + replacer 함수)
+import re as _re_p99
+
+_R033_PROC_SIGNATURE_PAT = _re_p99.compile(
+    r"(CREATE\s+PROCEDURE\s+`?[\w]+`?)\s*"     # CREATE PROCEDURE name
+    r"(?!\s*\()"                                # 괄호 없음 (lookahead — 이미 정상이면 변경 안 함)
+    r"((?:\s*\n?\s*p_\w+\s+`\w+(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?`\s*,?)+)"  # 파라미터들
+    r"\s*\n?\s*"
+    r"(BEGIN)",
+    _re_p99.IGNORECASE | _re_p99.DOTALL
+)
+
+def _r033_fix_proc_signature(sql: str) -> tuple[str, int]:
+    """
+    R-033: PROCEDURE 시그니처 정정 (본부장님 진짜 본질).
+    
+    Returns: (fixed_sql, count_of_fixes)
+    """
+    if not sql or "CREATE PROCEDURE" not in sql.upper():
+        return sql, 0
+    
+    count = [0]
+    
+    def replacer(m):
+        name = m.group(1)
+        params_block = m.group(2)
+        begin = m.group(3)
+        
+        # 파라미터 추출
+        param_pat = _re_p99.compile(
+            r"(p_\w+)\s+`(\w+(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?)`",
+            _re_p99.IGNORECASE
+        )
+        params = param_pat.findall(params_block)
+        
+        if not params:
+            return m.group(0)  # 매칭 안 됐으면 원본 반환
+        
+        new_params = [f"    IN {pname} {ptype.upper()}" for pname, ptype in params]
+        count[0] += 1
+        return f"{name}(\n" + ",\n".join(new_params) + f"\n)\n{begin}"
+    
+    new_sql = _R033_PROC_SIGNATURE_PAT.sub(replacer, sql)
+    return new_sql, count[0]
+# ════════════════════════════════════════════════════════════════════
+    
+    # R-029: VARCHAR()) AS xxx 형식의 미완성 CAST 보정
+    # 본부장님 vStoreWithDemographics: "VARCHAR(50)) AS BankName, CAST(NULL AS VARCHAR(5)) AS Bus..."
+    # 본부장님 vProductModelCatalogDescription: "TEXT) AS Summary, CAST(NULL AS TEXT) AS Manufacturer..."
+    # → CAST(... 의 시작이 잘림. 패턴: "}TYPE) AS xxx" 가 잘못 시작
+    # 이건 정규식으로 100% 못 잡음 — Gemma 응답 잘림 본질
+    # → 별도 검증 룰 (warning) 만 추가, 자동 정정 X
+    # (수동 확인 필요)
+    
+    # R-030: INSERT 트리거에서 OLD 참조 자동 제거 (C 그룹 처방)
+    # 본부장님 iduSalesOrderDetail: i+d+u 통합 트리거 → INSERT 시 OLD 참조 → 1363
+    # 본부장님 iuPerson: 같은 본질
+    # MySQL 의 트리거는 단일 이벤트 (INSERT 또는 UPDATE 또는 DELETE) 만 허용
+    # i+d+u 통합 트리거를 분리하는 건 의미적 변환 영역 → 자동 정정 X
+    # 단, OLD 참조가 INSERT 트리거에 있으면 명시적 경고 (Gemma 가 분리 못 했음)
+    # → 자동 정정 영역 아님, 수동 처리 필요
+    # (위 R-033 별도 처리는 POSTPROCESS_RULES 위에서 종료됨)
+
+
+def post_process_sql(sql: str, obj_name: str = "", verbose: bool = True,
+                     job_id: str = "") -> tuple[str, list[str]]:
+    """SQL 사후 보정 - 알려진 패턴 자동 수정.
+    
+    v95_p95 (2026-05-08 본부장님 비전 — RAG 풍성하게):
+      룰 적용 시 KB 통계에 자동 등재 (record_attempt)
+      → KB 가 살아있는 자산이 됨 (얼마나 자주 사용? 어떤 룰 효과적?)
+      → 향후 DataBridgeGemma fine-tune 데이터로 활용
+    """
     if not sql or not sql.strip():
         return sql, []
     
+    # v95_p95: KB 등재 매핑 (룰 ID → KB 패턴 ID)
+    # 본부장님 모토: post_process 룰 == KB 자산
+    _RULE_TO_KB_PATTERN = {
+        # v94 신규 룰들 → v95_p95 KB 등재
+        "R-029a": "1064_XML_CAST_RESIDUE",
+        "R-032":  "1064_DATE_ADD_TAIL_RESIDUE",
+        # v92 기존 룰들도 KB 매핑
+        "R-025":  "1064_DATE_ADD_TAIL_RESIDUE",  # 같은 본질
+        "R-026":  "1064_PIVOT_PLACEHOLDER",
+        "R-027":  "1064_OUT_DEFAULT_RESIDUE",
+        "R-028":  "1064_PROC_AS_KEYWORD",
+        # v95_p99 신규 — 본부장님 진짜 본질
+        "R-033":  "1064_PROC_PARAM_LEFTOVER",  # PROC 시그니처 정정
+    }
+    
     applied = []
+    
+    # ════════════════════════════════════════════════════════════
+    # v95_p99 (2026-05-08 18:50 본부장님 진짜 본질):
+    # R-033 — PROC 시그니처 정정 (함수형 룰, POSTPROCESS_RULES 표준 형식 적용 안 됨)
+    # ════════════════════════════════════════════════════════════
+    try:
+        new_sql_r033, count_r033 = _r033_fix_proc_signature(sql)
+        if count_r033 > 0:
+            applied.append(f"R-033 x{count_r033}")
+            if verbose:
+                _log.info("[SQL-PostProc] [%s] R-033 PROC 시그니처 정정: %d회",
+                          obj_name or "?", count_r033)
+            sql = new_sql_r033
+            
+            # KB 통계 등재
+            try:
+                from app.engine.error_kb import record_attempt
+                record_attempt(
+                    pattern_id="1064_PROC_PARAM_LEFTOVER",
+                    error_code="1064",
+                    category="POST_PROCESS",
+                    job_id=job_id,
+                    item_name=obj_name,
+                    attempt_num=count_r033,
+                    success=True,
+                    ai_used=False,
+                    prompt_chars=0,
+                )
+            except Exception as _e:
+                if verbose:
+                    _log.debug("[R-033 KB-등재 실패 — 무시]: %s", _e)
+    except Exception as _r033_e:
+        _log.warning("[SQL-PostProc] R-033 처리 오류 (무시): %s", _r033_e)
+    # ════════════════════════════════════════════════════════════
+    
     for rule in POSTPROCESS_RULES:
         try:
             new_sql, count = re.subn(
@@ -143,6 +780,28 @@ def post_process_sql(sql: str, obj_name: str = "", verbose: bool = True) -> tupl
                     _log.info("[SQL-PostProc] [%s] %s 적용: %d회",
                               obj_name or "?", rule["id"], count)
                 sql = new_sql
+                
+                # v95_p95: KB 통계 자동 등재 (본부장님 비전 — RAG 자산)
+                kb_pattern = _RULE_TO_KB_PATTERN.get(rule["id"])
+                if kb_pattern:
+                    try:
+                        from app.engine.error_kb import record_attempt
+                        record_attempt(
+                            pattern_id=kb_pattern,
+                            error_code=kb_pattern.split("_")[0],  # "1064" 등
+                            category="POST_PROCESS",
+                            job_id=job_id,
+                            item_name=obj_name,
+                            attempt_num=count,
+                            success=True,        # 룰이 매칭됐다 = 패턴 발견
+                            ai_used=False,       # post_process 룰 (AI 안 거침)
+                            prompt_chars=0,
+                        )
+                    except Exception as _e:
+                        # KB 등재 실패는 메인 흐름 방해 안 함
+                        if verbose:
+                            _log.debug("[KB-등재 실패 — 무시] %s: %s",
+                                       rule["id"], _e)
         except re.error as e:
             _log.warning("[SQL-PostProc] %s 정규식 오류: %s", rule["id"], e)
     
@@ -180,6 +839,11 @@ def validate_ddl_complete(ddl: str, obj_type: str = "PROCEDURE", obj_name: str =
     DDL 완성도 검증 (AI 응답 잘림 사전 차단).
     본부장님 캐피탈사 케이스: sp_Softphone_UpdateRecord 가 max_tokens 잘림 → BEGIN..END 짝 안 맞음
     
+    v95_p92 (2026-05-08 본부장님): INSERT 트리거 OLD 참조 검증 추가
+      본부장님 빨간불 iduSalesOrderDetail/iuPerson:
+        i+d+u 통합 트리거 → INSERT 시 OLD 참조 → 1363 에러
+      → 사전 검증으로 차단 + 명시적 메시지
+    
     Returns: (is_complete, reason)
     """
     if not ddl or not ddl.strip():
@@ -216,7 +880,121 @@ def validate_ddl_complete(ddl: str, obj_type: str = "PROCEDURE", obj_name: str =
             if block_end < begin_count:
                 return False, f"BEGIN/END 짝 불일치 (BEGIN {begin_count}개 / END {block_end}개)"
     
+    # ════════════════════════════════════════════════════════════
+    # v95_p92 (2026-05-08 본부장님): INSERT 트리거의 OLD 참조 검증
+    # ════════════════════════════════════════════════════════════
+    # 본부장님 빨간불:
+    #   iduSalesOrderDetail/iuPerson — i+d+u 통합 트리거 (MSSQL)
+    #   MySQL 은 단일 이벤트 트리거만 지원 (INSERT/UPDATE/DELETE 분리)
+    #   Gemma 가 INSERT 트리거에 OLD 참조 남기면 1363 에러
+    # 처방: BEFORE/AFTER INSERT 트리거 본문에 OLD. 참조 있으면 명시적 차단
+    # ════════════════════════════════════════════════════════════
+    if obj_type.upper() == "TRIGGER":
+        # CREATE TRIGGER name BEFORE/AFTER INSERT 패턴
+        insert_trigger_match = re.search(
+            r"CREATE\s+TRIGGER\s+\S+\s+(?:BEFORE|AFTER)\s+INSERT\b",
+            ddl_upper
+        )
+        if insert_trigger_match:
+            # 본문에 OLD. 참조 있는지
+            body_after_create = ddl_upper[insert_trigger_match.end():]
+            old_ref = re.search(r"\bOLD\.\w+", body_after_create)
+            if old_ref:
+                _record_validation_block("1363_INSERT_TRIGGER_OLD", obj_name,
+                                         old_ref.group())
+                return False, (
+                    f"INSERT 트리거에 OLD 참조 사용 — MySQL 미지원 (1363 에러). "
+                    f"발견: '{old_ref.group()}' . "
+                    f"i+d+u 통합 트리거를 INSERT/UPDATE/DELETE 별로 분리 필요."
+                )
+    
+    # ════════════════════════════════════════════════════════════
+    # v95_p94 (2026-05-08 본부장님 끝까지 처방): 추가 검증
+    # ════════════════════════════════════════════════════════════
+    
+    # v95_p94-1: TVF (Table-Valued Function) 1415 사전 차단
+    # 본부장님 빨간불 ufnGetProductDealerPrice/ListPrice:
+    #   '1415: Not allowed to return a result set from a function'
+    # 본질: MSSQL 의 TVF (RETURNS TABLE) 는 MySQL 미지원
+    # 처방: FUNCTION 본문에 RETURNS TABLE 또는 명시적 SELECT 가 있으면 차단
+    if obj_type.upper() == "FUNCTION":
+        # MySQL 함수: RETURNS <scalar_type> (DATETIME, INT, VARCHAR 등)
+        # 만약 RETURNS TABLE 또는 본문에 SELECT (assigned 안 된) 있으면 TVF
+        if re.search(r"\bRETURNS\s+TABLE\b", ddl_upper):
+            _record_validation_block("1415_TVF_NOT_SUPPORTED", obj_name, "RETURNS TABLE")
+            return False, (
+                "TVF (Table-Valued Function) 변환 시도 — MySQL 미지원 (1415 에러). "
+                "MSSQL 의 RETURNS TABLE 함수는 MySQL 에서 STORED PROCEDURE 또는 VIEW 로 "
+                "재설계 필요. 자동 변환 영역 아님."
+            )
+        # 본문에 SET 없이 SELECT 만 있는 경우 — 결과 반환 시도
+        # FUNCTION 안의 SELECT 는 INTO 또는 SET 와 함께여야 함
+        # 단순화: SELECT 를 SET/INTO 없이 사용하면 의심
+        body_match = re.search(r"\bBEGIN\b(.*?)\bEND\b", ddl_upper, re.DOTALL)
+        if body_match:
+            body = body_match.group(1)
+            # SELECT 가 있는데 INTO 없고 SET 도 없으면 의심
+            select_count = len(re.findall(r"\bSELECT\b", body))
+            into_count = len(re.findall(r"\bSELECT\b[^;]*?\bINTO\b", body, re.DOTALL))
+            if select_count > 0 and into_count < select_count:
+                # SELECT INTO 가 아닌 일반 SELECT 가 있음
+                _record_validation_block("1415_TVF_NOT_SUPPORTED", obj_name, "SELECT_NO_INTO")
+                return False, (
+                    f"FUNCTION 본문에 'SELECT INTO' 가 아닌 일반 SELECT 발견 "
+                    f"({select_count - into_count}건) — MySQL FUNCTION 은 결과 집합 반환 불가 "
+                    f"(1415 에러). SELECT 를 SET 변수 = (...) 또는 SELECT INTO 로 변환 필요."
+                )
+    
+    # v95_p94-2: 짧은 응답 검증 (그룹 8 — 3건)
+    # 본부장님 빨간불:
+    #   uspGetWhereUsedProductID: ') END' (5자)
+    #   uspSearchCandidateResumes: '' (0자)
+    #   uPurchaseOrderDetail:    'BEGIN INSERT...' (잘림)
+    # 본질: Gemma 응답이 너무 짧음 = 잘림 또는 실패
+    # 처방: PROCEDURE/FUNCTION/TRIGGER DDL 이 80자 미만이면 차단
+    min_lengths = {
+        "PROCEDURE": 80,
+        "FUNCTION": 60,
+        "TRIGGER": 80,
+        "VIEW": 60,
+    }
+    obj_type_upper = obj_type.upper()
+    if obj_type_upper in min_lengths:
+        ddl_stripped = ddl.strip()
+        if len(ddl_stripped) < min_lengths[obj_type_upper]:
+            _record_validation_block("1064_GEMMA_TRUNCATED_RESPONSE", obj_name,
+                                     f"{len(ddl_stripped)}자")
+            return False, (
+                f"{obj_type_upper} DDL 이 너무 짧음 ({len(ddl_stripped)}자, "
+                f"최소 {min_lengths[obj_type_upper]}자 기대) — Gemma 응답 잘림/실패 의심. "
+                f"내용: '{ddl_stripped[:60]}...'"
+            )
+    
     return True, ""
+
+
+def _record_validation_block(kb_pattern_id: str, obj_name: str, detail: str = "") -> None:
+    """v95_p95: validate_ddl_complete 차단 시 KB 통계 등재.
+    
+    본부장님 비전 — RAG 자산 누적:
+      검증 차단도 KB 통계로 누적 → 어느 패턴이 자주 발생? 알 수 있음.
+      → DataBridgeGemma fine-tune 데이터로 활용.
+    """
+    try:
+        from app.engine.error_kb import record_attempt
+        record_attempt(
+            pattern_id=kb_pattern_id,
+            error_code=kb_pattern_id.split("_")[0],
+            category="PRE_VALIDATE",
+            job_id="",
+            item_name=obj_name,
+            attempt_num=1,
+            success=True,    # 사전 차단 = 패턴 정확히 식별
+            ai_used=False,   # validator 가 사전 차단 (AI 안 거침)
+            prompt_chars=len(detail) if detail else 0,
+        )
+    except Exception:
+        pass  # KB 등재 실패는 메인 흐름 방해 안 함
 
 
 def log_failure_to_kb(

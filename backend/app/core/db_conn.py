@@ -17,6 +17,24 @@ except ImportError:
     _pyodbc_available = False
 
 
+# ════════════════════════════════════════════════════════════════
+# v95_p20 (2026-05-03 본부장님 본질 처방): 드라이버 모듈 캐시
+# ════════════════════════════════════════════════════════════════
+# 본부장님 호소: "이렇게 db 접속을 대량으로 해야 되는거야?"
+#
+# 본질 진단 — 본부장님 환경 로그:
+#   PYODBC connect → DRIVER=ODBC 18 → 실패
+#   PYODBC connect → DRIVER=ODBC 17 → 실패
+#   PYODBC connect → DRIVER={SQL Server} → 성공
+#   ... 매 connect 마다 위 패턴 반복 (3종 fallback) ...
+#
+# 처방: 첫 성공한 드라이버를 모듈 변수에 캐시 → 다음 connect 부터 그것만 시도
+# 효과: 변환 규칙 화면 로드 시 connect 시도 횟수 약 3배 감소
+#
+# 본부장님 원칙: 환경별로 자동 감지 (하드코딩 없음 — pyodbc.drivers() 결과 기반)
+_cached_mssql_driver: str = ""  # 첫 성공 드라이버 캐시 (전역 모듈 변수)
+
+
 def default_port(db_type: str) -> int:
     """DB 종류별 기본 포트"""
     return {
@@ -67,6 +85,13 @@ def make_mssql_conn(host: str, port, username: str, password: str,
     if not drivers:
         raise Exception("MSSQL ODBC 드라이버가 설치되지 않았습니다.")
 
+    # ── v95_p20 (2026-05-03 본부장님 본질 처방): 캐시된 드라이버 우선 시도 ──
+    # 첫 성공 드라이버를 캐시 → 다음 connect 부터 그것만 시도 → fallback 폭발 방지
+    global _cached_mssql_driver
+    if _cached_mssql_driver and _cached_mssql_driver in drivers:
+        # 캐시된 드라이버를 맨 앞으로 (이전 성공한 드라이버를 우선 시도)
+        drivers = [_cached_mssql_driver] + [d for d in drivers if d != _cached_mssql_driver]
+
     # 첫 번째 시도
     errors = []
     for drv in drivers:
@@ -108,6 +133,10 @@ def make_mssql_conn(host: str, port, username: str, password: str,
                 conn.setencoding(encoding='utf-16le')
             except Exception:
                 pass  # 구버전 pyodbc는 메서드 없음
+            # v95_p20: 첫 성공 드라이버를 모듈 캐시에 기록
+            #   다음 connect 부터 이 드라이버만 시도 (fallback 폭발 방지)
+            if _cached_mssql_driver != drv:
+                _cached_mssql_driver = drv
             return conn
         except Exception as e:
             errors.append(f"{drv}: {e}")

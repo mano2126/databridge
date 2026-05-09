@@ -1,0 +1,777 @@
+"""
+app/api/routes/settings.py
+시스템 설정 + 로깅 설정 API — JSON 파일 영속성 적용
+"""
+from fastapi import APIRouter, Depends, Request
+import logging, os
+from app.core.store import Store
+from app.core.crypto import encrypt as _enc, decrypt as _dec, is_encrypted as _is_enc
+from app.core.auth_deps import require_admin, require_viewer, require_operator
+
+router = APIRouter()
+
+# ── 설정 기본값 ───────────────────────────────────────────
+_DEFAULTS: dict = {
+    "batch_size":         5000,
+    "parallel_workers":   4,
+    "log_level":          "INFO",
+    "log_retention_days": 30,
+    "notify_email":       False,
+    "notify_slack":       False,
+    "on_error":           "skip",
+    "retry_count":        3,
+    "backend_log_file":   "./logs/databridge_backend.log",
+    "frontend_log_file":  "./logs/databridge_frontend.log",
+    "log_format":         "TEXT",
+    "log_max_mb":         10,
+    "log_backup_count":   10,
+    # v9 패치 #18: 로그 백업
+    "log_backup_dir":     "./logs/backups",
+    # v95_p9_REAL: 옵션 확장 (off | 5min | 30min | hourly | 2h | 6h | 12h | daily)
+    "log_backup_schedule": "off",
+    "log_backup_retention_days": 30,     # 이보다 오래된 백업은 자동 삭제
+    # v95_p9_REAL: 사이즈 OR 조건 - 시간 도달해도 이 크기 미만이면 백업 SKIP (작은 파일 양산 방지)
+    "log_backup_min_size_mb": 1,         # 기본 1MB. 0이면 사이즈 조건 무시 (구버전 동작)
+    # v95_p9_REAL: 사이즈 도달 시 즉시 백업 (시간 안 기다림)
+    "log_backup_size_trigger_mb": 5,     # 5MB 초과하면 즉시 백업. 0이면 비활성
+    "anthropic_api_key":  "",
+}
+
+# ── JSON 파일 영속 스토어 ─────────────────────────────────
+_store = Store("settings")
+
+# 저장된 설정이 없으면 기본값으로 초기화
+if _store.get("config") is None:
+    _store.set("config", _DEFAULTS.copy())
+
+def _cfg() -> dict:
+    """현재 설정 딕셔너리 반환 (기본값 병합)
+    
+    우선순위:
+      1. UI에서 저장한 settings.json 값 (backend/data/ - gitignore됨)
+      2. 환경변수 ANTHROPIC_API_KEY (.env 또는 시스템 환경변수)
+      3. 기본값 (_DEFAULTS)
+
+    보안:
+      - settings.json에 저장된 API 키는 암호화된 상태 (prefix 'enc::').
+      - 이 함수의 반환 시점에 복호화하여 내부 사용자(ai_assistant 등)가
+        평문을 바로 받을 수 있도록 한다. 단, get_settings API는 다시 마스킹.
+    """
+    saved  = _store.get("config", {})
+    merged = {**_DEFAULTS, **saved}
+
+    # API 키: settings.json에 없으면 환경변수에서 폴백
+    stored_key = merged.get("anthropic_api_key", "")
+    if stored_key:
+        if _is_enc(stored_key):
+            # 암호화된 값 → 복호화
+            merged["anthropic_api_key"] = _dec(stored_key)
+            logging.debug("[cfg] API 키: settings.json에서 로드 (복호화됨)")
+        else:
+            # 레거시 평문 값 — 암호화 마이그레이션이 아직 안 된 상태
+            logging.debug("[cfg] API 키: settings.json 평문값 사용 (마이그레이션 권장)")
+    else:
+        env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if env_key and env_key not in ("", "ollama", "your-api-key-here"):
+            merged["anthropic_api_key"] = env_key
+            logging.debug("[cfg] API 키: 환경변수에서 로드됨")
+        else:
+            logging.debug("[cfg] API 키: 미설정")
+
+    return merged
+
+
+# ── 로거 초기화 ────────────────────────────────────────────
+def _setup_logging(cfg: dict):
+    """설정에 따라 루트 로거를 재구성 (rotate 후에도 정상 동작)"""
+    from logging.handlers import RotatingFileHandler
+    level_str  = cfg.get("log_level", "INFO").upper()
+    log_file   = cfg.get("backend_log_file", "./logs/databridge_backend.log")
+    log_format = cfg.get("log_format", "TEXT")
+    max_mb     = int(cfg.get("log_max_mb", 50))
+    backup_cnt = int(cfg.get("log_backup_count", 5))
+    level = getattr(logging, level_str, logging.INFO)
+
+    log_dir = os.path.dirname(os.path.abspath(log_file))
+    os.makedirs(log_dir, exist_ok=True)
+
+    if log_format == "JSON":
+        fmt = '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","msg":"%(message)s"}'
+    else:
+        fmt = "[%(asctime)s] %(levelname)-8s %(name)s — %(message)s"
+    formatter = logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # 기존 핸들러 완전 제거 (닫기 포함)
+    for h in root.handlers[:]:
+        try:
+            h.flush()
+            h.close()
+        except Exception:
+            pass
+        root.removeHandler(h)
+
+    # 콘솔 핸들러
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(formatter)
+    root.addHandler(ch)
+
+    # 파일 핸들러 (RotatingFileHandler)
+    try:
+        fh = RotatingFileHandler(
+            log_file,
+            maxBytes=max_mb * 1024 * 1024,
+            backupCount=backup_cnt,
+            encoding="utf-8"
+        )
+        fh.setLevel(level)
+        fh.setFormatter(formatter)
+        root.addHandler(fh)
+        logging.info("로깅 초기화 완료: %s (레벨: %s)", os.path.abspath(log_file), level_str)
+    except Exception as e:
+        logging.warning("로그 파일 핸들러 생성 실패: %s", e)
+
+    # uvicorn 등 서드파티 로거의 레벨도 강제 설정 (DEBUG 차단 방지)
+    for name in ("databridge", "databridge.jobs", "databridge.schema",
+                 "databridge.frontend", "databridge.backend"):
+        lg = logging.getLogger(name)
+        lg.setLevel(level)
+        lg.propagate = True  # 루트로 전파
+
+
+# 기동 시 저장된 설정으로 로깅 초기화
+_setup_logging(_cfg())
+
+
+# ── REST API ──────────────────────────────────────────────
+
+@router.get("/")
+def get_settings(_=Depends(require_viewer)):
+    cfg = _cfg()
+    # API 키는 보안상 마스킹해서 반환 (프론트에서 표시용)
+    # 실제 키가 있으면 앞10자+...+뒤4자로 마스킹
+    key = cfg.get("anthropic_api_key", "")
+    if key:
+        cfg["anthropic_api_key_masked"] = key[:8] + "..." + key[-4:]
+        cfg["anthropic_api_key_set"] = True
+        cfg["anthropic_api_key_set_at"] = cfg.get("anthropic_api_key_set_at", "")
+        cfg["anthropic_api_key"] = ""
+    else:
+        cfg["anthropic_api_key_masked"] = ""
+        cfg["anthropic_api_key_set"] = False
+        cfg["anthropic_api_key_set_at"] = ""
+    return cfg
+
+
+@router.put("/")
+def update_settings(body: dict, request: Request, admin=Depends(require_admin)):
+    from app.core import audit as _audit
+    from app.core.audit import Actions as _Actions
+    current = _store.get("config", {**_DEFAULTS})
+    # API 키: 비어있거나 마스킹된 값(...)이 오면 기존 키 유지
+    if "anthropic_api_key" in body:
+        new_key = (body["anthropic_api_key"] or "").strip()
+        if not new_key or "..." in new_key:
+            body.pop("anthropic_api_key")  # 비거나 마스킹된 값 무시
+        else:
+            logging.info(f"[settings] API 키 저장: {new_key[:15]}...{new_key[-4:]} ({len(new_key)}자)")
+            import datetime as _dt
+            body["anthropic_api_key_set_at"] = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # ── 디스크 저장 직전 암호화 ───────────────────────
+            body["anthropic_api_key"] = _enc(new_key)
+    # 내부 전용 키 제거
+    for k in ["anthropic_api_key_masked", "anthropic_api_key_set"]:
+        body.pop(k, None)
+    current.update(body)
+    _store.set("config", current)
+
+    log_keys = {"log_level", "backend_log_file", "log_format", "log_max_mb", "log_backup_count"}
+    if log_keys.intersection(body.keys()):
+        _setup_logging(current)
+        logging.info(f"로깅 설정 변경됨: { {k: body[k] for k in log_keys if k in body} }")
+    # 응답에서도 암호문/평문 키 노출 방지
+    resp = dict(current)
+    resp["anthropic_api_key"] = ""
+    # 감사 로그
+    try:
+        changed_keys = [k for k in body.keys() if k not in ("anthropic_api_key_masked","anthropic_api_key_set")]
+        _audit.record(
+            action=_Actions.SETTINGS_UPDATE, status="ok",
+            user=admin, resource="settings", resource_id=None,
+            ip=(request.client.host if request.client else None),
+            details={"changed_keys": changed_keys},
+        )
+    except Exception:
+        pass
+    return resp
+
+
+@router.get("/log-tail")
+def tail_log(lines: int = 300, source: str = "backend", _=Depends(require_viewer)):
+    """로그 파일 마지막 N줄 반환 (v9 패치 #17: 대용량 파일 대응)"""
+    cfg = _cfg()
+    key = "backend_log_file" if source == "backend" else "frontend_log_file"
+    log_file = cfg.get(key, f"./logs/databridge_{source}.log")
+    abs_path = os.path.abspath(log_file)
+    # 안전 상한 (너무 크면 서버 메모리 부담)
+    lines = max(1, min(int(lines), 200000))
+    if not os.path.exists(abs_path):
+        return {"lines": [], "file": abs_path, "exists": False,
+                "message": f"로그 파일이 없습니다: {abs_path}"}
+    try:
+        # 파일 끝에서부터 역방향 청크 읽기 (전체 메모리 로드 방지)
+        tail = _tail_read(abs_path, lines)
+        # 총 줄수 대략 (정확치는 아니지만 사용자 참고용)
+        total = _count_lines_fast(abs_path)
+        return {
+            "lines":  tail,
+            "file":   abs_path,
+            "exists": True,
+            "total":  total,
+            "source": source,
+        }
+    except Exception as e:
+        return {"lines": [str(e)], "file": abs_path, "exists": True, "error": str(e)}
+
+
+def _tail_read(path: str, n: int) -> list:
+    """파일 끝에서부터 역방향으로 읽어 마지막 n줄 반환 (효율)"""
+    CHUNK = 64 * 1024
+    buf = b""
+    lines_found = 0
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+        while pos > 0 and lines_found <= n:
+            read = min(CHUNK, pos)
+            pos -= read
+            f.seek(pos)
+            chunk = f.read(read)
+            buf = chunk + buf
+            lines_found = buf.count(b"\n")
+    text = buf.decode("utf-8", errors="replace")
+    arr = text.splitlines()
+    if len(arr) > n:
+        arr = arr[-n:]
+    return arr
+
+
+def _count_lines_fast(path: str) -> int:
+    """줄 수 카운팅 (이진으로 \\n만 세서 빠름)"""
+    try:
+        count = 0
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                count += chunk.count(b"\n")
+        return count
+    except Exception:
+        return 0
+
+
+@router.get("/log-info")
+def log_info(source: str = "backend", _=Depends(require_viewer)):
+    """로그 파일 정보"""
+    cfg = _cfg()
+    key = "backend_log_file" if source == "backend" else "frontend_log_file"
+    log_file = cfg.get(key, f"./logs/databridge_{source}.log")
+    abs_path = os.path.abspath(log_file)
+    exists   = os.path.exists(abs_path)
+    size_kb  = round(os.path.getsize(abs_path) / 1024, 1) if exists else 0
+    return {
+        "file":    abs_path,
+        "exists":  exists,
+        "size_kb": size_kb,
+        "level":   cfg.get("log_level", "INFO"),
+        "source":  source,
+    }
+
+
+@router.get("/log-info-both")
+def log_info_both(_=Depends(require_viewer)):
+    """백엔드 + 프론트엔드 로그 파일 정보"""
+    cfg = _cfg()
+
+    def _info(path_key):
+        log_file = cfg.get(path_key, "")
+        abs_path = os.path.abspath(log_file) if log_file else ""
+        exists   = os.path.exists(abs_path) if abs_path else False
+        size_kb  = round(os.path.getsize(abs_path) / 1024, 1) if exists else 0
+        return {"file": abs_path, "exists": exists, "size_kb": size_kb, "rel": log_file}
+
+    return {
+        "backend":  {**_info("backend_log_file"),  "level": cfg.get("log_level", "INFO")},
+        "frontend": {**_info("frontend_log_file")},
+    }
+
+
+@router.delete("/api-key")
+def delete_api_key(_=Depends(require_admin)):
+    """Anthropic API 키 해제"""
+    cfg = _store.get("config", {**_DEFAULTS})
+    cfg["anthropic_api_key"] = ""
+    cfg["anthropic_api_key_set_at"] = ""
+    _store.set("config", cfg)
+    logging.info("[settings] API 키 해제됨")
+    return {"ok": True}
+
+
+@router.post("/api-key-test")
+def test_api_key(_=Depends(require_admin)):
+    """Anthropic API 키 연결 테스트"""
+    import urllib.request as _ur, urllib.error as _ue, json as _j, logging as _log
+    _lg = _log.getLogger("settings.apitest")
+
+    key = _cfg().get("anthropic_api_key", "").strip()
+
+    # 로그: 키 앞 20자 + 뒤 4자만 기록 (보안)
+    if key:
+        masked = key[:20] + "..." + key[-4:] if len(key) > 24 else key[:8]+"..."
+        _lg.info(f"[API테스트] 키 확인: {masked} (총 {len(key)}자)")
+    else:
+        _lg.warning("[API테스트] 키 없음")
+        return {"ok": False, "error": "API 키가 설정되지 않았습니다.",
+                "debug": "키가 비어있습니다. 저장 후 다시 시도하세요."}
+
+    # 키 형식 검사
+    if not key.startswith("sk-ant-"):
+        _lg.warning(f"[API테스트] 키 형식 오류: {key[:10]}...")
+        return {"ok": False,
+                "error": f"키 형식 오류: 입력된 키가 sk-ant-로 시작하지 않습니다 ({key[:10]}...)",
+                "debug": f"키 길이: {len(key)}자, 시작: {key[:15]}"}
+
+    try:
+        payload = _j.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 20,
+            "messages": [{"role": "user", "content": "Say OK"}]
+        }).encode()
+        req = _ur.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type":      "application/json",
+                "x-api-key":         key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST"
+        )
+        _lg.info(f"[API테스트] 요청 전송 중... (키: {masked})")
+        with _ur.urlopen(req, timeout=15) as r:
+            data = _j.loads(r.read())
+        text  = data.get("content", [{}])[0].get("text", "")
+        model = data.get("model", "")
+        _lg.info(f"[API테스트] 성공! 모델: {model}")
+        return {"ok": True, "message": f"연결 성공! 모델: {model} | 응답: {text}",
+                "debug": f"키: {masked}"}
+    except _ue.HTTPError as e:
+        body = e.read().decode()
+        _lg.error(f"[API테스트] HTTP {e.code}: {body[:200]}")
+        try:
+            err_data = _j.loads(body)
+            err_type = err_data.get("error", {}).get("type", "")
+            err_msg  = err_data.get("error", {}).get("message", "")
+            if err_type == "authentication_error":
+                return {"ok": False,
+                        "error": f"[401 인증실패] API 키가 유효하지 않습니다.",
+                        "debug": f"키: {masked} | 서버응답: {err_msg}"}
+            if err_type == "permission_error":
+                return {"ok": False, "error": f"[403 권한없음] {err_msg}",
+                        "debug": f"키: {masked}"}
+            return {"ok": False, "error": f"[HTTP {e.code}] {err_type}: {err_msg}",
+                    "debug": f"키: {masked}"}
+        except Exception:
+            return {"ok": False, "error": f"[HTTP {e.code}] 응답 파싱 실패",
+                    "debug": body[:200]}
+    except _ue.URLError as e:
+        _lg.error(f"[API테스트] 네트워크 오류: {e.reason}")
+        return {"ok": False, "error": f"[네트워크 오류] api.anthropic.com 접속 실패: {e.reason}"}
+    except Exception as e:
+        _lg.error(f"[API테스트] 예외: {type(e).__name__}: {e}")
+        return {"ok": False, "error": f"[예외] {type(e).__name__}: {str(e)}"}
+
+
+@router.post("/frontend-log")
+def receive_frontend_log(body: dict):
+    """프론트엔드 로그를 파일로 기록"""
+    import time as _t
+    cfg    = _cfg()
+    logger = logging.getLogger("databridge.frontend")
+    level  = body.get("level", "info").upper()
+    msg    = body.get("message", "")
+    detail = body.get("detail", "")
+    page   = body.get("page", "")
+    full   = f"[PAGE:{page}] {msg}" + (f" | {detail}" if detail else "")
+    lvl    = getattr(logging, level, logging.INFO)
+    logger.log(lvl, full)
+
+    fe_log = cfg.get("frontend_log_file", "./logs/databridge_frontend.log")
+    fe_abs = os.path.abspath(fe_log)
+    try:
+        os.makedirs(os.path.dirname(fe_abs), exist_ok=True)
+        with open(fe_abs, "a", encoding="utf-8") as f:
+            ts = _t.strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{ts}] {level:<8} {page} — {msg}" + (f" | {detail}" if detail else "") + "\n")
+    except Exception as e:
+        logger.warning("프론트 로그 파일 기록 실패: %s", e)
+    return {"ok": True}
+
+
+@router.post("/log-rotate")
+def rotate_log():
+    """현재 로그 파일을 타임스탬프로 백업하고 새 파일로 재시작"""
+    import shutil, time as _t
+    cfg      = _cfg()
+    ts       = _t.strftime("%Y%m%d_%H%M%S")
+    backups  = []
+
+    # 백엔드 로그 rotate
+    be_log   = cfg.get("backend_log_file", "./logs/databridge_backend.log")
+    be_abs   = os.path.abspath(be_log)
+    be_bak   = be_abs.replace(".log", f"_{ts}.log")
+    try:
+        # 핸들러 먼저 닫기
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            try: h.flush(); h.close()
+            except: pass
+            root.removeHandler(h)
+        if os.path.exists(be_abs):
+            shutil.copy2(be_abs, be_bak)
+            backups.append(be_bak)
+        # 새 파일로 시작
+        os.makedirs(os.path.dirname(be_abs), exist_ok=True)
+        with open(be_abs, "w", encoding="utf-8") as f:
+            f.write(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] INFO     root — 로그 재시작 완료. 백업: {be_bak}\n")
+    except Exception as e:
+        pass
+
+    # 프론트엔드 로그 rotate
+    fe_log   = cfg.get("frontend_log_file", "./logs/databridge_frontend.log")
+    fe_abs   = os.path.abspath(fe_log)
+    fe_bak   = fe_abs.replace(".log", f"_{ts}.log")
+    try:
+        if os.path.exists(fe_abs):
+            shutil.copy2(fe_abs, fe_bak)
+            backups.append(fe_bak)
+            os.makedirs(os.path.dirname(fe_abs), exist_ok=True)
+            with open(fe_abs, "w", encoding="utf-8") as f:
+                f.write(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] INFO     frontend — 로그 재시작 완료. 백업: {fe_bak}\n")
+    except Exception as e:
+        pass
+
+    # 로거 재초기화
+    try:
+        _setup_logging(cfg)
+        logging.info("로그 재시작 완료 (ts=%s)", ts)
+        return {"ok": True, "backup": be_bak, "backups": backups, "new_file": be_abs, "ts": ts}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/log-test")
+def test_log(body: dict):
+    """백엔드 로그 테스트 기록"""
+    import time as _t
+    cfg    = _cfg()
+    source = body.get("source", "backend")
+    level  = body.get("level", "INFO").upper()
+    msg    = body.get("message", "로그 테스트")
+    page   = body.get("page", "Settings")
+
+    lvl = getattr(logging, level, logging.INFO)
+
+    if source == "backend":
+        logger = logging.getLogger("databridge.backend")
+        logger.log(lvl, "[PAGE:%s] %s", page, msg)
+        return {"ok": True, "source": "backend", "level": level}
+    else:
+        # 프론트엔드 로그 파일에 직접 기록
+        fe_log  = cfg.get("frontend_log_file", "./logs/databridge_frontend.log")
+        fe_abs  = os.path.abspath(fe_log)
+        try:
+            os.makedirs(os.path.dirname(fe_abs), exist_ok=True)
+            with open(fe_abs, "a", encoding="utf-8") as f:
+                ts = _t.strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{ts}] {level:<8} {page} — {msg}\n")
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "source": "frontend", "level": level}
+
+
+# ── Claude API 사용량 ─────────────────────────────────────
+_usage_store = Store("claude_usage")
+
+@router.get("/claude-usage")
+def get_claude_usage():
+    data = _usage_store.get("total") or {
+        "calls": 0, "input_tokens": 0, "output_tokens": 0, "objects": []
+    }
+    # 비용 추정 (claude-sonnet-4: input $3/1M, output $15/1M)
+    cost_usd = (data["input_tokens"] * 3 + data["output_tokens"] * 15) / 1_000_000
+    return {**data, "cost_usd": round(cost_usd, 4)}
+
+@router.delete("/claude-usage")
+def reset_claude_usage():
+    _usage_store.set("total", {"calls":0,"input_tokens":0,"output_tokens":0,"objects":[]})
+    return {"ok": True}
+
+@router.delete("/claude-usage/objects")
+def delete_claude_usage_objects(body: dict):
+    """선택한 오브젝트 이력 삭제 — keys: [ts+name, ...]"""
+    keys = set(body.get("keys", []))
+    data = _usage_store.get("total") or {"calls":0,"input_tokens":0,"output_tokens":0,"objects":[]}
+    data["objects"] = [o for o in data.get("objects",[]) if (o.get("ts","") + o.get("name","")) not in keys]
+    _usage_store.set("total", data)
+    return {"ok": True, "remaining": len(data["objects"])}
+
+
+# ═══════════════════════════════════════════════════════════
+# v9 패치 #18: 로그 백업 기능
+# - 즉시 백업 (POST /settings/log-backup): 현재 로그를 gzip 으로 백업
+# - 백업 목록 (GET  /settings/log-backups): 백업 파일 리스트
+# - 백업 다운로드 (GET  /settings/log-backups/{name}): 파일 다운로드
+# - 백업 삭제 (DELETE /settings/log-backups/{name}): 파일 삭제
+# - 자동 스케줄 (cfg.log_backup_schedule): "off"|"hourly"|"6h"|"daily"
+# ═══════════════════════════════════════════════════════════
+from fastapi.responses import FileResponse
+import gzip as _gzip
+import threading as _thr
+
+def _backup_dir() -> str:
+    cfg = _cfg()
+    d = cfg.get("log_backup_dir", "./logs/backups")
+    d = os.path.abspath(d)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _do_backup_once(compress: bool = True) -> dict:
+    """한 번 백업 수행 — backend/frontend 로그 각각 타임스탬프로 복사"""
+    import shutil, time as _t
+    cfg = _cfg()
+    ts  = _t.strftime("%Y%m%d_%H%M%S")
+    out_dir = _backup_dir()
+    results = []
+    for src_key, label in [("backend_log_file","backend"), ("frontend_log_file","frontend")]:
+        src = cfg.get(src_key, f"./logs/databridge_{label}.log")
+        src_abs = os.path.abspath(src)
+        if not os.path.exists(src_abs):
+            continue
+        size = os.path.getsize(src_abs)
+        if size == 0:
+            continue
+        base = os.path.basename(src_abs).replace(".log", f"_{ts}.log")
+        if compress:
+            out_path = os.path.join(out_dir, base + ".gz")
+            try:
+                with open(src_abs, "rb") as fi, _gzip.open(out_path, "wb", compresslevel=6) as fo:
+                    shutil.copyfileobj(fi, fo, length=1024*1024)
+                results.append({"source": label, "path": out_path,
+                                "size": os.path.getsize(out_path),
+                                "original_size": size, "compressed": True})
+            except Exception as e:
+                results.append({"source": label, "error": str(e)})
+        else:
+            out_path = os.path.join(out_dir, base)
+            try:
+                shutil.copy2(src_abs, out_path)
+                results.append({"source": label, "path": out_path,
+                                "size": os.path.getsize(out_path),
+                                "original_size": size, "compressed": False})
+            except Exception as e:
+                results.append({"source": label, "error": str(e)})
+    return {"ok": True, "ts": ts, "backups": results, "dir": out_dir}
+
+
+def _purge_old_backups():
+    """보관 기간 초과 백업 삭제 (cfg.log_backup_retention_days, 기본 30일)"""
+    import time as _t
+    cfg = _cfg()
+    days = int(cfg.get("log_backup_retention_days", 30))
+    if days <= 0:
+        return 0
+    cutoff = _t.time() - days * 86400
+    d = _backup_dir()
+    removed = 0
+    for f in os.listdir(d):
+        p = os.path.join(d, f)
+        try:
+            if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                os.remove(p)
+                removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+@router.post("/log-backup")
+def log_backup_now(body: dict = None, _=Depends(require_operator)):
+    """즉시 백업"""
+    compress = True
+    if body and "compress" in body:
+        compress = bool(body["compress"])
+    result = _do_backup_once(compress=compress)
+    removed = _purge_old_backups()
+    result["purged"] = removed
+    return result
+
+
+@router.get("/log-backups")
+def list_log_backups(_=Depends(require_viewer)):
+    """백업 파일 목록"""
+    import time as _t
+    d = _backup_dir()
+    files = []
+    try:
+        for name in sorted(os.listdir(d), reverse=True):
+            p = os.path.join(d, name)
+            if not os.path.isfile(p):
+                continue
+            st = os.stat(p)
+            files.append({
+                "name": name,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "mtime_str": _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(st.st_mtime)),
+                "compressed": name.endswith(".gz"),
+            })
+    except Exception as e:
+        return {"files": [], "error": str(e), "dir": d}
+    return {"files": files, "dir": d, "count": len(files)}
+
+
+@router.get("/log-backups/{name}")
+def download_log_backup(name: str, _=Depends(require_viewer)):
+    """백업 파일 다운로드"""
+    # 경로 탈출 방지
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "잘못된 파일명")
+    d = _backup_dir()
+    p = os.path.join(d, name)
+    if not os.path.isfile(p):
+        raise HTTPException(404, "파일을 찾을 수 없습니다")
+    media = "application/gzip" if name.endswith(".gz") else "text/plain"
+    return FileResponse(p, media_type=media, filename=name)
+
+
+@router.delete("/log-backups/{name}")
+def delete_log_backup(name: str, _=Depends(require_operator)):
+    """백업 파일 삭제"""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "잘못된 파일명")
+    d = _backup_dir()
+    p = os.path.join(d, name)
+    if not os.path.isfile(p):
+        raise HTTPException(404, "파일을 찾을 수 없습니다")
+    try:
+        os.remove(p)
+        return {"ok": True, "removed": name}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ── 자동 백업 스케줄러 ───────────────────────────────────────
+_backup_timer_stop = _thr.Event()
+_backup_timer_thread: "_thr.Thread | None" = None
+_backup_last_run: float = 0.0
+
+
+def _scheduler_interval_sec() -> int:
+    cfg = _cfg()
+    s = str(cfg.get("log_backup_schedule", "off")).lower()
+    # v95_p9_REAL: 옵션 확장 (5min, 30min, 2h, 12h 추가)
+    return {
+        "5min":   300,
+        "30min":  1800,
+        "hourly": 3600,
+        "2h":     7200,
+        "6h":     21600,
+        "12h":    43200,
+        "daily":  86400,
+    }.get(s, 0)
+
+
+def _current_log_size_mb() -> float:
+    """v95_p9_REAL: 현재 백엔드 로그 파일 크기 (MB) - OR 조건 판단용"""
+    cfg = _cfg()
+    log_file = cfg.get("backend_log_file", "./logs/databridge_backend.log")
+    abs_path = os.path.abspath(log_file)
+    try:
+        if os.path.exists(abs_path):
+            return os.path.getsize(abs_path) / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _backup_scheduler_loop():
+    """
+    백그라운드 스레드 — 설정된 주기마다 _do_backup_once() 호출
+    
+    v95_p9_REAL: 본부장님 요청 본질 처방
+    - 시간 도달 OR 사이즈 도달 (먼저 도달하는 쪽)
+    - 시간 도달했어도 min_size_mb 미만이면 SKIP (작은 파일 양산 방지)
+    - 사이즈 트리거가 설정되어 있고 도달하면 시간 안 기다리고 즉시 백업
+    """
+    global _backup_last_run
+    import time as _t
+    logger_bk = logging.getLogger("databridge.log_backup")
+    while not _backup_timer_stop.wait(60):  # 1분마다 설정 확인
+        try:
+            cfg = _cfg()
+            interval     = _scheduler_interval_sec()
+            min_size_mb  = float(cfg.get("log_backup_min_size_mb", 1))
+            trigger_mb   = float(cfg.get("log_backup_size_trigger_mb", 5))
+            current_mb   = _current_log_size_mb()
+            now          = _t.time()
+            
+            should_backup = False
+            reason = ""
+            
+            # 조건 A: 사이즈 트리거 — 시간 무관 즉시
+            if trigger_mb > 0 and current_mb >= trigger_mb:
+                should_backup = True
+                reason = f"사이즈 트리거 ({current_mb:.1f}MB ≥ {trigger_mb}MB)"
+            # 조건 B: 시간 트리거 — 단, 최소 사이즈 조건 만족해야
+            elif interval > 0 and (now - _backup_last_run) >= interval:
+                if current_mb >= min_size_mb:
+                    should_backup = True
+                    reason = f"시간 트리거 (주기={interval}s, 크기={current_mb:.1f}MB ≥ 최소 {min_size_mb}MB)"
+                else:
+                    # 시간 도달했지만 크기 작음 → SKIP, 다음 사이클에 재평가
+                    logger_bk.debug(
+                        "시간 트리거 도달이지만 크기 부족 (%.1fMB < %.1fMB) — SKIP",
+                        current_mb, min_size_mb
+                    )
+                    # last_run 은 갱신 X — 사이즈 채워지면 그때 백업
+            
+            if should_backup:
+                logger_bk.info("자동 로그 백업 실행 — %s", reason)
+                _do_backup_once(compress=True)
+                _purge_old_backups()
+                _backup_last_run = now
+        except Exception as e:
+            logger_bk.warning("자동 로그 백업 실패: %s", e)
+
+
+def start_backup_scheduler():
+    global _backup_timer_thread
+    if _backup_timer_thread and _backup_timer_thread.is_alive():
+        return
+    _backup_timer_stop.clear()
+    _backup_timer_thread = _thr.Thread(
+        target=_backup_scheduler_loop,
+        daemon=True,
+        name="log-backup-scheduler"
+    )
+    _backup_timer_thread.start()
+
+
+# 모듈 로드 시 스케줄러 시작 (설정이 off면 아무것도 안 함)
+start_backup_scheduler()

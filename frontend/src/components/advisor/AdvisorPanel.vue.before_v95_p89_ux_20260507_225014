@@ -1,0 +1,2866 @@
+<!--
+  AdvisorPanel.vue — Stage 4: AI DBA Consultant
+  ================================================
+  v88 P2 (2026-04-23)
+
+  P1 (2026-04-23): 모드 선택 UI + 결과 placeholder
+  P2 (2026-04-23): 실제 analyze 호출 + 결과 렌더링 (ServerAdvisor)
+                   - 요약 바, 카테고리 탭, 권고 카드 리스트
+                   - 일괄/권장/원본 액션 버튼
+                   - 카드별 개별 결정 (applied/skipped/edited)
+                   - 부모 폼에 결정 목록 emit
+-->
+<template>
+  <div class="advisor-panel">
+
+    <!-- ── 헤더 ── -->
+    <div class="adv-header">
+      <div class="adv-header-icon">🧠</div>
+      <div class="adv-header-body">
+        <div class="adv-header-title">AI DBA Consultant</div>
+        <div class="adv-header-subtitle">
+          선택된 이관 대상을 종합 분석하여 최적화 권고를 제시합니다 —
+          <b>이관 = 최적화의 유일한 기회</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 선택 대상 요약 ── -->
+    <div class="adv-selection-summary">
+      <div class="adv-ss-item">
+        <span class="adv-ss-ico">▤</span>
+        <span class="adv-ss-label">테이블</span>
+        <span class="adv-ss-value">{{ selection.tables?.length || 0 }}개</span>
+      </div>
+      <div class="adv-ss-divider"></div>
+      <div class="adv-ss-item">
+        <span class="adv-ss-ico">⚙</span>
+        <span class="adv-ss-label">프로시저</span>
+        <span class="adv-ss-value">{{ selection.procedures?.length || 0 }}개</span>
+      </div>
+      <div class="adv-ss-divider"></div>
+      <div class="adv-ss-item">
+        <span class="adv-ss-ico">ƒ</span>
+        <span class="adv-ss-label">함수</span>
+        <span class="adv-ss-value">{{ selection.functions?.length || 0 }}개</span>
+      </div>
+      <div class="adv-ss-divider"></div>
+      <div class="adv-ss-item">
+        <span class="adv-ss-ico">👁</span>
+        <span class="adv-ss-label">뷰</span>
+        <span class="adv-ss-value">{{ selection.views?.length || 0 }}개</span>
+      </div>
+      <div class="adv-ss-divider"></div>
+      <div class="adv-ss-item">
+        <span class="adv-ss-ico">⚡</span>
+        <span class="adv-ss-label">트리거</span>
+        <span class="adv-ss-value">{{ selection.triggers?.length || 0 }}개</span>
+      </div>
+    </div>
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- 상태 1: 분석 전 — 모드 선택 (2026-04-23 ux3 UX 재설계)      -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <div v-if="!analyzed" class="adv-mode-section">
+
+      <h4 class="adv-section-title">
+        분석 모드 선택
+        <span class="adv-section-hint">3가지 중 하나를 선택 → 상세 확인 → 분석 시작</span>
+      </h4>
+
+      <!-- 한 줄 3개 모드 카드 (컴팩트) -->
+      <div class="adv-modes-row">
+        <label v-for="mode in allModes" :key="mode.v"
+               class="adv-mode-chip"
+               :class="['color-' + mode.color, { active: selectedMode === mode.v }]">
+          <input type="radio" :value="mode.v" v-model="selectedMode" style="display:none"/>
+          <!-- 선택 인디케이터 (왼쪽 색 바) -->
+          <span class="adv-chip-indicator"></span>
+          <!-- 상단: 아이콘 + 이름 + 배지 -->
+          <div class="adv-chip-head">
+            <span class="adv-chip-icon">{{ mode.icon }}</span>
+            <span class="adv-chip-name">{{ mode.name }}</span>
+            <span v-if="mode.badge" class="adv-chip-badge" :class="'badge-' + mode.color">{{ mode.badge }}</span>
+          </div>
+          <!-- 하단: 한 줄 설명 -->
+          <div class="adv-chip-short">{{ mode.short }}</div>
+          <!-- 핵심 지표 3개: 시간 · 비용 · 토큰 -->
+          <div class="adv-chip-metrics">
+            <template v-if="costEstimates[mode.v]">
+              <span class="adv-cm-item">
+                <span class="adv-cm-ico">⏱</span>
+                <span class="adv-cm-val">{{ fmtTime(costEstimates[mode.v].time_sec) }}</span>
+              </span>
+              <span class="adv-cm-divider"></span>
+              <span class="adv-cm-item">
+                <span class="adv-cm-ico">💰</span>
+                <span class="adv-cm-val" :class="{ 'is-free': (costEstimates[mode.v].cost_usd || 0) === 0,
+                                                    'is-expensive': (costEstimates[mode.v].cost_usd || 0) >= 5 }">
+                  <template v-if="(costEstimates[mode.v].cost_usd || 0) === 0">무료</template>
+                  <template v-else>${{ costEstimates[mode.v].cost_usd.toFixed(2) }}</template>
+                </span>
+              </span>
+            </template>
+            <template v-else>
+              <span class="adv-cm-loading">
+                <span class="spinner" style="width:10px;height:10px"></span> 계산 중…
+              </span>
+            </template>
+          </div>
+        </label>
+      </div>
+
+      <!-- 선택된 모드 상세 펼침 패널 -->
+      <div class="adv-mode-detail" :class="'accent-' + selectedModeDetail.color">
+        <!-- 상세 헤더 -->
+        <div class="adv-md-head">
+          <span class="adv-md-icon-big">{{ selectedModeDetail.icon }}</span>
+          <div class="adv-md-head-text">
+            <div class="adv-md-head-title">
+              {{ selectedModeDetail.name }}
+              <span class="adv-md-eng">{{ selectedModeDetail.eng }}</span>
+            </div>
+            <div class="adv-md-head-desc">{{ selectedModeDetail.desc }}</div>
+          </div>
+        </div>
+
+        <!-- 2-컬럼: 상세 내용 | 비용 내역 -->
+        <div class="adv-md-grid">
+          <!-- 왼쪽: 권장 사례 + 주의사항 -->
+          <div class="adv-md-text">
+            <!-- 이런 경우 권장 -->
+            <div class="adv-md-block">
+              <div class="adv-md-block-head">
+                <span class="adv-md-block-ico adv-md-block-ico-ok">✓</span>
+                <span class="adv-md-block-title">이런 경우 권장</span>
+              </div>
+              <ul class="adv-md-list">
+                <li v-for="item in selectedModeDetail.recommendedFor" :key="item">{{ item }}</li>
+              </ul>
+            </div>
+            <!-- 주의사항 -->
+            <div class="adv-md-block adv-md-block-warn">
+              <div class="adv-md-block-head">
+                <span class="adv-md-block-ico adv-md-block-ico-warn">⚠</span>
+                <span class="adv-md-block-title">주의</span>
+              </div>
+              <ul class="adv-md-list">
+                <li v-for="item in selectedModeDetail.cautions" :key="item">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- 오른쪽: 비용/시간 내역 표 -->
+          <div class="adv-md-cost">
+            <!-- v95_p21 (2026-05-03 본부장님 본질 처방): 캐시 사전 표시 -->
+            <!--   본부장님 호소: "비용절감 관련은 언제 화면에 나오는거야?" -->
+            <!--   처방: 분석 시작 전에 캐시 적중 여부 명확히 표시 -->
+            <div v-if="preCheckCache === true" class="adv-md-cache-hit">
+              <div class="adv-md-cache-hit-icon">⚡</div>
+              <div class="adv-md-cache-hit-body">
+                <div class="adv-md-cache-hit-title">캐시 적중 — 무료 분석</div>
+                <div class="adv-md-cache-hit-desc">
+                  {{ preCheckCacheAtFmt }} 분석 결과가 있습니다 ·
+                  <strong>AI 호출 0회, 약 1초</strong>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="preCheckCache === false" class="adv-md-cache-miss">
+              <div class="adv-md-cache-miss-icon">🆕</div>
+              <div class="adv-md-cache-miss-body">
+                <div class="adv-md-cache-miss-title">첫 분석 — 캐시 자동 저장</div>
+                <div class="adv-md-cache-miss-desc">
+                  분석 후 자동 캐시 → <strong>다음번부터 무료</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="adv-md-cost-label">예상 분석 비용</div>
+            <template v-if="selectedModeCost">
+              <div class="adv-md-cost-main">
+                <template v-if="(selectedModeCost.cost_usd || 0) === 0">
+                  <span class="adv-md-cost-free">무료</span>
+                  <span class="adv-md-cost-free-sub">규칙 기반 · AI 호출 없음</span>
+                </template>
+                <template v-else-if="preCheckCache === true">
+                  <!-- v95_p21: 캐시 적중 시 비용 0 으로 표시 (취소선으로 원래 비용도) -->
+                  <span class="adv-md-cost-free">$0</span>
+                  <span class="adv-md-cost-free-sub">
+                    캐시 사용 ·
+                    <span class="adv-md-cost-strikethrough">${{ selectedModeCost.cost_usd.toFixed(2) }}</span>
+                    절감
+                  </span>
+                </template>
+                <template v-else>
+                  <span class="adv-md-cost-usd">${{ selectedModeCost.cost_usd.toFixed(2) }}</span>
+                  <span class="adv-md-cost-krw">₩{{ selectedModeCost.cost_krw.toLocaleString() }}</span>
+                </template>
+              </div>
+              <div class="adv-md-cost-table">
+                <div class="adv-md-cost-row">
+                  <span class="adv-md-cost-key">토큰</span>
+                  <span class="adv-md-cost-val">{{ fmtTokens(selectedModeCost.tokens_total) }}</span>
+                </div>
+                <div class="adv-md-cost-row">
+                  <span class="adv-md-cost-key">시간</span>
+                  <span class="adv-md-cost-val">
+                    <template v-if="preCheckCache === true">~1초 (캐시)</template>
+                    <template v-else>~{{ fmtTime(selectedModeCost.time_sec) }}</template>
+                  </span>
+                </div>
+                <div class="adv-md-cost-row">
+                  <span class="adv-md-cost-key">입력 토큰</span>
+                  <span class="adv-md-cost-val">{{ fmtTokens(selectedModeCost.tokens_in) }}</span>
+                </div>
+                <div class="adv-md-cost-row">
+                  <span class="adv-md-cost-key">출력 토큰</span>
+                  <span class="adv-md-cost-val">{{ fmtTokens(selectedModeCost.tokens_out) }}</span>
+                </div>
+              </div>
+              <div class="adv-md-cost-note">Claude Sonnet 4 공식 요금 기준 추정. 실제 ±20%.</div>
+            </template>
+            <div v-else class="adv-md-cost-loading">
+              <span class="spinner" style="width:14px;height:14px"></span>
+              <span>비용 산정 중…</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 하단 액션: 분석 시작 / 건너뛰기 -->
+      <div class="adv-mode-actions">
+        <button class="adv-btn-skip" @click="handleSkip">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" style="width:11px;height:11px">
+            <polyline points="2,7 12,7"/><polyline points="8,3 12,7 8,11"/>
+          </svg>
+          권고 없이 원본 그대로 이관
+        </button>
+        <div style="flex:1"></div>
+        <button class="adv-btn-analyze"
+                :class="{ 'deep-warn': selectedMode === 'deep', 'cache-hit': preCheckCache === true }"
+                @click="handleStartAnalysis"
+                :disabled="analyzing">
+          <span v-if="analyzing" class="spinner" style="width:12px;height:12px;border-top-color:#fff"></span>
+          <svg v-else viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px">
+            <circle cx="7" cy="7" r="5.5"/>
+            <polygon points="5.5,4.5 10,7 5.5,9.5" fill="currentColor" stroke="none"/>
+          </svg>
+          <template v-if="preCheckCache === true">⚡ 캐시 사용 (무료, 1초)</template>
+          <template v-else-if="selectedMode === 'deep'">전수 분석 시작 (고비용)</template>
+          <template v-else>{{ selectedModeDetail.name + ' 분석 시작' }}</template>
+        </button>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- 상태 2: 분석 완료 — 3분할 비교 뷰 (2026-04-23 UX 개편)      -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <div v-else class="adv-results-section">
+
+      <!-- 상단 요약 바 + 재분석 버튼 -->
+      <div class="adv-summary-bar">
+        <div class="adv-sb-stats">
+          <div class="adv-sb-stat sev-high">
+            <span class="adv-sb-dot"></span>
+            <span class="adv-sb-label">HIGH</span>
+            <span class="adv-sb-value">{{ summary.high }}</span>
+          </div>
+          <div class="adv-sb-stat sev-med">
+            <span class="adv-sb-dot"></span>
+            <span class="adv-sb-label">MED</span>
+            <span class="adv-sb-value">{{ summary.med }}</span>
+          </div>
+          <div class="adv-sb-stat sev-low">
+            <span class="adv-sb-dot"></span>
+            <span class="adv-sb-label">LOW</span>
+            <span class="adv-sb-value">{{ summary.low }}</span>
+          </div>
+          <div class="adv-sb-total">
+            총 <b>{{ summary.total }}</b>건
+          </div>
+        </div>
+        <div class="adv-sb-impact" v-if="summary.estimated_improvement_pct > 0">
+          <span class="adv-sb-impact-label">예상 개선</span>
+          <span class="adv-sb-impact-value">+{{ summary.estimated_improvement_pct }}% (전체 적용 시)</span>
+        </div>
+        <!-- v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 입증 표시 -->
+        <div v-if="fromCache" class="adv-sb-cache-badge" :title="`캐시 사용 — ${cacheAtFmt} (AI 호출 0회)`">
+          <span class="adv-sb-cache-icon">⚡</span>
+          <span class="adv-sb-cache-text">
+            <span class="adv-sb-cache-title">캐시 사용 중</span>
+            <span class="adv-sb-cache-time">{{ cacheAtFmt }} 분석</span>
+          </span>
+        </div>
+        <button v-if="fromCache" class="adv-sb-fresh" @click="runFreshAnalysis"
+                title="캐시 무시하고 AI 새로 분석 (비용 발생)">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" style="width:12px;height:12px">
+            <path d="M2,7 A5,5 0 1 1 7,12" fill="none"/>
+            <polyline points="2,4 2,7 5,7"/>
+          </svg>
+          새로 분석
+        </button>
+        <button class="adv-sb-reanalyze" @click="resetAnalysis" title="다른 모드로 재분석">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" style="width:12px;height:12px">
+            <path d="M2,7 A5,5 0 1 1 7,12" fill="none"/>
+            <polyline points="2,4 2,7 5,7"/>
+          </svg>
+          재분석
+        </button>
+      </div>
+
+      <!-- 빈 결과 — 축하 메시지 -->
+      <div v-if="summary.total === 0" class="adv-empty">
+        <div class="adv-empty-icon">✓</div>
+        <div class="adv-empty-title">이미 최적화된 구성입니다</div>
+        <div class="adv-empty-desc">
+          선택하신 이관 대상은 추가 최적화 권고가 없습니다.<br/>
+          현재 설정대로 진행하셔도 좋은 이관 품질이 예상됩니다.
+        </div>
+        <button class="adv-btn-reset" @click="resetAnalysis">← 다른 모드 선택</button>
+      </div>
+
+      <template v-else>
+
+        <!-- 카테고리 탭 (테두리 전용, 인디케이터 바 제거 — 2026-04-23 본부장님 요청) -->
+        <!-- v90.57: 활성 카테고리 재클릭 시 토글 (전체 선택 ↔ 전체 해제) — 본부장님 요청 2026-04-28 -->
+        <div class="adv-category-tabs">
+          <button v-for="cat in categoryTabs" :key="cat.v"
+                  class="adv-cat-tab" :class="{ active: activeCategory === cat.v, 'is-pending': cat.status === 'pending' }"
+                  @click="onCategoryClick(cat)"
+                  :disabled="cat.status === 'pending'"
+                  :title="activeCategory === cat.v
+                    ? (categorySelectionState[cat.v] === 'all' ? '재클릭하면 전체 해제'
+                       : categorySelectionState[cat.v] === 'partial' ? '재클릭하면 전체 선택'
+                       : '재클릭하면 전체 선택')
+                    : '클릭하면 이 카테고리로 이동'">
+            <span class="adv-cat-icon">{{ cat.icon }}</span>
+            <span class="adv-cat-label">{{ cat.label }}</span>
+            <span v-if="cat.status === 'ok'" class="adv-cat-count">{{ countByCategory[cat.v] || 0 }}</span>
+            <span v-else-if="cat.status === 'pending'" class="adv-cat-pending">준비 중</span>
+            <span v-else-if="cat.status === 'unsupported'" class="adv-cat-pending">미지원</span>
+            <!-- v90.57: 활성 카테고리 선택 상태 시각적 단서 -->
+            <span v-if="activeCategory === cat.v && cat.status === 'ok' && (countByCategory[cat.v] || 0) > 0"
+                  class="adv-cat-sel-state"
+                  :class="'sel-' + categorySelectionState[cat.v]">
+              <template v-if="categorySelectionState[cat.v] === 'all'">✓</template>
+              <template v-else-if="categorySelectionState[cat.v] === 'partial'">◐</template>
+            </span>
+          </button>
+        </div>
+
+        <!-- 일괄 선택 툴바 -->
+        <div class="adv-bulk-toolbar">
+          <div class="adv-bulk-group">
+            <button class="adv-bt-btn" @click="selectAll" title="현재 탭 전체 선택">
+              <span class="adv-bt-icon">☑</span> 전체 선택
+            </button>
+            <button class="adv-bt-btn" @click="deselectAll" title="현재 탭 전체 해제">
+              <span class="adv-bt-icon">☐</span> 전체 해제
+            </button>
+            <div class="adv-bt-divider"></div>
+            <button class="adv-bt-btn adv-bt-high" @click="selectBySev('high')">🔴 HIGH만</button>
+            <button class="adv-bt-btn adv-bt-med" @click="selectBySev(['high','med'])">🟡 HIGH+MED</button>
+          </div>
+          <div class="adv-bulk-group adv-bulk-right">
+            <input type="text" v-model="searchQuery" placeholder="🔍 제목·대상 검색..." class="adv-bt-search"/>
+            <select v-model="sortMode" class="adv-bt-sort">
+              <option value="severity">심각도순</option>
+              <option value="title">제목순</option>
+              <option value="target">대상순</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 선택 카운터 -->
+        <div class="adv-select-counter">
+          <span class="adv-sc-label">선택됨</span>
+          <span class="adv-sc-value">{{ selectedInCategoryCount }}</span>
+          <span class="adv-sc-total">/ {{ filteredRecs.length }}건</span>
+          <span class="adv-sc-separator">·</span>
+          <span class="adv-sc-applied">✓ 적용 {{ decisionCounts.applied }}</span>
+          <span class="adv-sc-skipped">× 건너뜀 {{ decisionCounts.skipped }}</span>
+          <span v-if="decisionCounts.edited > 0" class="adv-sc-edited">✎ 수정 {{ decisionCounts.edited }}</span>
+          <span v-if="decisionCounts.pending > 0" class="adv-sc-pending">? 미결정 {{ decisionCounts.pending }}</span>
+
+          <!-- v94_p1: 백엔드 저장 상태 — 본부장님 호소 처방 -->
+          <span class="adv-sc-separator">·</span>
+          <span v-if="applyState.saving" class="adv-save-state saving">
+            <span class="adv-save-dot"></span> 저장 중...
+          </span>
+          <span v-else-if="applyState.error" class="adv-save-state error" :title="applyState.error">
+            ✗ 저장 실패 (재시도 필요)
+          </span>
+          <span v-else-if="applyState.lastSaved" class="adv-save-state saved"
+                :title="`마지막 저장: ${applyState.lastSaved.toLocaleTimeString('ko-KR')}`">
+            ✓ 자동 저장됨
+            <span class="adv-save-time">{{ savedTimeText }}</span>
+          </span>
+          <span v-else class="adv-save-state idle">아직 결정된 권고 없음</span>
+        </div>
+
+        <!-- ══ 3분할 메인 영역 ══ -->
+        <div class="adv-three-col">
+
+          <!-- ─── 열 1: 권고 리스트 ─── -->
+          <div class="adv-col adv-col-list">
+            <!-- 2026-04-23 UX: 헤더에 전체선택 체크박스 + 선택 카운트 -->
+            <div class="adv-col-header adv-col-list-header">
+              <label class="adv-list-all-check" @click.stop
+                     :title="allState === 'all' ? '전체 해제' : '전체 선택'">
+                <input type="checkbox"
+                       :checked="allState === 'all'"
+                       :indeterminate.prop="allState === 'partial'"
+                       @change="toggleAll($event.target.checked)"/>
+                <span class="adv-list-all-box" :class="'state-' + allState"></span>
+              </label>
+              <span class="adv-col-title">권고 리스트</span>
+              <span class="adv-col-sub adv-list-count">
+                <span v-if="selectedInCategoryCount > 0" class="adv-list-count-sel">{{ selectedInCategoryCount }}</span>
+                <span class="adv-list-count-total">/ {{ filteredRecs.length }}건</span>
+              </span>
+            </div>
+
+            <div v-if="activeCategoryStatus === 'pending'" class="adv-col-empty">
+              <div class="adv-col-empty-ico">🚧</div>
+              <div>이 카테고리는 <b>{{ activeCategoryPhase }}</b>에서 구현 예정입니다.</div>
+            </div>
+            <div v-else-if="activeCategoryStatus === 'unsupported'" class="adv-col-empty">
+              <div class="adv-col-empty-ico">⊘</div>
+              <div>현재 DB 조합(<b>{{ srcDb }} → {{ tgtDb }}</b>)은 지원하지 않습니다.</div>
+            </div>
+            <div v-else-if="filteredRecs.length === 0" class="adv-col-empty">
+              <div class="adv-col-empty-ico">✓</div>
+              <div>권고 없음</div>
+            </div>
+
+            <ul v-else class="adv-rec-list">
+              <li v-for="rec in filteredRecs" :key="rec.id"
+                  class="adv-rec-item"
+                  :class="[
+                    'sev-' + rec.severity,
+                    { 'is-selected': selectedRecId === rec.id,
+                      'is-applied':  (decisionMap[rec.id] === 'applied' || decisionMap[rec.id] === 'edited'),
+                      'is-skipped':  decisionMap[rec.id] === 'skipped' }
+                  ]"
+                  @click="selectedRecId = rec.id">
+                <!-- 체크박스 = 적용 여부 토글 -->
+                <label class="adv-rec-check" @click.stop>
+                  <input type="checkbox"
+                         :checked="decisionMap[rec.id] === 'applied' || decisionMap[rec.id] === 'edited'"
+                         @change="toggleDecision(rec.id, $event.target.checked)"/>
+                  <span class="adv-rec-check-box"></span>
+                </label>
+                <!-- 심각도 배지 -->
+                <span class="adv-rec-sev" :class="'sev-' + rec.severity">
+                  {{ ({high:'H', med:'M', low:'L'})[rec.severity] }}
+                </span>
+                <!-- 제목·대상 -->
+                <div class="adv-rec-main">
+                  <div class="adv-rec-title">{{ rec.title }}</div>
+                  <div class="adv-rec-target">{{ rec.target }}</div>
+                </div>
+                <!-- 상태 아이콘 -->
+                <span v-if="decisionMap[rec.id] === 'edited'" class="adv-rec-status edited" title="수정됨">✎</span>
+                <span v-else-if="decisionMap[rec.id] === 'skipped'" class="adv-rec-status skipped" title="건너뜀">×</span>
+              </li>
+            </ul>
+          </div>
+
+          <!-- ─── 열 2: Before (현재) ─── -->
+          <div class="adv-col adv-col-before">
+            <div class="adv-col-header">
+              <span class="adv-col-title">Before — 현재 상태</span>
+              <span v-if="selectedRec" class="adv-col-sub adv-col-sub-sev" :class="'sev-' + selectedRec.severity">
+                {{ ({high:'HIGH', med:'MED', low:'LOW'})[selectedRec.severity] }}
+              </span>
+            </div>
+            <div v-if="!selectedRec" class="adv-col-empty">
+              <div class="adv-col-empty-ico">←</div>
+              <div>왼쪽 리스트에서 권고를 선택하세요</div>
+            </div>
+            <div v-else class="adv-detail-body">
+              <div class="adv-detail-section">
+                <div class="adv-detail-label">대상</div>
+                <div class="adv-detail-target">{{ selectedRec.target }}</div>
+              </div>
+              <div class="adv-detail-section">
+                <div class="adv-detail-label">현재 정의 / 설정</div>
+                <pre class="adv-detail-code adv-detail-before">{{ selectedRec.before || '(설정 없음)' }}</pre>
+              </div>
+              <div class="adv-detail-section">
+                <div class="adv-detail-label">근거</div>
+                <div class="adv-detail-reason">{{ selectedRec.reason }}</div>
+              </div>
+              <div class="adv-detail-section">
+                <div class="adv-detail-label">메타</div>
+                <div class="adv-detail-meta">
+                  <span><b>source:</b> {{ ({rule:'규칙 기반', ai:'AI 분석', hybrid:'규칙+AI'})[selectedRec.source] || selectedRec.source }}</span>
+                  <span><b>confidence:</b> {{ (selectedRec.confidence * 100).toFixed(0) }}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ─── 열 3: After (권고) ─── -->
+          <div class="adv-col adv-col-after">
+            <div class="adv-col-header">
+              <span class="adv-col-title">After — 권고</span>
+              <div v-if="selectedRec" class="adv-col-actions">
+                <button v-if="!editMode"
+                        class="adv-ca-btn" @click="startEdit"
+                        title="이 권고 SQL 직접 편집">
+                  ✏ 편집
+                </button>
+                <template v-else>
+                  <button class="adv-ca-btn adv-ca-save" @click="saveEdit">💾 저장</button>
+                  <button class="adv-ca-btn" @click="cancelEdit">취소</button>
+                </template>
+              </div>
+            </div>
+            <div v-if="!selectedRec" class="adv-col-empty">
+              <div class="adv-col-empty-ico">→</div>
+              <div>권고 선택 시 여기 표시됩니다</div>
+            </div>
+            <div v-else class="adv-detail-body">
+              <!-- 예상 개선 배지 -->
+              <div v-if="selectedRec.estimated_impact" class="adv-detail-impact">
+                <span class="adv-di-ico">📊</span>
+                <span class="adv-di-text">{{ selectedRec.estimated_impact }}</span>
+              </div>
+
+              <!-- 권고 코드 -->
+              <div class="adv-detail-section">
+                <div class="adv-detail-label">
+                  권고 {{ editMode ? '(편집 중)' : '' }}
+                </div>
+                <pre v-if="!editMode" class="adv-detail-code adv-detail-after">{{ currentAfterText }}</pre>
+                <textarea v-else
+                          v-model="editDraft"
+                          class="adv-detail-edit"
+                          spellcheck="false"></textarea>
+              </div>
+
+              <!-- 적용 방법 안내 -->
+              <div class="adv-detail-howto" :class="{ 'is-auto': selectedRec.auto_applicable }">
+                <div class="adv-dh-label">
+                  <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"
+                       style="width:11px;height:11px">
+                    <circle cx="7" cy="7" r="5.5"/>
+                    <line x1="7" y1="4" x2="7" y2="7.5"/>
+                    <circle cx="7" cy="9.5" r=".6" fill="currentColor"/>
+                  </svg>
+                  <span>체크박스가 하는 일</span>
+                </div>
+                <div class="adv-dh-text">
+                  <template v-if="selectedRec.auto_applicable">
+                    <b>자동 실행</b> — 이관 완료 후 DataBridge가 실행합니다.
+                    <span v-if="howtoNeedsDba(selectedRec)" class="adv-dh-caveat">
+                      ⚠ 단, 서버 설정 변경은 DBA가 직접 반영 필요 (재시작 수반).
+                    </span>
+                  </template>
+                  <template v-else>
+                    <b>DBA 수동</b> — 체크는 "이 권고를 채택한다"는 기록입니다.
+                    실제 반영: <span class="adv-dh-hint">{{ howtoManualHint(selectedRec) }}</span>
+                  </template>
+                </div>
+              </div>
+
+              <!-- 건너뜀 토글 -->
+              <div class="adv-detail-skip-row">
+                <label class="adv-skip-toggle">
+                  <input type="checkbox"
+                         :checked="decisionMap[selectedRec.id] === 'skipped'"
+                         @change="toggleSkip(selectedRec.id, $event.target.checked)"/>
+                  <span>이 권고 명시적 건너뜀 (기록에 남김)</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /three-col -->
+
+      </template>
+
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- Deep 모드 확인 다이얼로그                                    -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <div v-if="showDeepConfirm" class="adv-deep-overlay" @click.self="showDeepConfirm = false">
+      <div class="adv-deep-dialog">
+        <div class="adv-dd-header">
+          <span class="adv-dd-icon">⚠</span>
+          <span class="adv-dd-title">전수 분석 확인</span>
+        </div>
+        <div class="adv-dd-body">
+          <div class="adv-dd-cost-box">
+            <div class="adv-dd-cost-row">
+              <span class="adv-dd-cost-label">예상 비용</span>
+              <span class="adv-dd-cost-value highlight">
+                ${{ costEstimates.deep?.cost_usd.toFixed(2) || '?' }}
+                (~₩{{ costEstimates.deep?.cost_krw.toLocaleString() || '?' }})
+              </span>
+            </div>
+            <div class="adv-dd-cost-row">
+              <span class="adv-dd-cost-label">예상 시간</span>
+              <span class="adv-dd-cost-value">~{{ fmtTime(costEstimates.deep?.time_sec || 0) }}</span>
+            </div>
+          </div>
+          <div class="adv-dd-recommend">
+            <div class="adv-dd-recommend-title">이 모드는 다음 경우에 권장됩니다:</div>
+            <ul class="adv-dd-recommend-list">
+              <li>✓ 핵심 거래 시스템 이관</li>
+              <li>✓ 금융/원장 DB 이관</li>
+              <li>✓ 장애 시 외부 영향이 큰 시스템</li>
+              <li>✓ 첫 이관이고 향후 KB 축적이 목적인 경우</li>
+            </ul>
+          </div>
+        </div>
+        <div class="adv-dd-actions">
+          <button class="btn" @click="showDeepConfirm = false">취소</button>
+          <button class="adv-btn-deep-confirm" @click="confirmDeepAnalysis">
+            이해했습니다 · 시작
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import axios from 'axios'
+import RecommendationCard from './RecommendationCard.vue'
+import { useConnectorStore } from '@/store/connectorStore.js'  // hotfix 2026-04-23: 연결 정보 직접 전달
+
+const connector = useConnectorStore()
+
+const props = defineProps({
+  srcDb:     { type: String, required: true },
+  tgtDb:     { type: String, required: true },
+  selection: { type: Object, required: true },
+  // v90.20: 부모에서 저장된 분석 결과 복원용
+  initialAnalysis: { type: Object, default: null },
+})
+
+const emit = defineEmits(['update:decisions', 'update:mode', 'skip', 'update:analysis'])
+
+// ── 상태 ──
+const selectedMode    = ref('smart')
+const costEstimates   = ref({})
+const estimating      = ref(false)
+const analyzing       = ref(false)
+const analyzed        = ref(false)
+const showDeepConfirm = ref(false)
+
+// 분석 결과
+const recommendations = ref([])        // Recommendation[]
+const summary         = ref({ total: 0, high: 0, med: 0, low: 0, estimated_improvement_pct: 0 })
+const advisorStatus   = ref({})        // { server: 'ok', table: 'pending', ... }
+
+// v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 입증 정보
+const fromCache       = ref(false)     // 이번 결과가 캐시에서 왔는지
+const cachedAt        = ref('')        // 캐시 저장 시각 (ISO 문자열)
+
+// v95_p21 (2026-05-03 본부장님 본질 처방): 분석 시작 전 캐시 사전 확인
+//   본부장님 호소: "AI DBA 에서 비용절감 관련은 언제 화면에 나오는거야?"
+//   처방: 모드 선택 / 비용 화면에서 캐시 적중 여부 미리 표시
+//        → 분석 시작 버튼 누르기 전에 비용 발생 여부 명확
+const preCheckCache   = ref(null)      // null=미확인, true=캐시있음, false=캐시없음
+const preCheckCachedAt = ref('')       // 캐시 저장 시각
+
+// 사용자 결정
+const decisionMap  = ref({})           // { rec_id: 'applied'|'skipped'|'edited' }
+const editedSqlMap = ref({})           // { rec_id: 'edited SQL string' }
+
+// 활성 카테고리 탭
+const activeCategory = ref('server')
+
+// ── 2026-04-23 UX 개편: 3분할 뷰 전용 state ──────────────────
+const selectedRecId = ref(null)        // 오른쪽 2개 열에 표시할 권고 ID
+const searchQuery   = ref('')          // 리스트 검색
+const sortMode      = ref('severity')  // 'severity' | 'title' | 'target'
+
+// 편집 모드 (After 패널 내)
+const editMode  = ref(false)
+const editDraft = ref('')
+
+// ── 모드 정의 ──
+// 2026-04-23 UX3: 3모드 통합 — 한 줄 선택 + 상세 펼침 구조
+//   각 모드의 "언제 써야 하나" + "주의사항" 을 데이터화.
+//   템플릿에서 selectedMode 기반으로 selectedModeDetail 을 참조.
+const allModes = [
+  {
+    v: 'smart',
+    name: '경제형',
+    eng:  'Smart Analysis',
+    icon: '🟢',
+    color: 'green',
+    badge: '권장',
+    short: '규칙 기반, AI 최소',
+    desc: '규칙 엔진으로 먼저 필터링하고 HIGH 심각도 후보만 AI가 재검토. 비용을 최소화하면서 핵심 이슈를 놓치지 않는 균형점.',
+    recommendedFor: [
+      '개발·스테이징 환경 이관',
+      '정기적 동기화 Job',
+      '이미 한 번 이상 이관해 본 환경',
+      '규칙 KB 가 충분히 축적된 재이관',
+    ],
+    cautions: [
+      '드물게 나타나는 커스텀 안티패턴은 놓칠 수 있음',
+      '신규 DB 조합의 첫 이관에는 균형형 이상 권장',
+    ],
+  },
+  {
+    v: 'hybrid',
+    name: '균형형',
+    eng:  'Hybrid Analysis',
+    icon: '🟡',
+    color: 'amber',
+    badge: null,
+    short: '규칙 + AI 재검토',
+    desc: '규칙 엔진이 식별한 HIGH·MED 후보 전체를 AI가 함께 분석. 놓친 최적화 패턴도 AI 가 발견할 수 있어 첫 이관에 적합.',
+    recommendedFor: [
+      '신규 시스템의 첫 이관',
+      '중요 거래 시스템 이관',
+      'AI 변환 시 문제가 많았던 DB 이관',
+      'KB 축적을 위한 레퍼런스 이관',
+    ],
+    cautions: [
+      'AI 호출 비용 발생 (권고당 ~$0.02)',
+      '대상 규모 크면 분석에 1~3분 소요',
+    ],
+  },
+  {
+    v: 'deep',
+    name: '전수 분석',
+    eng:  'Deep Analysis',
+    icon: '🔴',
+    color: 'red',
+    badge: '고비용',
+    short: '모든 대상 AI 개별 분석',
+    desc: '선택된 모든 테이블·SP·인덱스를 AI가 개별 분석. 가장 정밀하지만 가장 비용이 큼. 놓친 이슈 가능성 최소화.',
+    recommendedFor: [
+      '핵심 거래·원장 시스템 이관',
+      '금융·의료·법적 규제 대상 시스템',
+      '장애 시 외부 영향이 큰 이관',
+      '첫 이관이고 향후 KB 축적이 목적인 경우',
+    ],
+    cautions: [
+      '비용이 경제형의 10~50배 수준',
+      '대상 수백 개면 $10~30 까지 갈 수 있음',
+      '분석 중 취소 불가 — 확인 후 실행 권장',
+    ],
+  },
+]
+
+// ── 기존 modesTop 호환 유지 (삭제하지 않고 allModes 에서 파생) ──
+const modesTop = allModes.filter(m => m.v !== 'deep')
+
+// ── 선택된 모드의 상세 정보 ──
+const selectedModeDetail = computed(() =>
+  allModes.find(m => m.v === selectedMode.value) || allModes[0]
+)
+
+const selectedModeCost = computed(() => costEstimates.value[selectedMode.value] || null)
+
+// ── 카테고리 탭 정의 ──
+const categoryTabs = computed(() => [
+  {
+    v: 'server', label: '서버 설정',
+    icon: '⚡',
+    status: advisorStatus.value.server || 'unknown',
+    phase: 'P2',
+  },
+  {
+    v: 'table', label: '테이블 구조',
+    icon: '🗄',
+    status: advisorStatus.value.table || 'pending',
+    phase: 'P3',
+  },
+  {
+    v: 'object', label: 'SP / Function',
+    icon: '⚙',
+    status: advisorStatus.value.object || 'pending',
+    phase: 'P4',
+  },
+  {
+    v: 'index', label: '인덱스 전략',
+    icon: '🔍',
+    status: advisorStatus.value.index || 'pending',
+    phase: 'P5',
+  },
+])
+
+const activeCategoryStatus = computed(() => {
+  const cat = categoryTabs.value.find(c => c.v === activeCategory.value)
+  return cat?.status || 'unknown'
+})
+const activeCategoryPhase = computed(() => {
+  const cat = categoryTabs.value.find(c => c.v === activeCategory.value)
+  return cat?.phase || ''
+})
+
+const countByCategory = computed(() => {
+  const m = {}
+  for (const r of recommendations.value) {
+    m[r.category] = (m[r.category] || 0) + 1
+  }
+  return m
+})
+
+const filteredRecs = computed(() => {
+  let list = recommendations.value.filter(r => r.category === activeCategory.value)
+
+  // 검색
+  const q = searchQuery.value.trim().toLowerCase()
+  if (q) {
+    list = list.filter(r =>
+      (r.title || '').toLowerCase().includes(q) ||
+      (r.target || '').toLowerCase().includes(q) ||
+      (r.id || '').toLowerCase().includes(q)
+    )
+  }
+
+  // 정렬
+  const sevOrder = { high: 0, med: 1, low: 2 }
+  list = [...list].sort((a, b) => {
+    if (sortMode.value === 'title') {
+      return (a.title || '').localeCompare(b.title || '')
+    }
+    if (sortMode.value === 'target') {
+      return (a.target || '').localeCompare(b.target || '')
+    }
+    // severity (default)
+    const d = (sevOrder[a.severity] ?? 3) - (sevOrder[b.severity] ?? 3)
+    return d !== 0 ? d : (a.title || '').localeCompare(b.title || '')
+  })
+
+  return list
+})
+
+// 선택된 권고 객체 (오른쪽 2개 열에 표시)
+const selectedRec = computed(() => {
+  if (!selectedRecId.value) return null
+  return recommendations.value.find(r => r.id === selectedRecId.value) || null
+})
+
+// 편집 중일 때 표시할 After 텍스트
+const currentAfterText = computed(() => {
+  if (!selectedRec.value) return ''
+  const edited = editedSqlMap.value[selectedRec.value.id]
+  return edited || selectedRec.value.after || ''
+})
+
+// 현재 탭에서 체크된(=applied/edited) 개수
+const selectedInCategoryCount = computed(() => {
+  let n = 0
+  for (const r of filteredRecs.value) {
+    const d = decisionMap.value[r.id]
+    if (d === 'applied' || d === 'edited') n++
+  }
+  return n
+})
+
+// 2026-04-23 UX: 리스트 헤더 3-state 체크박스용
+//   'all'     — 전부 선택됨 → ✓
+//   'partial' — 일부만 선택됨 → ▣ (indeterminate)
+//   'none'    — 하나도 선택 안 됨 → ☐
+const allState = computed(() => {
+  const total = filteredRecs.value.length
+  if (total === 0) return 'none'
+  const sel = selectedInCategoryCount.value
+  if (sel === 0) return 'none'
+  if (sel === total) return 'all'
+  return 'partial'
+})
+
+function toggleAll(checked) {
+  if (checked) {
+    selectAll()
+  } else {
+    deselectAll()
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// v90.57 (2026-04-28): 카테고리 탭 재클릭 토글
+//   본부장님 요청: 카테고리 버튼 클릭 = 해당 카테고리 항목 전체 선택 ↔ 전체 해제
+//   설계: 다른 카테고리는 이동만, 활성 카테고리 재클릭만 토글 (의도치 않은 변경 방지)
+// ════════════════════════════════════════════════════════════════════════
+
+// 각 카테고리의 선택 상태 ('all' | 'partial' | 'none') 표시용
+//   - 검색/정렬 무관하게 카테고리 전체 항목 기준으로 판단 (filteredRecs 아님)
+//   - 카테고리 탭 클릭 시 토글 동작의 기준이 됨
+const categorySelectionState = computed(() => {
+  const state = {}
+  for (const cat of categoryTabs.value) {
+    const recs = recommendations.value.filter(r => r.category === cat.v)
+    if (recs.length === 0) {
+      state[cat.v] = 'none'
+      continue
+    }
+    let sel = 0
+    for (const r of recs) {
+      const d = decisionMap.value[r.id]
+      if (d === 'applied' || d === 'edited') sel++
+    }
+    if (sel === 0) state[cat.v] = 'none'
+    else if (sel === recs.length) state[cat.v] = 'all'
+    else state[cat.v] = 'partial'
+  }
+  return state
+})
+
+// 카테고리 단위 일괄 선택 (검색/정렬 무관 — 카테고리 전체 항목 처리)
+function selectAllInCategory(catId) {
+  const next = { ...decisionMap.value }
+  let touched = 0
+  for (const rec of recommendations.value) {
+    if (rec.category !== catId) continue
+    if (next[rec.id] !== 'edited') {
+      next[rec.id] = 'applied'
+      touched++
+    }
+  }
+  decisionMap.value = next
+  emitDecisions()
+  return touched
+}
+
+// 카테고리 단위 일괄 해제
+function deselectAllInCategory(catId) {
+  const next = { ...decisionMap.value }
+  let touched = 0
+  for (const rec of recommendations.value) {
+    if (rec.category !== catId) continue
+    if (next[rec.id] === 'applied' || next[rec.id] === 'edited') {
+      next[rec.id] = 'pending'
+      touched++
+    }
+  }
+  decisionMap.value = next
+  emitDecisions()
+  return touched
+}
+
+// 카테고리 탭 클릭 핸들러 (v90.57)
+//   - 다른 카테고리: 그 카테고리로 이동 (기존 동작 유지)
+//   - 활성 카테고리 재클릭:
+//       partial / none → 전체 선택
+//       all            → 전체 해제 (토글)
+function onCategoryClick(cat) {
+  if (cat.status === 'pending' || cat.status === 'unsupported') return
+  
+  // 다른 카테고리 클릭 → 이동만 (선택 상태 변경 없음)
+  if (activeCategory.value !== cat.v) {
+    activeCategory.value = cat.v
+    return
+  }
+  
+  // 활성 카테고리 재클릭 → 토글
+  // ok 상태가 아니면 무시 (분석 안 됨)
+  if (cat.status !== 'ok') return
+  const total = countByCategory.value[cat.v] || 0
+  if (total === 0) return  // 항목 없으면 무시
+  
+  const state = categorySelectionState.value[cat.v]
+  if (state === 'all') {
+    deselectAllInCategory(cat.v)
+  } else {
+    // none / partial → 전체 선택
+    selectAllInCategory(cat.v)
+  }
+}
+
+const decisionCounts = computed(() => {
+  const c = { applied: 0, skipped: 0, edited: 0, pending: 0 }
+  for (const rec of recommendations.value) {
+    const d = decisionMap.value[rec.id] || 'pending'
+    c[d] = (c[d] || 0) + 1
+  }
+  return c
+})
+
+// v94_p1: 마지막 저장 시각 표시 ("방금" / "5초 전" / "1분 전")
+//   tick ref 를 1초마다 증가시켜 computed 가 자동 재평가되게 함
+const _tick = ref(0)
+let _tickTimer = null
+const savedTimeText = computed(() => {
+  _tick.value  // dependency
+  if (!applyState.value.lastSaved) return ''
+  const sec = Math.floor((Date.now() - applyState.value.lastSaved.getTime()) / 1000)
+  if (sec < 3) return '(방금)'
+  if (sec < 60) return `(${sec}초 전)`
+  if (sec < 3600) return `(${Math.floor(sec/60)}분 전)`
+  return `(${Math.floor(sec/3600)}시간 전)`
+})
+
+// 적용 방법 안내 - 기존 RecommendationCard 로직을 여기에 인라인
+function howtoNeedsDba(rec) {
+  if (!rec) return false
+  const target = (rec.target || '').toLowerCase()
+  if (rec.category === 'server') return true
+  if (target.includes('my.cnf') || target.includes('postgresql.conf')) return true
+  return false
+}
+
+function howtoManualHint(rec) {
+  if (!rec) return ''
+  const cat = rec.category
+  const target = (rec.target || '').toLowerCase()
+  if (target.includes('my.cnf') || target.includes('postgresql.conf')) {
+    return 'my.cnf 수정 → DB 서버 재시작'
+  }
+  if (cat === 'table') {
+    const t = rec.title || ''
+    if (t.includes('파티셔닝')) return '이관 전 타겟 DDL 반영 또는 이관 후 ALTER TABLE'
+    if (t.includes('오버스펙')) return '실사용 길이 측정 후 ALTER TABLE MODIFY COLUMN'
+    if (t.includes('BINARY') || t.includes('GUID')) return '이관 DDL + 앱 코드 수정'
+    return '타겟 DB에서 ALTER TABLE 실행'
+  }
+  if (cat === 'index') {
+    const t = rec.title || ''
+    if (t.includes('중복')) return '타겟 DB에서 DROP INDEX 실행'
+    if (t.includes('누락') || t.includes('필수')) return '이관 완료 후 CREATE INDEX 실행'
+    if (t.includes('과다')) return '사용량 측정 후 불필요 인덱스 DROP'
+    return '타겟 DB에서 인덱스 DDL 실행'
+  }
+  if (cat === 'object') return 'SP/View DDL 재작성 후 재배포'
+  if (cat === 'server') return '타겟 DB 설정 수정 또는 SET GLOBAL'
+  return '권고 내용을 타겟 DB에 수동 반영'
+}
+
+// ── 유틸 ──
+const fmtTokens = (n) => {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000)     return Math.round(n / 1_000) + 'K'
+  return String(n || 0)
+}
+const fmtTime = (sec) => {
+  if (sec < 60)  return Math.round(sec) + '초'
+  if (sec < 600) return (sec / 60).toFixed(1) + '분'
+  return Math.round(sec / 60) + '분'
+}
+
+// ── 비용 산정 ──
+async function estimateCosts() {
+  if (estimating.value) return
+  estimating.value = true
+  
+  // v90.4: timeout fallback (10초) - 무한 "계산 중..." 방지
+  const timeoutId = setTimeout(() => {
+    if (estimating.value) {
+      console.warn('[advisor] estimate-cost timeout (10s) — fallback 사용')
+      // 기본 추정값 (테이블 수 기반)
+      const tableCount = (props.selection?.tables || []).length
+      const baseTime = Math.max(60, tableCount * 5)  // 테이블당 5초, 최소 1분
+      costEstimates.value = {
+        smart:  { time_sec: baseTime,        cost_usd: 0,    cost_krw: 0,        tokens: 0 },
+        hybrid: { time_sec: baseTime * 1.8,  cost_usd: 0.5,  cost_krw: 700,     tokens: 5000 },
+        deep:   { time_sec: baseTime * 5,    cost_usd: 3.0,  cost_krw: 4200,    tokens: 30000 },
+      }
+      estimating.value = false
+    }
+  }, 10000)
+  
+  try {
+    const { data } = await axios.post('/api/v1/advisor/estimate-cost', {
+      src_db:  props.srcDb,
+      tgt_db:  props.tgtDb,
+      selection: {
+        tables:     props.selection.tables     || [],
+        procedures: props.selection.procedures || [],
+        functions:  props.selection.functions  || [],
+        triggers:   props.selection.triggers   || [],
+        views:      props.selection.views      || [],
+      },
+    }, {
+      timeout: 8000,  // axios 자체 timeout (8초)
+    })
+    clearTimeout(timeoutId)
+    costEstimates.value = data.estimates || {}
+  } catch (e) {
+    clearTimeout(timeoutId)
+    console.error('[advisor] estimate-cost failed:', e.message || e)
+    // fallback 추정값 (API 실패 시에도 화면 정상화)
+    const tableCount = (props.selection?.tables || []).length
+    const baseTime = Math.max(60, tableCount * 5)
+    costEstimates.value = {
+      smart:  { time_sec: baseTime,        cost_usd: 0,    cost_krw: 0,        tokens: 0 },
+      hybrid: { time_sec: baseTime * 1.8,  cost_usd: 0.5,  cost_krw: 700,     tokens: 5000 },
+      deep:   { time_sec: baseTime * 5,    cost_usd: 3.0,  cost_krw: 4200,    tokens: 30000 },
+    }
+  } finally {
+    estimating.value = false
+  }
+}
+
+// ── 분석 시작 핸들러 ──
+function handleStartAnalysis() {
+  if (selectedMode.value === 'deep') {
+    showDeepConfirm.value = true
+    return
+  }
+  runAnalysis()
+}
+
+function confirmDeepAnalysis() {
+  showDeepConfirm.value = false
+  runAnalysis()
+}
+
+async function runAnalysis(forceFresh = false) {
+  analyzing.value = true
+  try {
+    // hotfix 2026-04-23: connectorStore 의 연결 정보를 body 에 포함
+    //   백엔드 _get_source_connection 이 schema._conns fallback 대신 우선 사용.
+    //   connectorStore.source / .target 에는 위저드 연결 테스트 후 저장된 값이 있음.
+    const src = connector.source || {}
+    const tgt = connector.target || {}
+    const toConnInfo = (c) => ({
+      host:     c.host,
+      port:     c.port,
+      username: c.username,
+      password: c.password,
+      database: c.database,
+      db_type:  c.dbType,
+    })
+
+    const { data } = await axios.post('/api/v1/advisor/analyze', {
+      src_db:  props.srcDb,
+      tgt_db:  props.tgtDb,
+      selection: {
+        tables:     props.selection.tables     || [],
+        procedures: props.selection.procedures || [],
+        functions:  props.selection.functions  || [],
+        triggers:   props.selection.triggers   || [],
+        views:      props.selection.views      || [],
+      },
+      mode: selectedMode.value,
+      user_hints: '',
+      source_conn: src.host ? toConnInfo(src) : null,
+      target_conn: tgt.host ? toConnInfo(tgt) : null,
+      // v88 hotfix2 (2026-04-23): 마스킹된 비번 복원용 profile_id
+      //   프로파일 로드 시 connectorStore 에 저장되는 ID.
+      //   없으면(직접 입력 모드) null — password 가 이미 평문이므로 복원 불필요.
+      profile_id: connector.loadedProfileId || null,
+      // v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 사용 여부
+      //   forceFresh=true → 강제 새 분석 (사용자가 "🔄 새로 분석" 클릭)
+      //   기본 false → 같은 입력이면 캐시에서 반환 (비용 0, 즉시)
+      use_cache: !forceFresh,
+    })
+
+    recommendations.value = data.recommendations || []
+    summary.value         = data.summary || {}
+    advisorStatus.value   = data.advisor_status || {}
+
+    // v95_p18_cache: 캐시 메타 정보 저장 (UI 입증 표시용)
+    fromCache.value = !!data.from_cache
+    cachedAt.value  = data.cached_at || ''
+
+    // 초기 결정: 각 권고의 default_action 을 초기값으로
+    const initialDecisions = {}
+    for (const r of recommendations.value) {
+      initialDecisions[r.id] = r.default_action === 'apply' ? 'applied' : 'pending'
+    }
+    decisionMap.value = initialDecisions
+    editedSqlMap.value = {}
+
+    // 첫 번째 권고 있는 탭으로 자동 이동
+    for (const cat of ['server', 'table', 'object', 'index']) {
+      if ((countByCategory.value[cat] || 0) > 0) {
+        activeCategory.value = cat
+        break
+      }
+    }
+
+    analyzed.value = true
+    emit('update:mode', selectedMode.value)
+    emitDecisions()
+    
+    // v90.20: 분석 결과 전체를 부모로 emit (sessionStorage 보존용)
+    emit('update:analysis', {
+      analyzed: true,
+      mode: selectedMode.value,
+      recommendations: recommendations.value,
+      summary: summary.value,
+      advisorStatus: advisorStatus.value,
+      decisionMap: { ...decisionMap.value },
+      editedSqlMap: { ...editedSqlMap.value },
+      activeCategory: activeCategory.value,
+      selectedRecId: selectedRecId.value,
+    })
+
+  } catch (e) {
+    console.error('[advisor] analysis failed:', e)
+    alert(`분석 실패: ${e.response?.data?.detail || e.message}`)
+  } finally {
+    analyzing.value = false
+  }
+}
+
+function handleSkip() {
+  emit('skip')
+}
+
+// v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 무시 강제 새 분석
+//   사용자가 "🔄 새로 분석" 버튼 클릭 → use_cache=false 로 호출
+//   AI 가 새로 분석 → 캐시 갱신 → from_cache=false 로 응답
+async function runFreshAnalysis() {
+  // 분석 중이면 중복 클릭 방지
+  if (analyzing.value) return
+  // 강제 새 분석 (forceFresh=true)
+  await runAnalysis(true)
+}
+
+// v95_p18_cache: 캐시 시각 포맷 (예: "2026-05-03 14:30")
+const cacheAtFmt = computed(() => {
+  if (!cachedAt.value) return ''
+  try {
+    const dt = new Date(cachedAt.value)
+    if (isNaN(dt.getTime())) return cachedAt.value
+    const yyyy = dt.getFullYear()
+    const mm = String(dt.getMonth() + 1).padStart(2, '0')
+    const dd = String(dt.getDate()).padStart(2, '0')
+    const hh = String(dt.getHours()).padStart(2, '0')
+    const mi = String(dt.getMinutes()).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
+  } catch {
+    return cachedAt.value
+  }
+})
+
+// v95_p21 (2026-05-03 본부장님 본질 처방): 사전 캐시 시각 포맷
+const preCheckCacheAtFmt = computed(() => {
+  if (!preCheckCachedAt.value) return ''
+  try {
+    const dt = new Date(preCheckCachedAt.value)
+    if (isNaN(dt.getTime())) return preCheckCachedAt.value
+    const yyyy = dt.getFullYear()
+    const mm = String(dt.getMonth() + 1).padStart(2, '0')
+    const dd = String(dt.getDate()).padStart(2, '0')
+    const hh = String(dt.getHours()).padStart(2, '0')
+    const mi = String(dt.getMinutes()).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
+  } catch {
+    return preCheckCachedAt.value
+  }
+})
+
+// v95_p21: 분석 시작 전 캐시 사전 확인 (AI 호출 없음, ~10ms)
+//   모드 변경 / 컴포넌트 마운트 시 호출 → 비용 화면에 캐시 상태 표시
+async function checkCachePrecheck() {
+  // 선택된 객체 없으면 스킵
+  const totalSel = (props.selection.tables?.length || 0)
+                 + (props.selection.procedures?.length || 0)
+                 + (props.selection.functions?.length || 0)
+                 + (props.selection.triggers?.length || 0)
+                 + (props.selection.views?.length || 0)
+  if (totalSel === 0) {
+    preCheckCache.value = null
+    preCheckCachedAt.value = ''
+    return
+  }
+
+  const src = connector.source || {}
+  const toConnInfo = (c) => ({
+    host:     c.host,
+    port:     c.port,
+    username: c.username,
+    password: c.password,
+    database: c.database,
+    db_type:  c.dbType,
+  })
+
+  try {
+    const { data } = await axios.post('/api/v1/advisor/check-cache', {
+      src_db:  props.srcDb,
+      tgt_db:  props.tgtDb,
+      selection: {
+        tables:     props.selection.tables     || [],
+        procedures: props.selection.procedures || [],
+        functions:  props.selection.functions  || [],
+        triggers:   props.selection.triggers   || [],
+        views:      props.selection.views      || [],
+      },
+      mode: selectedMode.value,
+      source_conn: src.host ? toConnInfo(src) : null,
+    }, { timeout: 5000 })
+
+    preCheckCache.value = !!data.cached
+    preCheckCachedAt.value = data.cached_at || ''
+  } catch (e) {
+    // 캐시 확인 실패해도 분석에는 영향 없음 (안전)
+    console.warn('[v95_p21] check-cache failed:', e.message || e)
+    preCheckCache.value = null
+    preCheckCachedAt.value = ''
+  }
+}
+
+function resetAnalysis() {
+  analyzed.value = false
+  recommendations.value = []
+  decisionMap.value = {}
+  editedSqlMap.value = {}
+  summary.value = { total: 0, high: 0, med: 0, low: 0, estimated_improvement_pct: 0 }
+  // v95_p18_cache: 캐시 메타 리셋 (다른 모드 선택 시 새로 분석)
+  fromCache.value = false
+  cachedAt.value  = ''
+  // v95_p21: 사전 캐시 상태도 다시 확인 (모드/선택 변경 시)
+  checkCachePrecheck()
+}
+
+// ── 결정 관리 ──
+function setDecision(id, val) {
+  decisionMap.value = { ...decisionMap.value, [id]: val }
+  emitDecisions()
+}
+
+function setEditedSql(id, sql) {
+  editedSqlMap.value = { ...editedSqlMap.value, [id]: sql }
+  emitDecisions()
+}
+
+function applyAll(scope) {
+  const next = {}
+  for (const rec of recommendations.value) {
+    if (scope === 'high-med' && (rec.severity === 'high' || rec.severity === 'med')) {
+      next[rec.id] = 'applied'
+    } else if (scope === 'recommended' && rec.default_action === 'apply') {
+      next[rec.id] = 'applied'
+    } else {
+      // 유지 (기존 결정이 있으면 그대로, 없으면 pending)
+      next[rec.id] = decisionMap.value[rec.id] || 'pending'
+    }
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+function skipAll() {
+  const next = {}
+  for (const rec of recommendations.value) {
+    next[rec.id] = 'skipped'
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+// ─── 2026-04-23 UX 개편: 3분할 뷰용 액션 ───────────────────
+// 체크박스 하나 토글: applied ↔ pending
+function toggleDecision(id, checked) {
+  const next = { ...decisionMap.value }
+  if (checked) {
+    // 이미 edited 이면 유지(수정 내용 보존), 아니면 applied
+    if (next[id] !== 'edited') next[id] = 'applied'
+  } else {
+    // 체크 해제 — edited/applied → pending
+    if (next[id] === 'applied' || next[id] === 'edited') {
+      next[id] = 'pending'
+    }
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+// 건너뜀 명시 토글 (Before/After 화면에서)
+function toggleSkip(id, checked) {
+  const next = { ...decisionMap.value }
+  if (checked) {
+    next[id] = 'skipped'
+  } else if (next[id] === 'skipped') {
+    next[id] = 'pending'
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+// 현재 탭 전체 선택 (applied)
+function selectAll() {
+  const next = { ...decisionMap.value }
+  for (const rec of filteredRecs.value) {
+    if (next[rec.id] !== 'edited') next[rec.id] = 'applied'
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+// 현재 탭 전체 해제 (pending)
+function deselectAll() {
+  const next = { ...decisionMap.value }
+  for (const rec of filteredRecs.value) {
+    if (next[rec.id] === 'applied' || next[rec.id] === 'edited') {
+      next[rec.id] = 'pending'
+    }
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+// 심각도 기반 선택 — 'high' 단일 or ['high','med'] 배열
+function selectBySev(sev) {
+  const targets = Array.isArray(sev) ? sev : [sev]
+  const next = { ...decisionMap.value }
+  for (const rec of filteredRecs.value) {
+    if (targets.includes(rec.severity)) {
+      if (next[rec.id] !== 'edited') next[rec.id] = 'applied'
+    } else {
+      // 나머지는 건드리지 않음 (이미 체크된 것 보존)
+    }
+  }
+  decisionMap.value = next
+  emitDecisions()
+}
+
+// After 패널 편집 모드
+function startEdit() {
+  if (!selectedRec.value) return
+  editMode.value = true
+  editDraft.value = editedSqlMap.value[selectedRec.value.id] || selectedRec.value.after || ''
+}
+
+function saveEdit() {
+  if (!selectedRec.value) return
+  const id = selectedRec.value.id
+  editedSqlMap.value = { ...editedSqlMap.value, [id]: editDraft.value }
+  // 편집 저장하면 결정이 'edited' 로 승격 (체크 상태 유지)
+  decisionMap.value = { ...decisionMap.value, [id]: 'edited' }
+  editMode.value = false
+  emitDecisions()
+}
+
+function cancelEdit() {
+  editMode.value = false
+  editDraft.value = ''
+}
+
+function emitDecisions() {
+  // 부모 form 에 전달
+  // v10 #23 (2026-04-24): title/description 도 전달 → 백엔드 baseline 정확도 향상
+  const list = recommendations.value.map(rec => ({
+    id: rec.id,
+    category: rec.category,
+    severity: rec.severity,
+    decision: decisionMap.value[rec.id] || 'pending',
+    edited_sql: editedSqlMap.value[rec.id] || '',
+    // v10 #23 추가 — advisor_tracking baseline 생성에 사용됨
+    title: rec.title || '',
+    description: rec.description || '',
+  }))
+  emit('update:decisions', list)
+
+  // ─────────────────────────────────────────────────────────────
+  // v94_p1 (2026-05-01): 본부장님 호소 — "토글이 동작 안 하는 것 같다"
+  //
+  // 기존: emit 만 했고 백엔드 호출은 submit() 시점에만 발생
+  //  → 사용자가 클릭해도 실제 백엔드에 즉시 안 가서 UI 가 동작 안 하는 것처럼 보임
+  //
+  // 처방: 결정 변경 시 백엔드 /advisor/apply-decision 즉시 호출 (debounce 800ms)
+  //       응답 받아서 lastApplyResult 에 저장 → UI 에 ✓ 적용 N개 표시
+  // ─────────────────────────────────────────────────────────────
+  scheduleApplyDecisions(list)
+}
+
+// v94_p1: debounce 한 백엔드 호출
+let _applyDecisionsTimer = null
+function scheduleApplyDecisions(list) {
+  if (_applyDecisionsTimer) clearTimeout(_applyDecisionsTimer)
+  _applyDecisionsTimer = setTimeout(() => {
+    callApplyDecisions(list)
+  }, 800)
+}
+
+// v94_p1: 백엔드 즉시 호출 + 시각 피드백
+const applyState = ref({ saving: false, lastSaved: null, error: null, stats: null })
+async function callApplyDecisions(list) {
+  // pending 빼고 실제 결정한 것만 전송 (적용/거부/편집 중 하나)
+  const decided = list.filter(d => d.decision && d.decision !== 'pending')
+  if (decided.length === 0) {
+    // 모두 pending — 저장할 게 없음. lastSaved 표시 초기화.
+    applyState.value = { saving: false, lastSaved: null, error: null, stats: null }
+    return
+  }
+  applyState.value = { ...applyState.value, saving: true, error: null }
+  try {
+    const { data } = await axios.post('/api/v1/advisor/apply-decision', {
+      src_db: props.srcDb,
+      tgt_db: props.tgtDb,
+      mode: selectedMode.value,
+      job_id: '',  // wizard 단계라 아직 jobId 없음 — 백엔드는 빈 문자열 허용
+      decisions: decided,
+    }, { timeout: 8000 })
+    applyState.value = {
+      saving: false,
+      lastSaved: new Date(),
+      error: null,
+      stats: data?.stats || null,
+    }
+    console.log('[advisor.apply-decision] saved:', data)
+  } catch (e) {
+    applyState.value = {
+      ...applyState.value,
+      saving: false,
+      error: e?.message || '저장 실패',
+    }
+    console.error('[advisor.apply-decision] failed:', e)
+  }
+}
+
+// ── 생명주기 ──
+onMounted(() => {
+  estimateCosts()
+  
+  // v95_p21 (2026-05-03 본부장님 본질 처방): 캐시 사전 확인
+  //   본부장님 호소: "비용절감 관련은 언제 화면에 나오는거야?"
+  //   처방: 화면 진입 시 즉시 캐시 확인 → 비용 화면에 결과 표시
+  checkCachePrecheck()
+  
+  // v90.20: 부모에서 전달된 분석 결과 복원 (sessionStorage 에서 살아남은 상태)
+  if (props.initialAnalysis && props.initialAnalysis.analyzed) {
+    const a = props.initialAnalysis
+    selectedMode.value     = a.mode || 'smart'
+    recommendations.value  = a.recommendations || []
+    summary.value          = a.summary || {}
+    advisorStatus.value    = a.advisorStatus || {}
+    decisionMap.value      = { ...(a.decisionMap || {}) }
+    editedSqlMap.value     = { ...(a.editedSqlMap || {}) }
+    activeCategory.value   = a.activeCategory || 'server'
+    selectedRecId.value    = a.selectedRecId || null
+    analyzed.value         = true
+    console.log('[AdvisorPanel] 분석 결과 복원:', recommendations.value.length, '개 권고')
+  }
+
+  // v94_p1: "N초 전" 표시 매초 갱신
+  _tickTimer = setInterval(() => { _tick.value++ }, 1000)
+})
+
+// v94_p1: 컴포넌트 종료 시 ticker / debounce 타이머 정리
+onUnmounted(() => {
+  if (_tickTimer) clearInterval(_tickTimer)
+  if (_applyDecisionsTimer) clearTimeout(_applyDecisionsTimer)
+})
+
+watch(
+  () => [
+    props.selection.tables?.length,
+    props.selection.procedures?.length,
+    props.selection.functions?.length,
+    props.selection.views?.length,
+    props.selection.triggers?.length,
+  ],
+  () => {
+    estimateCosts()
+    // v95_p21: 선택 객체 변경 시 캐시 상태 다시 확인
+    checkCachePrecheck()
+  }
+)
+
+// v95_p21: 모드 변경 시 캐시 상태 다시 확인 (smart/hybrid/deep 별 다른 캐시 키)
+watch(selectedMode, () => {
+  checkCachePrecheck()
+})
+
+// 2026-04-23 UX 개편: 카테고리 탭이나 검색 결과가 바뀌면 첫 권고 자동 선택
+watch(filteredRecs, (list) => {
+  if (!list || list.length === 0) {
+    selectedRecId.value = null
+    return
+  }
+  // 현재 선택이 필터된 리스트에 없으면 첫 번째로 자동 이동
+  const stillVisible = list.some(r => r.id === selectedRecId.value)
+  if (!stillVisible) {
+    selectedRecId.value = list[0].id
+  }
+  // 카테고리 탭 전환 시 편집 모드 해제
+  editMode.value = false
+})
+
+// v90.20: 사용자 인터랙션 (카테고리 탭/권고 선택/결정) 변경 시 부모로 emit
+//         → sessionStorage 에 보존됨
+watch([activeCategory, selectedRecId, decisionMap, editedSqlMap], () => {
+  if (analyzed.value) {
+    emit('update:analysis', {
+      analyzed: true,
+      mode: selectedMode.value,
+      recommendations: recommendations.value,
+      summary: summary.value,
+      advisorStatus: advisorStatus.value,
+      decisionMap: { ...decisionMap.value },
+      editedSqlMap: { ...editedSqlMap.value },
+      activeCategory: activeCategory.value,
+      selectedRecId: selectedRecId.value,
+    })
+  }
+}, { deep: true })
+
+// 분석 완료 시점에 첫 권고 자동 선택
+watch(analyzed, (v) => {
+  if (v && filteredRecs.value.length > 0) {
+    selectedRecId.value = filteredRecs.value[0].id
+  }
+})
+</script>
+
+<style scoped>
+/* ══════════════════════════════════════════════════════════════
+   P1 에서 이어진 스타일 + P2 신규 스타일
+   ══════════════════════════════════════════════════════════════ */
+
+.advisor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── 헤더 ── */
+.adv-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.06), rgba(59, 130, 246, 0.04));
+  border: 1px solid rgba(139, 92, 246, 0.18);
+}
+.adv-header-icon { font-size: 22px; line-height: 1; padding-top: 2px; }
+.adv-header-title { font-size: 14px; font-weight: 700; color: var(--text-primary); margin-bottom: 3px; }
+.adv-header-subtitle { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+
+/* ── 선택 요약 바 ── */
+.adv-selection-summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--bg-secondary, #f8fafc);
+  border: 1px solid var(--border-light, #e2e8f0);
+}
+.adv-ss-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+.adv-ss-ico { font-size: 12px; opacity: 0.7; }
+.adv-ss-label { color: var(--text-tertiary, #94a3b8); }
+.adv-ss-value { font-weight: 600; color: var(--text-primary, #1e293b); }
+.adv-ss-divider { width: 1px; height: 12px; background: var(--border-light, #e2e8f0); }
+
+/* ══════════════════════════════════════════════════════════════
+   2026-04-23 ux3: 모드 선택 UX 재설계
+   한 줄 3개 카드 + 선택 상세 패널
+   ══════════════════════════════════════════════════════════════ */
+.adv-mode-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.adv-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.adv-section-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* ── 한 줄 3개 모드 카드 ── */
+.adv-modes-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+}
+.adv-mode-chip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px 10px 18px;  /* 왼쪽 indicator 공간 */
+  border-radius: 9px;
+  border: 1.5px solid var(--border-light, #e2e8f0);
+  background: var(--bg-primary, #fff);
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+}
+.adv-mode-chip:hover {
+  border-color: var(--border-medium, #cbd5e1);
+}
+/* 왼쪽 인디케이터 바 (선택 시 색상) */
+.adv-chip-indicator {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  background: transparent;
+}
+.adv-mode-chip.active.color-green  { border-color: #16a34a; background: rgba(22, 163, 74, 0.03); }
+.adv-mode-chip.active.color-green  .adv-chip-indicator { background: #16a34a; }
+.adv-mode-chip.active.color-amber  { border-color: #f59e0b; background: rgba(245, 158, 11, 0.03); }
+.adv-mode-chip.active.color-amber  .adv-chip-indicator { background: #f59e0b; }
+.adv-mode-chip.active.color-red    { border-color: #dc2626; background: rgba(220, 38, 38, 0.03); }
+.adv-mode-chip.active.color-red    .adv-chip-indicator { background: #dc2626; }
+
+/* 헤드: 아이콘 + 이름 + 배지 */
+.adv-chip-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.adv-chip-icon { font-size: 15px; }
+.adv-chip-name {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.adv-chip-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  color: #fff;
+  letter-spacing: 0.04em;
+  margin-left: auto;
+}
+.adv-chip-badge.badge-green { background: #16a34a; }
+.adv-chip-badge.badge-amber { background: #f59e0b; }
+.adv-chip-badge.badge-red   { background: #dc2626; }
+
+.adv-chip-short {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+/* 지표 3개: 시간 · 비용 */
+.adv-chip-metrics {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-light, #e2e8f0);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.adv-cm-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+}
+.adv-cm-ico { font-size: 12px; opacity: 0.85; }
+.adv-cm-val { font-weight: 600; color: var(--text-primary); }
+.adv-cm-val.is-free { color: #15803d; }
+.adv-cm-val.is-expensive { color: #dc2626; }
+.adv-cm-divider {
+  width: 1px; height: 10px;
+  background: var(--border-light, #e2e8f0);
+}
+.adv-cm-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+/* ── 선택된 모드 상세 패널 ── */
+.adv-mode-detail {
+  border-radius: 10px;
+  border: 1.5px solid var(--border-light, #e2e8f0);
+  background: var(--bg-primary, #fff);
+  overflow: hidden;
+}
+.adv-mode-detail.accent-green { border-color: rgba(22, 163, 74, 0.35); }
+.adv-mode-detail.accent-amber { border-color: rgba(245, 158, 11, 0.35); }
+.adv-mode-detail.accent-red   { border-color: rgba(220, 38, 38, 0.35); }
+
+.adv-md-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-light, #e2e8f0);
+}
+.adv-mode-detail.accent-green .adv-md-head { background: rgba(22, 163, 74, 0.04); }
+.adv-mode-detail.accent-amber .adv-md-head { background: rgba(245, 158, 11, 0.04); }
+.adv-mode-detail.accent-red   .adv-md-head { background: rgba(220, 38, 38, 0.04); }
+
+.adv-md-icon-big {
+  font-size: 22px;
+  line-height: 1;
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+.adv-md-head-text {
+  flex: 1;
+  min-width: 0;
+}
+.adv-md-head-title {
+  font-size: 14.5px;
+  font-weight: 800;
+  color: var(--text-primary);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.adv-md-eng {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+.adv-md-head-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  margin-top: 4px;
+}
+
+/* 2-컬럼 그리드: 텍스트 2/3 + 비용 1/3 */
+.adv-md-grid {
+  display: grid;
+  grid-template-columns: 1.8fr 1fr;
+  gap: 0;
+}
+@media (max-width: 900px) {
+  .adv-md-grid { grid-template-columns: 1fr; }
+}
+.adv-md-text {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.adv-md-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.adv-md-block-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.adv-md-block-ico {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.adv-md-block-ico-ok {
+  background: rgba(22, 163, 74, 0.15);
+  color: #15803d;
+}
+.adv-md-block-ico-warn {
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+}
+.adv-md-block-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+.adv-md-list {
+  list-style: none;
+  padding: 0 0 0 25px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.adv-md-list li {
+  position: relative;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+.adv-md-list li::before {
+  content: '';
+  position: absolute;
+  left: -14px;
+  top: 8px;
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--text-tertiary, #94a3b8);
+}
+.adv-md-block-warn .adv-md-list li::before {
+  background: #b45309;
+}
+
+/* 오른쪽 비용 내역 */
+.adv-md-cost {
+  padding: 14px 16px;
+  background: var(--bg-secondary, #f8fafc);
+  border-left: 1px solid var(--border-light, #e2e8f0);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+@media (max-width: 900px) {
+  .adv-md-cost {
+    border-left: none;
+    border-top: 1px solid var(--border-light, #e2e8f0);
+  }
+}
+.adv-md-cost-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* v95_p21 (2026-05-03 본부장님 본질 처방): 캐시 사전 표시 */
+.adv-md-cache-hit {
+  display: flex; gap: 10px; align-items: center;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(34,197,94,0.10), rgba(22,163,74,0.05));
+  border: 1px solid rgba(34,197,94,0.40);
+  margin-bottom: 4px;
+}
+.adv-md-cache-hit-icon { font-size: 22px; line-height: 1; flex-shrink: 0; }
+.adv-md-cache-hit-body { display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
+.adv-md-cache-hit-title {
+  font-size: 12.5px; font-weight: 700; color: #15803d;
+  letter-spacing: 0.01em;
+}
+.adv-md-cache-hit-desc {
+  font-size: 11px; color: #16a34a;
+}
+.adv-md-cache-hit-desc strong { color: #14532d; font-weight: 700; }
+
+.adv-md-cache-miss {
+  display: flex; gap: 10px; align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(254, 243, 199, 0.4);
+  border: 1px solid rgba(245, 158, 11, 0.30);
+  margin-bottom: 4px;
+}
+.adv-md-cache-miss-icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+.adv-md-cache-miss-body { display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
+.adv-md-cache-miss-title {
+  font-size: 11.5px; font-weight: 600; color: #92400e;
+}
+.adv-md-cache-miss-desc {
+  font-size: 10.5px; color: #b45309;
+}
+.adv-md-cache-miss-desc strong { color: #78350f; font-weight: 700; }
+
+.adv-md-cost-strikethrough {
+  text-decoration: line-through;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+/* v95_p21: 분석 버튼 — 캐시 적중 시 녹색 배경 (무료 명시) */
+.adv-btn-analyze.cache-hit {
+  background: linear-gradient(135deg, #16a34a, #15803d) !important;
+  border-color: #15803d !important;
+  box-shadow: 0 2px 8px rgba(22,163,74,0.30);
+}
+.adv-btn-analyze.cache-hit:hover {
+  background: linear-gradient(135deg, #15803d, #166534) !important;
+}
+.adv-md-cost-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border-light, #e2e8f0);
+}
+.adv-md-cost-free {
+  font-size: 22px;
+  font-weight: 800;
+  color: #15803d;
+  line-height: 1.1;
+}
+.adv-md-cost-free-sub {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+.adv-md-cost-usd {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.adv-mode-detail.accent-red .adv-md-cost-usd { color: #dc2626; }
+.adv-md-cost-krw {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.adv-md-cost-table {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.adv-md-cost-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.adv-md-cost-key {
+  color: var(--text-tertiary);
+}
+.adv-md-cost-val {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.adv-md-cost-note {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-light, #e2e8f0);
+}
+.adv-md-cost-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+/* ── 하단 액션 버튼 ── */
+.adv-mode-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.adv-btn-skip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.adv-btn-skip:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+/* 2026-04-23 UX: 깜박임 제거 — transition/transform 정적화 */
+.adv-btn-analyze {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 22px; border-radius: 7px; border: none;
+  background: #6d28d9;
+  color: #fff;
+  font-size: 13px; font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(109, 40, 217, 0.25);
+}
+.adv-btn-analyze:hover:not(:disabled) { background: #5b21b6; }
+.adv-btn-analyze:disabled { opacity: 0.55; cursor: not-allowed; }
+.adv-btn-analyze.deep-warn {
+  background: #dc2626;
+  box-shadow: 0 1px 3px rgba(220, 38, 38, 0.25);
+}
+.adv-btn-analyze.deep-warn:hover:not(:disabled) { background: #991b1b; }
+
+/* ══════════════════════════════════════════════════════════════
+   P2 신규 — 결과 영역
+   ══════════════════════════════════════════════════════════════ */
+.adv-results-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── 상단 요약 바 ── */
+.adv-summary-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.05), rgba(59, 130, 246, 0.03));
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}
+.adv-sb-stats { display: flex; align-items: center; gap: 14px; }
+.adv-sb-stat { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+.adv-sb-stat.sev-high { color: #991b1b; }
+.adv-sb-stat.sev-med  { color: #b45309; }
+.adv-sb-stat.sev-low  { color: #1d4ed8; }
+.adv-sb-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.adv-sb-label { font-weight: 700; letter-spacing: 0.05em; font-size: 10px; }
+.adv-sb-value { font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; }
+.adv-sb-total { font-size: 12px; color: var(--text-secondary); padding-left: 14px; border-left: 1px solid var(--border-light, #e2e8f0); }
+.adv-sb-total b { color: var(--text-primary); font-size: 13px; font-weight: 700; }
+.adv-sb-impact { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.adv-sb-impact-label { font-size: 9.5px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; }
+.adv-sb-impact-value { font-size: 12.5px; font-weight: 700; color: #15803d; font-variant-numeric: tabular-nums; }
+.adv-sb-reanalyze {
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: var(--bg-primary, #fff);
+  color: var(--text-secondary);
+  font-size: 11.5px; font-weight: 500;
+  cursor: pointer; transition: all 0.12s;
+}
+.adv-sb-reanalyze:hover { border-color: #6d28d9; color: #6d28d9; }
+
+/* v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 입증 UI */
+.adv-sb-cache-badge {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.10), rgba(22, 163, 74, 0.05));
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  margin-left: 10px;
+}
+.adv-sb-cache-icon { font-size: 14px; color: #15803d; }
+.adv-sb-cache-text { display: flex; flex-direction: column; line-height: 1.2; }
+.adv-sb-cache-title {
+  font-size: 11px; font-weight: 700; color: #15803d;
+  letter-spacing: 0.02em;
+}
+.adv-sb-cache-time {
+  font-size: 10px; color: #16a34a;
+  font-variant-numeric: tabular-nums;
+}
+.adv-sb-fresh {
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(254, 243, 199, 0.4);
+  color: #b45309;
+  font-size: 11.5px; font-weight: 600;
+  cursor: pointer; transition: all 0.12s;
+  margin-left: 6px;
+}
+.adv-sb-fresh:hover {
+  border-color: #d97706; color: #92400e;
+  background: rgba(254, 215, 170, 0.5);
+}
+
+/* ── 빈 결과 (Hero) ── */
+.adv-empty {
+  padding: 40px 20px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(22, 163, 74, 0.04), rgba(59, 130, 246, 0.03));
+  border: 1px solid rgba(22, 163, 74, 0.2);
+}
+.adv-empty-icon {
+  width: 56px; height: 56px; border-radius: 50%;
+  background: #15803d; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px; font-weight: 900;
+  box-shadow: 0 4px 12px rgba(21, 128, 61, 0.3);
+}
+.adv-empty-title { font-size: 15px; font-weight: 700; color: var(--text-primary); }
+.adv-empty-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.7; }
+.adv-btn-reset {
+  margin-top: 8px;
+  padding: 6px 14px; border-radius: 6px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: transparent; color: var(--text-secondary);
+  font-size: 11.5px; font-weight: 500; cursor: pointer;
+}
+.adv-btn-reset:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+
+/* ── 카테고리 탭 (2026-04-23: 테두리만, 인디케이터 바 제거) ── */
+.adv-category-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+}
+.adv-cat-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 7px;
+  border: 1.5px solid var(--border-light, #e2e8f0);
+  background: var(--bg-primary, #fff);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.adv-cat-tab:hover:not(:disabled):not(.active) {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+.adv-cat-tab.active {
+  border-color: #6d28d9;
+  color: #6d28d9;
+  font-weight: 700;
+  background: #fff;
+}
+.adv-cat-tab.is-pending { opacity: 0.5; cursor: not-allowed; }
+.adv-cat-icon { font-size: 14px; }
+.adv-cat-count {
+  font-size: 11px; font-weight: 700;
+  padding: 1px 8px; border-radius: 10px;
+  background: #6d28d9; color: #fff;
+}
+.adv-cat-tab.active .adv-cat-count {
+  background: #6d28d9; color: #fff;
+}
+.adv-cat-pending {
+  font-size: 10px; font-weight: 600;
+  padding: 2px 7px; border-radius: 10px;
+  background: rgba(245, 158, 11, 0.15); color: #b45309;
+  letter-spacing: 0.03em;
+}
+
+/* v90.57: 활성 카테고리 선택 상태 시각적 단서 (재클릭 시 토글 의도 표시) */
+.adv-cat-sel-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px; height: 16px;
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 50%;
+  line-height: 1;
+}
+.adv-cat-sel-state.sel-all {
+  background: #10b981;
+  color: #fff;
+}
+.adv-cat-sel-state.sel-partial {
+  background: rgba(245, 158, 11, 0.2);
+  color: #b45309;
+}
+
+/* ── 일괄 툴바 ── */
+.adv-bulk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 7px;
+  background: var(--bg-secondary, #f8fafc);
+  border: 1px solid var(--border-light, #e2e8f0);
+  flex-wrap: wrap;
+}
+.adv-bulk-group {
+  display: flex; align-items: center; gap: 6px;
+}
+.adv-bulk-right { margin-left: auto; }
+.adv-bt-btn {
+  display: flex; align-items: center; gap: 5px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: var(--bg-primary, #fff);
+  color: var(--text-secondary);
+  font-size: 11.5px; font-weight: 500;
+  cursor: pointer; transition: all 0.12s;
+}
+.adv-bt-btn:hover { border-color: #6d28d9; color: #6d28d9; }
+.adv-bt-btn.adv-bt-high:hover { border-color: #dc2626; color: #dc2626; }
+.adv-bt-btn.adv-bt-med:hover  { border-color: #b45309; color: #b45309; }
+.adv-bt-icon { font-size: 13px; line-height: 1; }
+.adv-bt-divider {
+  width: 1px; height: 18px;
+  background: var(--border-light, #e2e8f0);
+  margin: 0 3px;
+}
+.adv-bt-search {
+  width: 180px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: var(--bg-primary, #fff);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  outline: none;
+}
+.adv-bt-search:focus { border-color: #6d28d9; }
+.adv-bt-sort {
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: var(--bg-primary, #fff);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  outline: none;
+}
+
+/* ── 선택 카운터 ── */
+.adv-select-counter {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgba(109, 40, 217, 0.05);
+  border: 1px solid rgba(109, 40, 217, 0.18);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+.adv-sc-label { color: var(--text-tertiary); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+.adv-sc-value { font-weight: 700; color: #6d28d9; font-size: 13px; font-variant-numeric: tabular-nums; }
+.adv-sc-total { color: var(--text-tertiary); }
+.adv-sc-separator { color: var(--border-medium); }
+.adv-sc-applied { color: #15803d; font-weight: 500; }
+.adv-sc-skipped { color: #475569; font-weight: 500; }
+.adv-sc-edited  { color: #6d28d9; font-weight: 500; }
+.adv-sc-pending { color: #b45309; font-weight: 500; }
+
+/* v94_p1: 저장 상태 인디케이터 */
+.adv-save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.adv-save-state.idle    { color: #94a3b8; background: #f1f5f9; }
+.adv-save-state.saving  { color: #1e40af; background: #dbeafe; }
+.adv-save-state.saved   { color: #15803d; background: #dcfce7; }
+.adv-save-state.error   { color: #991b1b; background: #fee2e2; cursor: help; }
+.adv-save-time          { color: #16a34a; font-size: 10.5px; margin-left: 2px; opacity: 0.8; }
+.adv-save-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #1e40af;
+  animation: adv-save-pulse 1s ease-in-out infinite;
+}
+@keyframes adv-save-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.2); }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   3분할 메인 — 2026-04-23 스크롤 수정
+   ══════════════════════════════════════════════════════════════ */
+.adv-three-col {
+  display: grid;
+  grid-template-columns: 30% 35% 35%;
+  gap: 10px;
+  /* 명확한 고정 높이 — 그래야 자식의 overflow 가 동작 */
+  height: 70vh;
+  min-height: 480px;
+  max-height: 760px;
+}
+@media (max-width: 1200px) {
+  .adv-three-col {
+    grid-template-columns: 35% 32.5% 32.5%;
+  }
+}
+.adv-col {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-light, #e2e8f0);
+  border-radius: 8px;
+  background: var(--bg-primary, #fff);
+  overflow: hidden;   /* 내부 스크롤 영역과 헤더 경계 */
+  min-height: 0;       /* flex 자식이 부모 높이 벗어나지 않도록 */
+  min-width: 0;        /* grid 자식 동일 원리 */
+}
+.adv-col-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--bg-secondary, #f8fafc);
+  border-bottom: 1px solid var(--border-light, #e2e8f0);
+  flex-shrink: 0;   /* 헤더는 스크롤해도 줄어들지 않음 */
+}
+.adv-col-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+.adv-col-sub {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+  font-weight: 500;
+}
+.adv-col-sub-sev {
+  padding: 2px 7px;
+  border-radius: 9px;
+  font-weight: 700;
+}
+.adv-col-sub-sev.sev-high { background: rgba(220, 38, 38, 0.1); color: #991b1b; }
+.adv-col-sub-sev.sev-med  { background: rgba(245, 158, 11, 0.1); color: #b45309; }
+.adv-col-sub-sev.sev-low  { background: rgba(59, 130, 246, 0.1); color: #1d4ed8; }
+
+.adv-col-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.6;
+}
+.adv-col-empty-ico {
+  font-size: 32px;
+  opacity: 0.4;
+}
+
+/* ─── 열 1: 권고 리스트 (2026-04-23 UX: 스크롤 강화 + 헤더 체크박스) ─── */
+.adv-col-list-header {
+  gap: 10px;
+}
+.adv-list-all-check {
+  display: inline-flex;
+  cursor: pointer;
+  padding: 1px;
+  user-select: none;
+}
+.adv-list-all-check input { display: none; }
+.adv-list-all-box {
+  display: inline-block;
+  width: 16px; height: 16px;
+  border: 1.5px solid var(--border-medium, #cbd5e1);
+  border-radius: 3px;
+  background: var(--bg-primary, #fff);
+  position: relative;
+}
+.adv-list-all-check:hover .adv-list-all-box { border-color: #6d28d9; }
+/* 전체 선택 상태 — 꽉 찬 체크 */
+.adv-list-all-box.state-all {
+  background: #6d28d9;
+  border-color: #6d28d9;
+}
+.adv-list-all-box.state-all::after {
+  content: '';
+  position: absolute;
+  left: 4px; top: 1px;
+  width: 5px; height: 9px;
+  border: solid #fff;
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(45deg);
+}
+/* 부분 선택 상태 — 가로 막대 */
+.adv-list-all-box.state-partial {
+  background: #6d28d9;
+  border-color: #6d28d9;
+}
+.adv-list-all-box.state-partial::after {
+  content: '';
+  position: absolute;
+  left: 3px; top: 6px;
+  width: 8px; height: 2.5px;
+  background: #fff;
+  border-radius: 1px;
+}
+.adv-list-count {
+  display: flex; align-items: baseline; gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.adv-list-count-sel {
+  font-weight: 700; color: #6d28d9;
+  font-size: 12px;
+}
+.adv-list-count-total {
+  color: var(--text-tertiary);
+}
+
+.adv-rec-list {
+  list-style: none;
+  padding: 4px;
+  margin: 0;
+  /* 핵심 수정: 명시적 overflow + 강한 flex 지정 + 최소 높이 차단 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 스크롤바 커스터마이즈 (webkit) */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-medium, #cbd5e1) transparent;
+}
+.adv-rec-list::-webkit-scrollbar { width: 6px; }
+.adv-rec-list::-webkit-scrollbar-track { background: transparent; }
+.adv-rec-list::-webkit-scrollbar-thumb {
+  background: var(--border-medium, #cbd5e1);
+  border-radius: 3px;
+}
+.adv-rec-list::-webkit-scrollbar-thumb:hover {
+  background: #6d28d9;
+}
+.adv-rec-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: background 0.1s, border-color 0.1s;
+  user-select: none;
+}
+.adv-rec-item:hover {
+  background: var(--bg-secondary, #f8fafc);
+}
+.adv-rec-item.is-selected {
+  background: rgba(109, 40, 217, 0.08);
+  border-left-color: #6d28d9;
+}
+.adv-rec-item.is-applied:not(.is-selected) {
+  background: rgba(22, 163, 74, 0.04);
+}
+.adv-rec-item.is-skipped {
+  opacity: 0.5;
+}
+.adv-rec-item.sev-high { border-left-color: #dc2626; }
+.adv-rec-item.sev-med  { border-left-color: #f59e0b; }
+.adv-rec-item.sev-low  { border-left-color: #3b82f6; }
+.adv-rec-item.is-selected.sev-high { border-left-color: #6d28d9; box-shadow: inset 0 0 0 1px rgba(220, 38, 38, 0.25); }
+.adv-rec-item.is-selected.sev-med  { border-left-color: #6d28d9; box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.25); }
+.adv-rec-item.is-selected.sev-low  { border-left-color: #6d28d9; box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.25); }
+
+/* 체크박스 (커스텀) */
+.adv-rec-check {
+  flex-shrink: 0;
+  display: inline-flex;
+  cursor: pointer;
+  padding: 2px;
+}
+.adv-rec-check input { display: none; }
+.adv-rec-check-box {
+  display: inline-block;
+  width: 15px; height: 15px;
+  border: 1.5px solid var(--border-medium, #cbd5e1);
+  border-radius: 3px;
+  background: var(--bg-primary, #fff);
+  position: relative;
+  transition: all 0.12s;
+}
+.adv-rec-check:hover .adv-rec-check-box { border-color: #6d28d9; }
+.adv-rec-check input:checked + .adv-rec-check-box {
+  background: #6d28d9;
+  border-color: #6d28d9;
+}
+.adv-rec-check input:checked + .adv-rec-check-box::after {
+  content: '';
+  position: absolute;
+  left: 3.5px; top: 0.5px;
+  width: 5px; height: 9px;
+  border: solid #fff;
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(45deg);
+}
+
+/* 심각도 배지 (H/M/L) */
+.adv-rec-sev {
+  flex-shrink: 0;
+  width: 18px; height: 18px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+.adv-rec-sev.sev-high { background: rgba(220, 38, 38, 0.12); color: #991b1b; }
+.adv-rec-sev.sev-med  { background: rgba(245, 158, 11, 0.12); color: #b45309; }
+.adv-rec-sev.sev-low  { background: rgba(59, 130, 246, 0.12); color: #1d4ed8; }
+
+.adv-rec-main {
+  flex: 1; min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.adv-rec-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.adv-rec-target {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.adv-rec-status {
+  flex-shrink: 0;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+.adv-rec-status.edited  { background: rgba(109, 40, 217, 0.15); color: #6d28d9; }
+.adv-rec-status.skipped { background: rgba(100, 116, 139, 0.15); color: #475569; }
+
+/* ─── 열 2, 3: Before / After ─── */
+.adv-col-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 5px;
+}
+.adv-ca-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 4px;
+  border: 1px solid var(--border-medium, #cbd5e1);
+  background: var(--bg-primary, #fff);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.adv-ca-btn:hover { border-color: #6d28d9; color: #6d28d9; }
+.adv-ca-btn.adv-ca-save { background: #6d28d9; border-color: #6d28d9; color: #fff; }
+.adv-ca-btn.adv-ca-save:hover { background: #5b21b6; }
+
+.adv-detail-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 0;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-medium, #cbd5e1) transparent;
+}
+.adv-detail-body::-webkit-scrollbar { width: 6px; }
+.adv-detail-body::-webkit-scrollbar-track { background: transparent; }
+.adv-detail-body::-webkit-scrollbar-thumb {
+  background: var(--border-medium, #cbd5e1);
+  border-radius: 3px;
+}
+.adv-detail-body::-webkit-scrollbar-thumb:hover {
+  background: #6d28d9;
+}
+.adv-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.adv-detail-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.adv-detail-target {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 6px 10px;
+  background: var(--bg-secondary, #f8fafc);
+  border-radius: 5px;
+  border: 1px solid var(--border-light, #e2e8f0);
+}
+.adv-detail-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-secondary, #f8fafc);
+  border: 1px solid var(--border-light, #e2e8f0);
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', 'D2Coding', 'Menlo', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+.adv-detail-before {
+  color: var(--text-tertiary, #94a3b8);
+}
+.adv-detail-after {
+  border-color: rgba(22, 163, 74, 0.3);
+  background: rgba(22, 163, 74, 0.03);
+  color: var(--text-primary);
+}
+.adv-detail-edit {
+  width: 100%;
+  min-height: 160px;
+  padding: 10px 12px;
+  background: rgba(109, 40, 217, 0.03);
+  border: 1.5px solid #6d28d9;
+  border-radius: 5px;
+  font-family: 'JetBrains Mono', 'D2Coding', 'Menlo', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  resize: vertical;
+  outline: none;
+}
+.adv-detail-edit:focus { box-shadow: 0 0 0 2px rgba(109, 40, 217, 0.18); }
+
+.adv-detail-reason {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  white-space: pre-line;
+  padding: 10px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light, #e2e8f0);
+  border-radius: 5px;
+}
+.adv-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 7px 11px;
+  background: var(--bg-secondary, #f8fafc);
+  border-radius: 5px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.adv-detail-meta b {
+  color: var(--text-tertiary);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  margin-right: 3px;
+}
+
+.adv-detail-impact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, rgba(22, 163, 74, 0.06), rgba(59, 130, 246, 0.04));
+  border: 1px solid rgba(22, 163, 74, 0.2);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #15803d;
+}
+.adv-di-ico { font-size: 14px; }
+
+/* 적용 방법 안내 (After 열 내부) */
+.adv-detail-howto {
+  padding: 9px 11px;
+  border-radius: 5px;
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.adv-detail-howto.is-auto {
+  background: rgba(22, 163, 74, 0.05);
+  border-color: rgba(22, 163, 74, 0.25);
+}
+.adv-dh-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #b45309;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.adv-detail-howto.is-auto .adv-dh-label { color: #15803d; }
+.adv-dh-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.adv-dh-text b { color: var(--text-primary); font-weight: 700; }
+.adv-dh-caveat {
+  display: block;
+  margin-top: 4px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+  font-size: 10.5px;
+}
+.adv-dh-hint {
+  background: rgba(245, 158, 11, 0.15);
+  color: #92400e;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* 건너뜀 토글 */
+.adv-detail-skip-row {
+  padding-top: 4px;
+  border-top: 1px dashed var(--border-light, #e2e8f0);
+}
+.adv-skip-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.adv-skip-toggle input {
+  width: 14px; height: 14px;
+  accent-color: #64748b;
+  cursor: pointer;
+}
+
+/* ── Deep 확인 다이얼로그 ── */
+.adv-deep-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; animation: adv-fade-in 0.15s ease; }
+@keyframes adv-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.adv-deep-dialog { width: 440px; max-width: 90vw; background: var(--bg-primary, #ffffff); border-radius: 12px; overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25); animation: adv-slide-up 0.2s ease; }
+@keyframes adv-slide-up { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.adv-dd-header { padding: 14px 18px; background: rgba(220, 38, 38, 0.08); border-bottom: 1px solid rgba(220, 38, 38, 0.18); display: flex; align-items: center; gap: 10px; }
+.adv-dd-icon { font-size: 18px; }
+.adv-dd-title { font-size: 14px; font-weight: 700; color: #991b1b; }
+.adv-dd-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.adv-dd-cost-box { padding: 12px 14px; border-radius: 8px; background: var(--bg-secondary, #f8fafc); border: 1px solid var(--border-light, #e2e8f0); }
+.adv-dd-cost-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+.adv-dd-cost-label { color: var(--text-secondary); }
+.adv-dd-cost-value { font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.adv-dd-cost-value.highlight { color: #dc2626; font-weight: 700; }
+.adv-dd-recommend-title { font-size: 12px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+.adv-dd-recommend-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.adv-dd-recommend-list li { font-size: 11.5px; color: var(--text-secondary); line-height: 1.6; }
+.adv-dd-actions { padding: 12px 18px; background: var(--bg-secondary, #f8fafc); border-top: 1px solid var(--border-light, #e2e8f0); display: flex; justify-content: flex-end; gap: 8px; }
+.adv-btn-deep-confirm { padding: 7px 16px; border-radius: 6px; border: none; background: #dc2626; color: #fff; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.adv-btn-deep-confirm:hover { background: #991b1b; }
+</style>

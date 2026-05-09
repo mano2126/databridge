@@ -1,0 +1,22 @@
+{
+  "config": {
+    "batch_size": 5000,
+    "parallel_workers": 4,
+    "log_level": "DEBUG",
+    "log_retention_days": 30,
+    "notify_email": false,
+    "notify_slack": false,
+    "on_error": "skip",
+    "retry_count": 3,
+    "backend_log_file": "./logs/databridge_backend.log",
+    "frontend_log_file": "./logs/databridge_frontend.log",
+    "log_format": "TEXT",
+    "log_max_mb": 10,
+    "log_backup_count": 10,
+    "anthropic_api_key": "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",
+    "anthropic_api_key_set_at": "2026-04-10 17:25:33",
+    "iconTheme": "default",
+    "spacingLeft": 245,
+    "spacingContent": 0
+  }
+}

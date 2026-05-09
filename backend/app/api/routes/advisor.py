@@ -24,6 +24,8 @@ from app.core.advisor import (
     estimate_analysis_cost,
     get_all_advisors,
 )
+# v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 모듈
+from app.core import advisor_cache
 
 logger = logging.getLogger("databridge.advisor")
 router = APIRouter()
@@ -61,6 +63,10 @@ class AnalyzeBody(BaseModel):
     # connectorStore.loadedProfileId 가 실어 보내는 값.
     # 있으면 resolve_password() 가 profile DB 에서 실제 암호문 조회해서 복호화.
     profile_id: Optional[str] = None
+    # v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 사용 여부
+    # 기본 True — 같은 입력이면 캐시에서 즉시 반환 (비용/시간 절감)
+    # False — 강제로 새 분석 (사용자가 "🔄 새로 분석" 클릭한 경우)
+    use_cache: bool = True
 
 
 class DecisionItem(BaseModel):
@@ -246,6 +252,49 @@ def analyze(body: AnalyzeBody):
     if body.mode not in _VALID_MODES:
         raise HTTPException(400, f"invalid mode: {body.mode}")
 
+    # ════════════════════════════════════════════════════════════════
+    # v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 조회
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 호소: "매번 이렇게 비용을 들여야 되는거야?"
+    # 처방: 같은 입력이면 캐시에서 즉시 반환 (AI 호출 0회, 1초 응답)
+    #
+    # 캐시 키 = SHA256(src_db + tgt_db + mode + sorted(selection) + database + host)
+    # → 어떤 표준 DB든 일반 처방 (하드코딩 0%)
+    
+    # 캐시 키 산출용 — 소스 연결 정보에서 database/host 추출
+    src_database = ""
+    src_host = ""
+    if body.source_conn:
+        src_database = body.source_conn.get("database", "") or ""
+        src_host     = body.source_conn.get("host", "") or ""
+    
+    cache_key = advisor_cache.compute_cache_key(
+        src_db=body.src_db,
+        tgt_db=body.tgt_db,
+        mode=body.mode,
+        selection=body.selection.dict() if hasattr(body.selection, 'dict') else dict(body.selection),
+        src_database=src_database,
+        src_host=src_host,
+    )
+    
+    # 캐시 hit 시 즉시 반환
+    if body.use_cache:
+        cached = advisor_cache.get_cached_analysis(cache_key)
+        if cached and isinstance(cached.get("analysis"), dict):
+            cached_analysis = cached["analysis"]
+            cached_at = cached.get("cached_at", "")
+            logger.info(
+                "[advisor.analyze] CACHE HIT key=%s cached_at=%s recs=%d",
+                cache_key[:12], cached_at,
+                len(cached_analysis.get("recommendations", []))
+            )
+            # 캐시 응답에 메타 정보 추가 (UI 입증 표시용)
+            cached_analysis["from_cache"] = True
+            cached_analysis["cached_at"]  = cached_at
+            cached_analysis["cache_key"]  = cache_key[:16]  # 짧은 식별자
+            return cached_analysis
+
+    # 캐시 miss → 실제 AI 분석 진행
     selection = _to_selection(body.selection)
     src_conn = _get_source_connection(body.src_db, body.source_conn, body.profile_id)
 
@@ -305,7 +354,7 @@ def analyze(body: AnalyzeBody):
     elif src_conn is None:
         notice_msg = "소스 DB 연결 없이 일반 권고만 생성되었습니다. 정밀 분석을 위해 연결 테스트 권장."
 
-    return {
+    response = {
         "phase": "P5",
         "mode": body.mode,
         "recommendations": recommendations,
@@ -314,6 +363,119 @@ def analyze(body: AnalyzeBody):
         "src_conn_used": src_conn is not None,
         "notice": notice_msg,
         "diagnostics": diagnostics,   # v88 hotfix3: DDL 조회 상태 등
+        # v95_p18_cache: 응답 메타 (캐시 미적용)
+        "from_cache": False,
+        "cache_key":  cache_key[:16],
+    }
+
+    # ════════════════════════════════════════════════════════════════
+    # v95_p18_cache: 분석 결과 캐시 저장 (다음 요청부터 재사용)
+    # ════════════════════════════════════════════════════════════════
+    if advisor_cache.is_valid_analysis(response):
+        try:
+            advisor_cache.save_analysis_to_cache(
+                cache_key=cache_key,
+                analysis_result=response,
+                metadata={
+                    "src_db":      body.src_db,
+                    "tgt_db":      body.tgt_db,
+                    "mode":        body.mode,
+                    "src_database": src_database,
+                    "src_host":    src_host,
+                    "table_count": len(body.selection.tables),
+                    "obj_count":   sum([
+                        len(body.selection.procedures),
+                        len(body.selection.functions),
+                        len(body.selection.triggers),
+                        len(body.selection.views),
+                    ]),
+                    "recs_count":  len(recommendations),
+                },
+            )
+        except Exception as e:
+            # 캐시 저장 실패는 분석 결과 반환에 영향 없음 (안전)
+            logger.warning("[advisor.analyze] cache save failed: %s", e)
+
+    return response
+
+
+# ════════════════════════════════════════════════════════════════════
+# v95_p18_cache (2026-05-03): 캐시 관리 엔드포인트
+# ════════════════════════════════════════════════════════════════════
+@router.get("/cache/list")
+def cache_list():
+    """모든 캐시 항목 목록."""
+    items = advisor_cache.list_cached_analyses()
+    return {"count": len(items), "items": items}
+
+
+@router.delete("/cache/{cache_key}")
+def cache_invalidate(cache_key: str):
+    """특정 캐시 삭제."""
+    ok = advisor_cache.invalidate_cache(cache_key)
+    return {"ok": ok, "cache_key": cache_key}
+
+
+@router.delete("/cache")
+def cache_clear():
+    """모든 캐시 삭제."""
+    n = advisor_cache.clear_all_cache()
+    return {"ok": True, "removed": n}
+
+
+# ════════════════════════════════════════════════════════════════════
+# v95_p21 (2026-05-03 본부장님 본질 처방): 분석 시작 전 캐시 확인
+# ════════════════════════════════════════════════════════════════════
+# 본부장님 호소: "AI DBA 에서 비용절감 관련은 언제 화면에 나오는거야? 지금은 안보이는데?"
+#
+# 본질: v95_p18_cache 는 분석 완료 후 결과 화면에서만 캐시 입증 표시.
+#        본부장님이 분석 시작 버튼 누르기 전에는 비용 발생 여부 알 수 없음.
+#
+# 처방: 모드/객체 선택 후 비용 산정 영역 옆에 캐시 상태 사전 표시.
+#        프론트가 이 엔드포인트로 캐시 적중 여부 미리 확인 → UI 에 명확히 표시.
+#        AI 호출 0회 (메타 조회만), 응답 ~10ms.
+class CheckCacheBody(BaseModel):
+    src_db: str
+    tgt_db: str
+    selection: SelectionBody
+    mode: str = "smart"
+    source_conn: Optional[dict] = None
+
+
+@router.post("/check-cache")
+def check_cache(body: CheckCacheBody):
+    """캐시 적중 여부 미리 확인 (AI 호출 없음, ~10ms).
+    
+    프론트가 "분석 시작" 버튼 활성화 전에 호출 → 결과를 UI 배너로 표시.
+    """
+    # 캐시 키 산출 (analyze 와 동일 로직)
+    src_database = ""
+    src_host = ""
+    if body.source_conn:
+        src_database = body.source_conn.get("database", "") or ""
+        src_host     = body.source_conn.get("host", "") or ""
+    
+    cache_key = advisor_cache.compute_cache_key(
+        src_db=body.src_db,
+        tgt_db=body.tgt_db,
+        mode=body.mode,
+        selection=body.selection.dict() if hasattr(body.selection, 'dict') else dict(body.selection),
+        src_database=src_database,
+        src_host=src_host,
+    )
+    
+    cached = advisor_cache.get_cached_analysis(cache_key)
+    if cached and isinstance(cached.get("analysis"), dict):
+        return {
+            "cached":     True,
+            "cached_at":  cached.get("cached_at", ""),
+            "cache_key":  cache_key[:16],
+            "recs_count": len(cached.get("analysis", {}).get("recommendations", [])),
+        }
+    
+    return {
+        "cached":    False,
+        "cache_key": cache_key[:16],
     }
 
 

@@ -900,6 +900,42 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
                         except Exception:
                             full_ctx = f"오류: {error_hint}" if error_hint else ""
 
+                        # ════════════════════════════════════════════════════════════
+                        # v95_p90_schemactx_004 (2026-05-08 본부장님 본질 처방):
+                        # 재이관 경로에서 _conns["target"] 자동 채우기
+                        # ════════════════════════════════════════════════════════════
+                        # 본부장님 검증 결과 (2026-05-08 09:10~09:16):
+                        #   "[v95_p90_schemactx_003] tgt_conn host 비어있음 — 스킵"
+                        #   20번 반복 → 동적 스키마 발견 미작동 → 컨텍스트 주입 0건
+                        #
+                        # 본질:
+                        #   _conns["target"] 은 Job 위저드 화면에서만 채워짐
+                        #   재이관 (remig_object) 은 화면 안 거침 → _conns 비어있음
+                        #
+                        # 처방:
+                        #   재이관 시 engine_job 의 연결 정보로 _conns["target"] 자동 채우기
+                        #   → _ai_convert_ddl 안의 _discover_target_schemas 작동 가능
+                        #   → 17건 빨간불 본질 (Gemma 환각) 잡힐 가능성
+                        # ════════════════════════════════════════════════════════════
+                        try:
+                            from app.api.routes.schema import _conns as _schema_conns
+                            _schema_conns["target"] = {
+                                "db_type":  engine_job.get("tgt_db", "mysql"),
+                                "host":     engine_job.get("tgt_host", ""),
+                                "port":     engine_job.get("tgt_port", 3306),
+                                "username": engine_job.get("tgt_username", ""),
+                                "password": engine_job.get("tgt_password", ""),
+                                "database": engine_job.get("tgt_database", ""),
+                            }
+                            engine._log(
+                                "info",
+                                f"[v95_p90_schemactx_004] 재이관용 _conns[target] 채움: "
+                                f"host={engine_job.get('tgt_host')} db={engine_job.get('tgt_database')}"
+                            )
+                        except Exception as _ce:
+                            engine._log("warn",
+                                f"[v95_p90_schemactx_004] _conns 채우기 실패 (무시): {_ce}")
+
                         result = _ai_convert_ddl(src_ddl, obj_type, name,
                             j.get("src_db","mssql"), j.get("tgt_db","mysql"), full_ctx)
                         stmts = result.get("statements", [])
@@ -947,6 +983,43 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
             elif obj_type == "PROCEDURE": objects = {"procedures": [name]}
             elif obj_type == "TRIGGER": objects = {"triggers": [name]}
             elif obj_type == "VIEW": objects = {"views": [name]}
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p90_schemactx_005 (2026-05-08 본부장님 진짜 본질):
+            # drop_recreate 경로에도 _conns["target"] 채우기
+            # ════════════════════════════════════════════════════════════
+            # 본부장님 검증 (2026-05-08 09:32~09:35):
+            #   - 빨간불 17 → 15 (2건 감소: ufnGetAccountingEndDate, uspSearchCandidateResumes)
+            #   - 그러나 schema_ctx 로그 0건 → mode != 'ai' 확인
+            #
+            # 본부장님 화면 분석 (JobMonitor.vue:2449):
+            #   mode: bulkMode === 'rules' ? 'drop_recreate' : 'ai'
+            #   → 단일 '재이관' 버튼은 'drop_recreate' 가 기본
+            #   → 우리 처방 (mode == 'ai' 안) 우회됨
+            #
+            # 처방:
+            #   _migrate_objects 호출 전에도 _conns 채우기
+            #   → _migrate_objects 내부의 _ai_convert_ddl 호출 시
+            #      _discover_target_schemas 작동 가능
+            # ════════════════════════════════════════════════════════════
+            try:
+                from app.api.routes.schema import _conns as _schema_conns
+                _schema_conns["target"] = {
+                    "db_type":  engine_job.get("tgt_db", "mysql"),
+                    "host":     engine_job.get("tgt_host", ""),
+                    "port":     engine_job.get("tgt_port", 3306),
+                    "username": engine_job.get("tgt_username", ""),
+                    "password": engine_job.get("tgt_password", ""),
+                    "database": engine_job.get("tgt_database", ""),
+                }
+                engine._log(
+                    "info",
+                    f"[v95_p90_schemactx_005] drop_recreate 경로 _conns[target] 채움: "
+                    f"host={engine_job.get('tgt_host')} db={engine_job.get('tgt_database')}"
+                )
+            except Exception as _ce:
+                engine._log("warn",
+                    f"[v95_p90_schemactx_005] _conns 채우기 실패 (무시): {_ce}")
 
             engine._migrate_objects(src_conn, tgt_conn, objects, True)
             st = j["item_statuses"].get(name, {})

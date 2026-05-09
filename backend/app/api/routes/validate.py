@@ -73,11 +73,21 @@ def _tbl_ref(db_type, db, tbl):
             sch, name = tbl.split(".", 1)
             return f"[{db}].[{sch}].[{name}]"
         return f"[{db}].[dbo].[{tbl}]"
-    # TEMP-GUARD-V34C: MySQL 타겟은 bare name 매칭이 사전에 안전하다고
-    # preflight 에서 확인된 경우에만 이 함수에 도달.
+    # ════════════════════════════════════════════════════════════════════
+    # v94_p7 (2026-05-01) 본부장님 호소 처방 — T1:
+    #   "테이블 검증에서 -600,000 같은 가짜 차이"
+    #
+    # 본질: 본부장님 환경은 underscore 정책 (collection.profile → collection_profile)
+    #       기존 코드는 schema.table → bare name 으로 떨어뜨려 `db`.`activity` 호출
+    #       → 타겟에 그 이름 테이블 없거나 잘못된 테이블 매칭 → 가짜 차이
+    #
+    # 처방: schema.table 받으면 underscore 결합 (collection.activity → collection_activity)
+    #       단, bare name (점 없음) 은 그대로
+    # ════════════════════════════════════════════════════════════════════
     if "." in tbl:
-        _, name = tbl.split(".", 1)
-        return f"`{db}`.`{name}`"
+        sch, name = tbl.split(".", 1)
+        # underscore 정책: schema_name 패턴 우선 시도
+        return f"`{db}`.`{sch}_{name}`"
     return f"`{db}`.`{tbl}`"
 
 def _col_ref(db_type, col):
@@ -119,30 +129,69 @@ def _tbl_exists(conn, db_type, db, tbl) -> bool:
                 [db, sch, name])
             return int((row or {}).get("c", 0)) > 0
         else:
-            # TEMP-GUARD-V34C: MySQL 타겟 bare name 매칭 (대소문자 무시)
-            _lookup_name = tbl.split(".", 1)[1] if "." in tbl else tbl
-            row = _fetchone(conn,
-                "SELECT TABLE_NAME AS c FROM information_schema.TABLES "
-                "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
-                [db, _lookup_name])
-            return row is not None
+            # ════════════════════════════════════════════════════════════════
+            # v94_p7 T1: underscore 정책 우선 시도 → bare name fallback
+            #   본부장님 환경: schemaStrategy='underscore'
+            #   collection.activity → collection_activity (underscore 정책)
+            # ════════════════════════════════════════════════════════════════
+            if "." in tbl:
+                sch, bare = tbl.split(".", 1)
+                # 1차 시도: underscore 정책 (collection_activity)
+                _underscore_name = f"{sch}_{bare}"
+                row = _fetchone(conn,
+                    "SELECT TABLE_NAME AS c FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
+                    [db, _underscore_name])
+                if row is not None:
+                    return True
+                # 2차 시도: bare name (drop 정책 fallback)
+                row = _fetchone(conn,
+                    "SELECT TABLE_NAME AS c FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
+                    [db, bare])
+                return row is not None
+            else:
+                # bare name 으로 들어온 경우 그대로
+                row = _fetchone(conn,
+                    "SELECT TABLE_NAME AS c FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
+                    [db, tbl])
+                return row is not None
     except Exception:
         return False
 
 def _resolve_tbl_name(conn, db_type, db, tbl) -> str:
-    """MySQL에서 실제 테이블명(대소문자 맞춤) 반환"""
+    """MySQL에서 실제 테이블명(대소문자 맞춤) 반환
+
+    v94_p7 T1: underscore 정책 우선 → bare name fallback
+    """
     if db_type in ("mssql","azure"):
         return tbl
-    # TEMP-GUARD-V34C: 소스 이름이 schema.table 이어도 MySQL 타겟에는 table 만 있음
-    _lookup_name = tbl.split(".", 1)[1] if "." in tbl else tbl
     try:
-        row = _fetchone(conn,
-            "SELECT TABLE_NAME FROM information_schema.TABLES "
-            "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
-            [db, _lookup_name])
-        return (row or {}).get("TABLE_NAME", _lookup_name)
+        if "." in tbl:
+            sch, bare = tbl.split(".", 1)
+            # 1차: underscore 정책
+            _underscore_name = f"{sch}_{bare}"
+            row = _fetchone(conn,
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
+                [db, _underscore_name])
+            if row:
+                return row.get("TABLE_NAME") or _underscore_name
+            # 2차: bare name
+            row = _fetchone(conn,
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
+                [db, bare])
+            return (row or {}).get("TABLE_NAME", _underscore_name)
+        else:
+            row = _fetchone(conn,
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA=%s AND LOWER(TABLE_NAME)=LOWER(%s) LIMIT 1",
+                [db, tbl])
+            return (row or {}).get("TABLE_NAME", tbl)
     except Exception:
-        return _lookup_name
+        return tbl
 
 
 # ── 테이블 목록 ──────────────────────────────────────────────

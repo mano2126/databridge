@@ -5,24 +5,62 @@
       <span class="sdot" :class="online?'on':'off'"></span>
       <span class="ver">v2.0.0</span>
       <span class="clock">{{ clock }}</span>
-      <button class="tbtn" @click="startNewJob">+ New Job</button>
-      <!-- 모양/테마 아이콘 (v9) -->
-      <button class="tbtn-icon" @click="router.push('/appearance')" title="모양 및 느낌">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
-          <circle cx="8" cy="8" r="3"/>
-          <path d="M8 1v2M8 13v2M3.5 3.5l1.5 1.5M11 11l1.5 1.5M1 8h2M13 8h2M3.5 12.5L5 11M11 5l1.5-1.5"/>
-        </svg>
+      <button class="tbtn" @click="startNewJob" title="새 마이그레이션 Job 시작">+ New Job</button>
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <!-- v95_p89_admin (2026-05-07 본부장님): 아이콘 옆 텍스트 라벨 추가 -->
+      <!-- 본부장님 짚으심: "풍선 도움말이 안 나와서 어떤 기능인지 모르겠다" -->
+      <!-- 처방: title 속성 보강 + 시각적 라벨 함께 표시                  -->
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <!-- v95_p101 (2026-05-09 본부장님): 모양 자리에 AI 엔진 + 접속 상태 -->
+      <!-- 본부장님: "현재 AI접속 정보를 상탄 모양 자리에 대처 했으면 좋겠어 -->
+      <!--           어짜피 모양은 설정에 가면 있잖아? 접속중이면 표시도 함께"-->
+      <!-- v95_p103 (2026-05-09 본부장님): 클릭 시 관리자 콘솔 새창 (메인창 유지)-->
+      <!-- 본부장님: "상단 gemma4를 누르면 새창으로 관리자 화면이 열려서        -->
+      <!--           해당 화면으로 가야되 지금은 메인창에서 창이 바껴"           -->
+      <button class="tbtn-icon tbtn-labeled tbtn-ai-engine"
+              :class="{
+                'is-anthropic': aiInfo.provider === 'anthropic',
+                'is-ollama':    aiInfo.provider === 'ollama',
+                'is-connected': aiInfo.connected === true,
+                'is-disconnected': aiInfo.connected === false,
+                'is-checking':  aiInfo.connected === null
+              }"
+              @click="openAiSettings"
+              :title="aiTooltip">
+        <!-- 접속 상태 점 -->
+        <span class="ai-status-dot"
+              :class="{
+                'ad-on':  aiInfo.connected === true,
+                'ad-off': aiInfo.connected === false,
+                'ad-pending': aiInfo.connected === null
+              }"></span>
+        <!-- Provider 라벨 -->
+        <span class="tbtn-label" v-if="aiInfo.provider === 'anthropic'">Claude</span>
+        <span class="tbtn-label" v-else-if="aiInfo.provider === 'ollama'">{{ aiInfo.modelShort || 'Ollama' }}</span>
+        <span class="tbtn-label" v-else>AI</span>
       </button>
       <!-- 설정 아이콘 -->
-      <button class="tbtn-icon" @click="router.push('/settings')" title="시스템 설정">
+      <button class="tbtn-icon tbtn-labeled" @click="router.push('/settings')" title="시스템 설정 (로깅 / AI 변환 엔진 / 백업)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
           <circle cx="8" cy="8" r="2.5"/>
           <path d="M8 1.5v1M8 13.5v1M1.5 8h1M13.5 8h1M3.4 3.4l.7.7M11.9 11.9l.7.7M3.4 12.6l.7-.7M11.9 4.1l.7-.7"/>
         </svg>
+        <span class="tbtn-label">설정</span>
+      </button>
+      <!-- v95_p89_admin: 관리자 콘솔 새창 (admin 역할 시만) -->
+      <button v-if="authStore.hasRole && authStore.hasRole('admin')"
+              class="tbtn-icon tbtn-labeled tbtn-admin"
+              @click="openAdminConsole"
+              title="관리자 콘솔 — 사용자/감사/라이선스/KB/AI통계 통합 관리 (새창)">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
+          <circle cx="8" cy="8" r="6"/>
+          <path d="M5 8l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="tbtn-label">관리자</span>
       </button>
       <!-- 사용자 메뉴 (RBAC 활성 시) -->
       <div v-if="authStore.isAuthenticated && !authStore.user?.rbac_disabled" class="user-menu">
-        <button class="user-btn" @click="userMenuOpen = !userMenuOpen">
+        <button class="user-btn" @click="userMenuOpen = !userMenuOpen" title="사용자 정보 / 로그아웃">
           <span class="user-name">{{ authStore.user?.username }}</span>
           <span class="user-role" :class="'role-' + authStore.role">{{ authStore.role }}</span>
           <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" style="width:10px;height:10px">
@@ -37,7 +75,7 @@
   </header>
 </template>
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/store/authStore.js'
 import { useConnectorStore } from '@/store/connectorStore.js'
@@ -46,6 +84,102 @@ const authStore = useAuthStore()
 const connector = useConnectorStore()
 const userMenuOpen = ref(false)
 const online = ref(true)
+
+// ════════════════════════════════════════════════════════════════
+// v95_p101 (2026-05-09 본부장님): 상단 모양 자리에 AI 엔진 + 접속 상태
+// 본부장님 요청 그대로:
+//   "현재 AI접속 정보를 상탄 모양 자리에 대처 했으면 좋겠어
+//    어짜피 모양은 설정에 가면 있잖아? 접속중이면 표시도 함께"
+// ════════════════════════════════════════════════════════════════
+const aiInfo = ref({
+  provider:  '',         // 'anthropic' | 'ollama' | ''
+  model:     '',         // 전체 모델 이름
+  modelShort:'',         // 짧은 표시 (gemma4:26b → gemma4)
+  url:       '',
+  apiKeySet: false,      // anthropic 일 때
+  connected: null,       // null=확인중, true=연결, false=실패
+  lastError: '',
+})
+
+const aiTooltip = computed(() => {
+  const a = aiInfo.value
+  if (!a.provider) return 'AI 엔진 (시스템 설정으로 이동)'
+  
+  const lines = []
+  if (a.provider === 'anthropic') {
+    lines.push('Anthropic Claude (Cloud)')
+    lines.push(a.apiKeySet ? '🔑 API 키 설정됨' : '⚠ API 키 없음')
+  } else if (a.provider === 'ollama') {
+    lines.push('Ollama + Gemma (자체 호스팅)')
+    if (a.model) lines.push('모델: ' + a.model)
+    if (a.url)   lines.push('URL: ' + a.url.replace(/^https?:\/\//, ''))
+  }
+  // 접속 상태
+  if (a.connected === true)  lines.push('✓ 연결됨')
+  else if (a.connected === false) lines.push('✗ 연결 실패' + (a.lastError ? ': ' + a.lastError : ''))
+  else lines.push('⋯ 확인 중')
+  lines.push('— 클릭: 시스템 설정으로 이동 —')
+  return lines.join('\n')
+})
+
+// 모델명 줄임 (gemma4:26b → gemma4)
+function _shortenModel(m) {
+  if (!m) return ''
+  // ':' 앞만 — 너무 길면 잘림
+  const base = m.split(':')[0]
+  return base.length > 8 ? base.slice(0, 8) : base
+}
+
+async function loadAiInfo() {
+  try {
+    // 1) 현재 settings 가져오기
+    const res = await fetch('/api/v1/settings/', { credentials: 'include' })
+    if (!res.ok) {
+      aiInfo.value = { ...aiInfo.value, connected: false, lastError: 'settings 조회 실패' }
+      return
+    }
+    const cfg = await res.json()
+    aiInfo.value.provider  = cfg.ai_provider || 'anthropic'
+    aiInfo.value.model     = cfg.ollama_model || ''
+    aiInfo.value.modelShort= _shortenModel(cfg.ollama_model)
+    aiInfo.value.url       = cfg.ollama_url || 'http://localhost:11434'
+    aiInfo.value.apiKeySet = !!cfg.anthropic_api_key_set
+    
+    // 2) 접속 상태 체크
+    await _checkConnection()
+  } catch (e) {
+    aiInfo.value.connected = false
+    aiInfo.value.lastError = String(e).slice(0, 60)
+  }
+}
+
+async function _checkConnection() {
+  const provider = aiInfo.value.provider
+  if (provider === 'anthropic') {
+    // anthropic — API 키 설정 여부로만 판단 (실제 호출은 비용 발생)
+    aiInfo.value.connected = !!aiInfo.value.apiKeySet
+    aiInfo.value.lastError = aiInfo.value.apiKeySet ? '' : 'API 키 미설정'
+  } else if (provider === 'ollama') {
+    // ollama — 모델 목록 호출로 헬스체크 (lightweight)
+    try {
+      const r = await fetch('/api/v1/settings/ollama-models', { credentials: 'include' })
+      if (r.ok) {
+        const data = await r.json()
+        aiInfo.value.connected = (data && data.ok !== false)
+        aiInfo.value.lastError = aiInfo.value.connected ? '' : (data?.error || 'Ollama 응답 오류')
+      } else {
+        aiInfo.value.connected = false
+        aiInfo.value.lastError = 'HTTP ' + r.status
+      }
+    } catch (e) {
+      aiInfo.value.connected = false
+      aiInfo.value.lastError = 'Ollama 데몬 미동작'
+    }
+  } else {
+    aiInfo.value.connected = false
+    aiInfo.value.lastError = 'Provider 미설정'
+  }
+}
 
 /**
  * v10 #20 + v90.19: "+ New Job" 버튼 — 새 Job 시작 시 이전 연결 상태 + 위저드 상태 강제 초기화.
@@ -71,6 +205,40 @@ async function onLogout() {
   router.replace('/login')
 }
 
+// ════════════════════════════════════════════════════════════════
+// v95_p89_admin (2026-05-07 본부장님): 관리자 콘솔 새창
+// ════════════════════════════════════════════════════════════════
+function openAdminConsole() {
+  const url = '/admin/console'
+  const features = 'width=1280,height=800,scrollbars=yes,resizable=yes,location=no,menubar=no,toolbar=no'
+  const win = window.open(url, 'databridge_admin_console', features)
+  if (!win || win.closed) {
+    // 팝업 차단 시 — 같은 창에서 열기
+    window.location.href = url
+  } else {
+    win.focus()
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// v95_p103 (2026-05-09 본부장님): AI 버튼 클릭 → 관리자 콘솔 새창의 시스템 설정
+//   본부장님 짚으심: "지금은 메인창에서 창이 바껴" 
+//   처방: openAdminConsole 와 같은 패턴 — 같은 새창 (databridge_admin_console)
+//         재사용 + 시스템 설정 라우트로 진입. 이미 열려 있으면 focus 만.
+// ════════════════════════════════════════════════════════════════
+function openAiSettings() {
+  const url = '/admin/console/settings'
+  const features = 'width=1280,height=800,scrollbars=yes,resizable=yes,location=no,menubar=no,toolbar=no'
+  // 같은 window name 으로 — 관리자 콘솔이 이미 열려 있으면 그 창 재사용
+  const win = window.open(url, 'databridge_admin_console', features)
+  if (!win || win.closed) {
+    // 팝업 차단 시에만 같은 창 fallback
+    window.location.href = url
+  } else {
+    win.focus()
+  }
+}
+
 function getNow() {
   const d = new Date()
   const yyyy = d.getFullYear()
@@ -83,8 +251,17 @@ function getNow() {
 }
 const clock = ref(getNow())
 let timer = null
-onMounted(() => { timer = setInterval(() => { clock.value = getNow() }, 1000) })
-onUnmounted(() => clearInterval(timer))
+let aiTimer = null  // v95_p101: AI 헬스체크 주기
+onMounted(() => {
+  timer = setInterval(() => { clock.value = getNow() }, 1000)
+  // v95_p101: AI 엔진 정보 + 접속 상태 — 마운트 시 1회 + 60초마다
+  loadAiInfo()
+  aiTimer = setInterval(() => { loadAiInfo() }, 60000)
+})
+onUnmounted(() => {
+  clearInterval(timer)
+  if (aiTimer) clearInterval(aiTimer)
+})
 </script>
 <style scoped>
 .topbar{height:var(--topbar-h);flex-shrink:0;background:var(--bg-primary);border-bottom:0.5px solid var(--border-light);display:flex;align-items:center;padding:0 20px;gap:8px}
@@ -100,6 +277,32 @@ onUnmounted(() => clearInterval(timer))
 .tbtn:hover{background:var(--bg-secondary);color:var(--text-primary)}
 .tbtn-icon{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radius-sm);border:0.5px solid var(--border-mid);background:transparent;cursor:pointer;color:var(--text-tertiary);transition:all .12s}
 .tbtn-icon:hover{background:var(--bg-secondary);color:var(--text-primary)}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p89_admin: 텍스트 라벨 동반 아이콘 버튼                   */
+/*   본부장님 짚으심: "풍선 도움말 안 나와서 어떤 기능인지 모르겠다" */
+/*   처방: title 속성 + 시각적 텍스트 라벨 둘 다                 */
+/* ════════════════════════════════════════════════════════════ */
+.tbtn-labeled{
+  width:auto;
+  padding:4px 10px;
+  gap:6px;
+  font-size:11.5px;
+  color:var(--text-secondary);
+}
+.tbtn-labeled .tbtn-label{font-weight:500;letter-spacing:.2px}
+.tbtn-labeled:hover{color:var(--text-primary)}
+
+/* 관리자 콘솔 버튼 강조 색상 */
+.tbtn-admin{
+  border-color:rgba(239,68,68,.3);
+  color:#dc2626;
+}
+.tbtn-admin:hover{
+  background:rgba(239,68,68,.08);
+  border-color:rgba(239,68,68,.5);
+  color:#991b1b;
+}
 
 /* ── 사용자 메뉴 (RBAC 활성 시만 표시) ───────── */
 .user-menu{position:relative;margin-left:8px}
@@ -133,4 +336,69 @@ onUnmounted(() => clearInterval(timer))
   font-size:12px;color:var(--text-primary);font-family:var(--font);
 }
 .user-dropdown button:hover{background:var(--bg-secondary)}
+
+/* ════════════════════════════════════════════════════════════════ */
+/* v95_p101 (2026-05-09 본부장님): 상단 AI 엔진 + 접속 상태 버튼     */
+/*   본부장님 요청: 모양 자리 대체 + 접속 상태 표시                  */
+/* ════════════════════════════════════════════════════════════════ */
+.tbtn-ai-engine{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;height:28px;
+  border:0.5px solid var(--border-mid);
+  border-radius:var(--radius-sm);
+  background:transparent;cursor:pointer;
+  font-size:11.5px;color:var(--text-secondary);
+  transition:all .15s;
+  font-family:var(--font);
+}
+.tbtn-ai-engine:hover{
+  background:var(--bg-secondary);
+  color:var(--text-primary);
+}
+/* Provider 별 색상 강조 (좌측 작은 보더) */
+.tbtn-ai-engine.is-anthropic{
+  border-color:rgba(99,102,241,.35);
+}
+.tbtn-ai-engine.is-anthropic:hover{
+  background:rgba(99,102,241,.08);
+}
+.tbtn-ai-engine.is-ollama{
+  border-color:rgba(34,197,94,.35);
+}
+.tbtn-ai-engine.is-ollama:hover{
+  background:rgba(34,197,94,.08);
+}
+/* 연결 실패 시 — 빨강 강조 */
+.tbtn-ai-engine.is-disconnected{
+  border-color:rgba(226,75,74,.4);
+  color:#b91c1c;
+}
+.tbtn-ai-engine.is-disconnected:hover{
+  background:rgba(226,75,74,.08);
+}
+
+/* 접속 상태 점 */
+.ai-status-dot{
+  width:6px;height:6px;border-radius:50%;
+  display:inline-block;flex-shrink:0;
+}
+.ai-status-dot.ad-on{
+  background:#22c55e;
+  animation:ai-pulse 2s infinite;
+}
+.ai-status-dot.ad-off{
+  background:#e24b4a;
+}
+.ai-status-dot.ad-pending{
+  background:#94a3b8;
+  animation:ai-pulse-slow 1.5s infinite;
+}
+@keyframes ai-pulse{
+  0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(34,197,94,.4)}
+  50%{opacity:.7;box-shadow:0 0 0 3px rgba(34,197,94,0)}
+}
+@keyframes ai-pulse-slow{
+  0%,100%{opacity:1}
+  50%{opacity:.4}
+}
 </style>

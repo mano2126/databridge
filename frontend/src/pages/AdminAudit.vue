@@ -271,6 +271,9 @@
         <!-- 필드별 해설 -->
         <div class="section-label">이 이벤트가 의미하는 것</div>
         <table class="explain-table">
+          <!-- v95_p32 본질 1 (2026-05-04 본부장님): HTML 표준 위반 처방
+               <table> 직속 자식은 <tbody>/<thead>/<tfoot> 만 허용 (Vite 경고 4건+) -->
+          <tbody>
           <tr>
             <th>무엇을 했나</th>
             <td>
@@ -330,6 +333,7 @@
               <span v-else class="mute-small">(해시 체인 이전 레거시 레코드)</span>
             </td>
           </tr>
+          </tbody>
         </table>
 
         <div class="modal-actions">
@@ -345,6 +349,8 @@
         <h3>🔗 해시 체인 정보</h3>
         <p class="muted">이 레코드의 해시 체인 연결 상태입니다. 체인이 깨졌다면 즉시 보안팀에 보고하세요.</p>
         <table class="hash-table">
+          <!-- v95_p32 본질 1 (2026-05-04 본부장님): HTML 표준 위반 처방 -->
+          <tbody>
           <tr>
             <th>레코드 ID</th>
             <td><code>{{ hashInfo.id }}</code></td>
@@ -365,6 +371,7 @@
             <th>시각</th>
             <td>{{ fmt(hashInfo.ts) }}</td>
           </tr>
+          </tbody>
         </table>
         <div class="modal-actions">
           <button class="btn-primary" @click="hashInfo=null">닫기</button>

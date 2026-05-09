@@ -155,16 +155,67 @@
 
     <template v-else>
 
-      <!-- ── KPI 카드 ── -->
-      <div class="kpi-grid">
+      <!-- ════════════════════════════════════════════════════════════ -->
+      <!-- v95_p91_compact (2026-05-08 본부장님 본질 처방):                -->
+      <!-- "위 카드 줄이고 진행 중인 리스트 더 크게"                       -->
+      <!--                                                                  -->
+      <!-- 상단 카드:                                                       -->
+      <!--   - 펼침 모드 (기본): 기존 5개 카드 그대로                        -->
+      <!--   - 접힘 모드 (compact): 진행 중인 단계 + 진행률만 깜빡거림       -->
+      <!--   - 토글 버튼으로 전환                                            -->
+      <!-- ════════════════════════════════════════════════════════════ -->
+      
+      <!-- 컴팩트 진행 바 (접힘 모드에서만 표시) -->
+      <div v-if="!kpiExpanded" class="kpi-compact-bar">
+        <button class="kpi-toggle-btn" @click="kpiExpanded = true"
+                title="상세 보기 (펼치기)">
+          ▼
+        </button>
+        <span class="kpi-compact-status" :class="'compact-'+job.status">
+          <span class="kpi-compact-dot" :class="job.status"></span>
+          {{ statusLabel(job.status) }}
+        </span>
+        
+        <!-- 현재 진행 중인 단계 (깜빡임) -->
+        <span v-if="!isCdc && job.status==='running' && currentPhaseLabel"
+              class="kpi-compact-phase">
+          <span class="kpi-compact-blink">⟳</span>
+          {{ currentPhaseLabel }}
+        </span>
+        
+        <!-- 진행률 -->
+        <span class="kpi-compact-progress">
+          <span class="kpi-compact-pct">{{ totalProgressPct }}%</span>
+          <div class="kpi-compact-bar-track">
+            <div class="kpi-compact-bar-fill" :style="`width:${totalProgressPct}%`"></div>
+          </div>
+        </span>
+        
+        <!-- 현재 진행 중인 객체 타입 (있을 때만) -->
+        <span v-if="currentObjectStatus" class="kpi-compact-obj">
+          {{ currentObjectStatus }}
+        </span>
+        
+        <!-- 오류 (있을 때만) -->
+        <span v-if="hasAnyError" class="kpi-compact-err"
+              @click="$emit('open-errors') || scrollToErrors()">
+          ⚠ 오류 {{ errorTotalCount }}건
+        </span>
+      </div>
+      
+      <!-- ── KPI 카드 (펼침 모드에서만 표시) ── -->
+      <div v-if="kpiExpanded" class="kpi-section-wrapper">
+        <button class="kpi-toggle-btn kpi-toggle-collapse" @click="kpiExpanded = false"
+                title="접기 (간단히 보기)">
+          ▲ 접기
+        </button>
+        <div class="kpi-grid">
         <div class="kpi-card" :class="'kpi-'+job.status">
           <div class="kpi-header">
             <span class="kpi-label">상태</span>
             <span class="kpi-dot" :class="job.status"></span>
           </div>
-          <div class="kpi-sub" style="font-size:.72rem;color:var(--text-tertiary);margin-bottom:6px">
-            {{ job.src_db?.toUpperCase() }} → {{ job.tgt_db?.toUpperCase() }}
-          </div>
+          <!-- v92p9 (2026-04-30): MSSQL→MYSQL 줄 제거 (헤더에 이미 표시됨) -->
           <!-- 단계별 색깔 버튼 (진행중/완료, CDC는 표시 안함) -->
           <div v-if="!isCdc && (job.status==='running'||job.status==='completed')" class="phase-steps">
             <!-- 1. FK/트리거 비활성화 -->
@@ -185,37 +236,74 @@
               <span class="ps-icon">{{ phaseStepIcon('OBJECTS') }}</span>
               <span class="ps-label">SP·FN·VW·TR 이관</span>
             </div>
-            <!-- 4. FK/트리거 복원 -->
+            <!-- v92p12: 4. AI DBA 권고 적용 -->
+            <div v-if="hasAdvisorDecisions" class="phase-step"
+                 :class="phaseStepClass('ADVISOR_APPLY')">
+              <span class="ps-icon">{{ phaseStepIcon('ADVISOR_APPLY') }}</span>
+              <span class="ps-label">
+                🤖 AI 권고 적용
+                <span v-if="advisorApplyProgress" class="ps-sub">
+                  ({{ advisorApplyProgress.done }}/{{ advisorApplyProgress.total }}<span
+                    v-if="advisorApplyProgress.failed > 0"
+                    style="color:#dc2626;font-weight:700"> · {{ advisorApplyProgress.failed }} 실패</span>)
+                </span>
+              </span>
+            </div>
+            <!-- 5. FK/트리거 복원 -->
             <div class="phase-step"
                  :class="phaseStepClass('FK_RESTORE')">
               <span class="ps-icon">{{ phaseStepIcon('FK_RESTORE') }}</span>
               <span class="ps-label">FK·트리거 복원</span>
             </div>
           </div>
+          <!-- v92p6: FK_DISABLE 단계 60초 이상 정체 시 경고 -->
+          <div v-if="!isCdc && job.status==='running' && job.phase==='FK_DISABLE' && phaseStuckSec >= 60"
+               class="phase-stuck-warn">
+            <span class="psw-ico">⚠</span>
+            <span class="psw-msg">
+              FK 비활성화 단계 {{ phaseStuckSec }}초 진행 중 — 타겟 DB 응답 지연/락 가능성
+            </span>
+            <button class="psw-btn" @click="cancelStuckJob">⏹ 중단</button>
+          </div>
           <!-- CDC 단순 상태 표시 -->
           <div v-if="isCdc && (job.status==='running'||job.status==='completed')" class="cdc-phase-simple">
             <span class="cdc-phase-ico">↻</span>
             <span class="cdc-phase-txt">변경분 이관 {{ job.status==='completed' ? '완료' : '진행 중' }}</span>
           </div>
-          <div v-else-if="!isCdc" class="kpi-value status-text" :class="job.status">{{ statusLabel(job.status) }}</div>
-          <div v-else class="kpi-value status-text" :class="job.status">{{ statusLabel(job.status) }}</div>
-          
-          <!-- v90.67: 상태 카드 하단 — 테이블 / 객체 분리 진행률 -->
-          <div v-if="!isCdc && (job.table_total > 0 || objectsProgress)" class="phase-counts">
-            <div v-if="job.table_total > 0" class="phase-count-row">
-              <span class="phase-count-icon">⊞</span>
-              <span class="phase-count-label">테이블</span>
-              <span class="phase-count-val" :class="{done: (job.table_done||0) === job.table_total}">{{ job.table_done||0 }} / {{ job.table_total }}</span>
-            </div>
-            <div v-if="objectsProgress" class="phase-count-row">
-              <span class="phase-count-icon">ƒ</span>
-              <span class="phase-count-label">객체</span>
-              <span class="phase-count-val" :class="{done: objectsProgress.done === objectsProgress.total, fail: objectsProgress.failed > 0}">
-                {{ objectsProgress.done }} / {{ objectsProgress.total }}
-                <span v-if="objectsProgress.failed > 0" class="phase-count-fail">({{ objectsProgress.failed }} 오류)</span>
-              </span>
-            </div>
+          <!-- v92p9: 진행중 라벨 (깜박임) + 객체 카운트 인라인 -->
+          <div v-else-if="!isCdc" class="kpi-status-row">
+            <span class="kpi-value status-text" :class="[job.status, {'status-blink': job.status==='running'}]">
+              {{ statusLabel(job.status) }}
+            </span>
+            <span v-if="objectsProgress" class="kpi-obj-inline"
+                  :class="{fail: objectsProgress.failed > 0,
+                           done: objectsProgress.done === objectsProgress.total}">
+              <span class="koi-icon">ƒ</span>
+              <span class="koi-val">{{ objectsProgress.done }} / {{ objectsProgress.total }}</span>
+              <span v-if="objectsProgress.failed > 0" class="koi-fail">({{ objectsProgress.failed }} 오류)</span>
+            </span>
+            <!-- v92p13 (2026-04-30): 테이블 카운트를 진행중 옆으로 이동 (UI 줄 수 절약) -->
+            <span v-if="!isCdc && job.table_total > 0" class="kpi-tbl-inline"
+                  :class="{done: (job.table_done||0) === job.table_total}"
+                  title="이관 완료 테이블 / 전체 테이블">
+              <span class="kti-icon">⊞</span>
+              <span class="kti-val">{{ job.table_done||0 }} / {{ job.table_total }}</span>
+            </span>
+            <!-- v92p11 (2026-04-30): AI 자동이관 ON/OFF 배지
+                 v92p15 (2026-04-30): 클릭으로 실시간 토글 가능 -->
+            <button class="kpi-ai-toggle" :class="{ on: job.ai_auto_retry }"
+                  type="button"
+                  :disabled="aiToggleBusy || !['running','paused'].includes(job.status)"
+                  @click="toggleAiAutoRetry"
+                  :title="job.ai_auto_retry
+                    ? `AI 자동 재이관 활성 — 객체 실패 시 자동 재시도 (최대 ${job.ai_retry_count||2}회). 클릭하여 OFF`
+                    : `AI 자동 재이관 비활성 — 실패 시 멈춤 (수동 재이관 필요). 클릭하여 ON`">
+              <span class="kat-ico">🤖</span>
+              <span class="kat-txt">자동이관 {{ job.ai_auto_retry ? 'ON' : 'OFF' }}</span>
+              <span v-if="aiToggleBusy" class="kat-spinner">⟳</span>
+            </button>
           </div>
+          <div v-else class="kpi-value status-text" :class="job.status">{{ statusLabel(job.status) }}</div>
         </div>
 
         <div class="kpi-card kpi-prog-card">
@@ -225,50 +313,63 @@
           </div>
           <div class="kpi-prog-track"><div class="kpi-prog-fill" :style="{width:effectiveProgress+'%'}"></div></div>
           <div class="kpi-sub">테이블 {{ job.table_done||0 }} / {{ job.table_total||0 }} 완료</div>
-          
-          <!-- v90.24: 객체별 진행 상태 (SP/Function/View/Trigger) -->
-          <div v-if="objectsProgress" class="kpi-obj-row">
-            <span v-if="objectsProgress.function.total > 0" class="kpi-obj-item"
-                  :class="{ 'obj-running': objectsProgress.function.running > 0,
-                            'obj-done': objectsProgress.function.done === objectsProgress.function.total,
-                            'obj-failed': objectsProgress.function.failed > 0 }"
-                  :title="`Function: ${objectsProgress.function.done}/${objectsProgress.function.total} 완료${objectsProgress.function.running ? ', ' + objectsProgress.function.running + ' 진행 중' : ''}${objectsProgress.function.failed ? ', ' + objectsProgress.function.failed + ' 실패' : ''}`">
-              <span class="kpi-obj-icon">ƒ</span>
-              <span class="kpi-obj-text">함수 {{ objectsProgress.function.done }}/{{ objectsProgress.function.total }}</span>
-              <span v-if="objectsProgress.function.running > 0" class="kpi-obj-spinner">⟳</span>
-              <span v-if="objectsProgress.function.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.function.failed }}</span>
-            </span>
-            <span v-if="objectsProgress.procedure.total > 0" class="kpi-obj-item"
-                  :class="{ 'obj-running': objectsProgress.procedure.running > 0,
-                            'obj-done': objectsProgress.procedure.done === objectsProgress.procedure.total,
-                            'obj-failed': objectsProgress.procedure.failed > 0 }"
-                  :title="`Procedure: ${objectsProgress.procedure.done}/${objectsProgress.procedure.total} 완료${objectsProgress.procedure.running ? ', ' + objectsProgress.procedure.running + ' 진행 중' : ''}${objectsProgress.procedure.failed ? ', ' + objectsProgress.procedure.failed + ' 실패' : ''}`">
-              <span class="kpi-obj-icon">⚙</span>
-              <span class="kpi-obj-text">SP {{ objectsProgress.procedure.done }}/{{ objectsProgress.procedure.total }}</span>
-              <span v-if="objectsProgress.procedure.running > 0" class="kpi-obj-spinner">⟳</span>
-              <span v-if="objectsProgress.procedure.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.procedure.failed }}</span>
-            </span>
-            <span v-if="objectsProgress.view.total > 0" class="kpi-obj-item"
-                  :class="{ 'obj-running': objectsProgress.view.running > 0,
-                            'obj-done': objectsProgress.view.done === objectsProgress.view.total,
-                            'obj-failed': objectsProgress.view.failed > 0 }"
-                  :title="`View: ${objectsProgress.view.done}/${objectsProgress.view.total} 완료${objectsProgress.view.running ? ', ' + objectsProgress.view.running + ' 진행 중' : ''}${objectsProgress.view.failed ? ', ' + objectsProgress.view.failed + ' 실패' : ''}`">
-              <span class="kpi-obj-icon">👁</span>
-              <span class="kpi-obj-text">View {{ objectsProgress.view.done }}/{{ objectsProgress.view.total }}</span>
-              <span v-if="objectsProgress.view.running > 0" class="kpi-obj-spinner">⟳</span>
-              <span v-if="objectsProgress.view.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.view.failed }}</span>
-            </span>
-            <span v-if="objectsProgress.trigger.total > 0" class="kpi-obj-item"
-                  :class="{ 'obj-running': objectsProgress.trigger.running > 0,
-                            'obj-done': objectsProgress.trigger.done === objectsProgress.trigger.total,
-                            'obj-failed': objectsProgress.trigger.failed > 0 }"
-                  :title="`Trigger: ${objectsProgress.trigger.done}/${objectsProgress.trigger.total} 완료${objectsProgress.trigger.running ? ', ' + objectsProgress.trigger.running + ' 진행 중' : ''}${objectsProgress.trigger.failed ? ', ' + objectsProgress.trigger.failed + ' 실패' : ''}`">
-              <span class="kpi-obj-icon">⚡</span>
-              <span class="kpi-obj-text">트리거 {{ objectsProgress.trigger.done }}/{{ objectsProgress.trigger.total }}</span>
-              <span v-if="objectsProgress.trigger.running > 0" class="kpi-obj-spinner">⟳</span>
-              <span v-if="objectsProgress.trigger.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.trigger.failed }}</span>
-            </span>
-          </div>
+
+          <!-- v95_p47 (2026-05-05 본부장님): 객체 진행바 분리 + 한 줄 표시 -->
+          <template v-if="objectsOverallProgress">
+            <div class="kpi-obj-divider"></div>
+            <!-- 객체 진행바 (테이블 진행바와 시각 구분) -->
+            <div class="kpi-obj-prog-header">
+              <span class="kpi-obj-prog-label">객체 변환</span>
+              <span class="kpi-obj-prog-badge">{{ objectsOverallProgress.pct }}%</span>
+            </div>
+            <div class="kpi-obj-prog-track">
+              <div class="kpi-obj-prog-fill"
+                   :class="{
+                     'obj-prog-failed': objectsOverallProgress.failed > 0,
+                     'obj-prog-done': objectsOverallProgress.done === objectsOverallProgress.total
+                   }"
+                   :style="{width: objectsOverallProgress.pct + '%'}"></div>
+            </div>
+            <!-- 4개 카운트 한 줄 (FN/SP/VW/TR) -->
+            <div class="kpi-obj-row kpi-obj-row-compact">
+              <span v-if="objectsProgress.function.total > 0" class="kpi-obj-item kpi-obj-item-compact"
+                    :class="{ 'obj-running': objectsProgress.function.running > 0,
+                              'obj-done': objectsProgress.function.done === objectsProgress.function.total,
+                              'obj-failed': objectsProgress.function.failed > 0 }"
+                    :title="`Function: ${objectsProgress.function.done}/${objectsProgress.function.total} 완료`">
+                <span class="kpi-obj-icon">ƒ</span>
+                <span class="kpi-obj-text">FN {{ objectsProgress.function.done }}/{{ objectsProgress.function.total }}</span>
+                <span v-if="objectsProgress.function.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.function.failed }}</span>
+              </span>
+              <span v-if="objectsProgress.procedure.total > 0" class="kpi-obj-item kpi-obj-item-compact"
+                    :class="{ 'obj-running': objectsProgress.procedure.running > 0,
+                              'obj-done': objectsProgress.procedure.done === objectsProgress.procedure.total,
+                              'obj-failed': objectsProgress.procedure.failed > 0 }"
+                    :title="`Procedure: ${objectsProgress.procedure.done}/${objectsProgress.procedure.total} 완료`">
+                <span class="kpi-obj-icon">⚙</span>
+                <span class="kpi-obj-text">SP {{ objectsProgress.procedure.done }}/{{ objectsProgress.procedure.total }}</span>
+                <span v-if="objectsProgress.procedure.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.procedure.failed }}</span>
+              </span>
+              <span v-if="objectsProgress.view.total > 0" class="kpi-obj-item kpi-obj-item-compact"
+                    :class="{ 'obj-running': objectsProgress.view.running > 0,
+                              'obj-done': objectsProgress.view.done === objectsProgress.view.total,
+                              'obj-failed': objectsProgress.view.failed > 0 }"
+                    :title="`View: ${objectsProgress.view.done}/${objectsProgress.view.total} 완료`">
+                <span class="kpi-obj-icon">👁</span>
+                <span class="kpi-obj-text">VW {{ objectsProgress.view.done }}/{{ objectsProgress.view.total }}</span>
+                <span v-if="objectsProgress.view.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.view.failed }}</span>
+              </span>
+              <span v-if="objectsProgress.trigger.total > 0" class="kpi-obj-item kpi-obj-item-compact"
+                    :class="{ 'obj-running': objectsProgress.trigger.running > 0,
+                              'obj-done': objectsProgress.trigger.done === objectsProgress.trigger.total,
+                              'obj-failed': objectsProgress.trigger.failed > 0 }"
+                    :title="`Trigger: ${objectsProgress.trigger.done}/${objectsProgress.trigger.total} 완료`">
+                <span class="kpi-obj-icon">⚡</span>
+                <span class="kpi-obj-text">TR {{ objectsProgress.trigger.done }}/{{ objectsProgress.trigger.total }}</span>
+                <span v-if="objectsProgress.trigger.failed > 0" class="kpi-obj-fail-badge">{{ objectsProgress.trigger.failed }}</span>
+              </span>
+            </div>
+          </template>
           <!-- ── ETA 블록 ── -->
           <div v-if="job.status==='running'" class="eta-block">
             <div class="eta-divider"></div>
@@ -358,6 +459,7 @@
           </div>
         </div>
       </div>
+      </div>  <!-- /v95_p91_compact: kpi-section-wrapper 닫기 -->
 
       <!-- ── 현재 진행 중 ── -->
       <div v-if="job.status==='running'&&job.current_table" class="current-bar">
@@ -366,16 +468,28 @@
           <span class="cur-name">{{ job.current_table }}</span>
         </div>
         <div class="cur-mid">
-          <div class="cur-track"><div class="cur-fill" :style="{width:tableProgress+'%'}"></div></div>
+          <!-- v92p12: ADVISOR_APPLY 중이면 현재 권고명 표시 -->
+          <div v-if="job.phase==='ADVISOR_APPLY' && advisorApplyProgress?.current"
+               class="adv-current">{{ advisorApplyProgress.current }}</div>
+          <div v-else class="cur-track"><div class="cur-fill" :style="{width:tableProgress+'%'}"></div></div>
         </div>
         <div class="cur-right">
-          <span class="cur-pct">{{ tableProgress }}%</span>
-          <span class="cur-rows">{{ fmtNum(job.current_table_rows_done) }} / {{ fmtNum(job.current_table_rows_total) }} rows</span>
-          <!-- v9 패치 #34: 현재 테이블 잔여 시간 -->
-          <span v-if="currentTableEta" class="cur-eta" :title="'현재 테이블 완료까지'">
-            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" style="width:10px;height:10px;vertical-align:-1px;margin-right:3px"><circle cx="6" cy="6" r="5"/><polyline points="6,3 6,6 8,7"/></svg>
-            남은 {{ currentTableEta }}
-          </span>
+          <!-- v92p12: 권고 적용 중이면 카운트, 그 외엔 % + rows -->
+          <template v-if="job.phase==='ADVISOR_APPLY' && advisorApplyProgress">
+            <span class="cur-pct">{{ advisorApplyProgress.done }} / {{ advisorApplyProgress.total }}</span>
+            <span v-if="advisorApplyProgress.failed > 0" class="cur-rows" style="color:#dc2626">
+              {{ advisorApplyProgress.failed }} 실패
+            </span>
+          </template>
+          <template v-else>
+            <span class="cur-pct">{{ tableProgress }}%</span>
+            <span class="cur-rows">{{ fmtNum(job.current_table_rows_done) }} / {{ fmtNum(job.current_table_rows_total) }} rows</span>
+            <!-- v9 패치 #34: 현재 테이블 잔여 시간 -->
+            <span v-if="currentTableEta" class="cur-eta" :title="'현재 테이블 완료까지'">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" style="width:10px;height:10px;vertical-align:-1px;margin-right:3px"><circle cx="6" cy="6" r="5"/><polyline points="6,3 6,6 8,7"/></svg>
+              남은 {{ currentTableEta }}
+            </span>
+          </template>
         </div>
       </div>
 
@@ -1068,6 +1182,7 @@ import { useAppStore }       from '@/store/appStore.js'
 import { useMonitorStore }   from '@/store/monitorStore.js'  // v10 #22
 import ConnectPanel          from '@/components/common/ConnectPanel.vue'
 import PageHeader            from '@/components/layout/PageHeader.vue'
+import axios                 from 'axios'   // v92p6: stuck job 중단용
 
 const conn = useConnectorStore()
 const app  = useAppStore()
@@ -1122,6 +1237,27 @@ const jobs = ref([]); const job = ref(null); const selectedJobId = ref('')
 const jobPickerOpen  = ref(false)
 const jpSortKey      = ref('created_at')  // 기본: 최신순
 const jpSortDir      = ref('desc')
+
+// ════════════════════════════════════════════════════════════════
+// v95_p91_compact (2026-05-08 본부장님 본질 처방):
+// "위 카드 줄이고 진행 중인 리스트 더 크게 보이게"
+//
+// kpiExpanded: 상단 카드 펼침/접힘 (localStorage 저장)
+// 기본값: false (접힘) — 본부장님 비전 그대로 진행 리스트 우선
+// ════════════════════════════════════════════════════════════════
+const kpiExpanded = ref(
+  // localStorage 에서 복원, 없으면 기본 false (접힘)
+  (() => {
+    try {
+      const saved = localStorage.getItem('jobMonitor.kpiExpanded')
+      return saved === null ? false : saved === 'true'
+    } catch { return false }
+  })()
+)
+// 변경 시 자동 저장
+watch(kpiExpanded, (val) => {
+  try { localStorage.setItem('jobMonitor.kpiExpanded', String(val)) } catch {}
+})
 
 // 드롭다운 정렬 토글
 function toggleJpSort(key) {
@@ -1360,7 +1496,67 @@ const objectsProgress = computed(() => {
 })
 
 // ════════════════════════════════════════════════════════════════
-// v90.65 (2026-04-28): 객체 변환 단계도 전체 진행률에 반영
+// v95_p91_compact (2026-05-08 본부장님): 컴팩트 모드 헬퍼
+// ════════════════════════════════════════════════════════════════
+// statusLabel() 은 line 2212 의 기존 함수 사용 (중복 정의 회피)
+
+// 현재 진행 중인 단계 라벨 (running 상태에서만)
+const currentPhaseLabel = computed(() => {
+  const j = job.value
+  if (!j || j.status !== 'running') return ''
+  const phase = j.phase || ''
+  const phaseMap = {
+    'FK_DISABLE':     'FK·트리거 비활성화 중',
+    'DATA_MIGRATE':   '데이터 이관 중',
+    'OBJECT_CONVERT': '객체 변환 중 (SP/FN/VW/TR)',
+    'FK_RESTORE':     'FK·트리거 복원 중',
+    'CDC_RUNNING':    'CDC 변경분 이관 중',
+    'ADVISOR_APPLY':  'AI 권고 적용 중',
+  }
+  return phaseMap[phase] || (phase ? `${phase} 진행 중` : '')
+})
+
+// 전체 진행률 (effectiveProgress 와 동일)
+const totalProgressPct = computed(() => {
+  try {
+    return Math.round(effectiveProgress.value || 0)
+  } catch {
+    return Math.round(safeProgress.value || 0)
+  }
+})
+
+// 현재 객체 변환 상태 (객체 변환 중일 때만)
+const currentObjectStatus = computed(() => {
+  const j = job.value
+  if (!j || j.status !== 'running' || j.phase !== 'OBJECT_CONVERT') return ''
+  const op = objectsProgress.value
+  if (!op) return ''
+  for (const key of ['function', 'procedure', 'view', 'trigger']) {
+    const cat = op[key]
+    if (cat && cat.done < cat.total) {
+      const labels = { function: 'FN', procedure: 'SP', view: 'VW', trigger: 'TR' }
+      return `${labels[key]} ${cat.done}/${cat.total}`
+    }
+  }
+  return ''
+})
+
+// 오류 총 건수
+const errorTotalCount = computed(() => {
+  const j = job.value
+  if (!j) return 0
+  const op = objectsProgress.value
+  return (op?.failed || 0) + (j.rows_error || 0)
+})
+
+// 오류 상세로 스크롤
+function scrollToErrors() {
+  const el = document.querySelector('.kpi-error') || document.querySelector('[data-errors]')
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+// ════════════════════════════════════════════════════════════════
+
 //   본부장님 호소: "전체 진행 상태바 안 움직여"
 //   원인: backend job.progress 는 테이블 이관 단계만 추적.
 //         테이블 다 끝나고 객체 변환 (FN/SP/VW/TR) 진행 중인데도
@@ -1370,19 +1566,47 @@ const objectsProgress = computed(() => {
 // safeProgress 를 그대로 두고 별도 effectiveProgress 만들어 template 에서 우선 사용.
 // 이렇게 하면 다른 곳 (jobs panel 등) 에서 safeProgress 쓰는 곳 영향 없음.
 // ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 const effectiveProgress = computed(() => {
   const backend = safeProgress.value
+  const j = job.value
+  // v95_p47 (2026-05-05 본부장님): 전체 진행 = 테이블 단계만 표시 (객체는 별도 진행바)
+  //   본부장님 호소: "테이블 71/71 완료인데 99.9% — 100% 가 맞다"
+  //                 "스테이터스바 따로 하나 만들어서 객체 진행 보여달라"
+  //   본질: 전체 진행 = 테이블 이관 단계, 객체 변환은 별도 진행바로 분리
+  //   처방: 테이블 모두 완료 시 100% 강제, 객체는 objectsOverallProgress 진행바
+  if (j && j.table_total > 0 && (j.table_done || 0) >= j.table_total) {
+    // 테이블 모두 완료 → 100% 고정 (객체 진행은 별도 진행바)
+    return 100
+  }
   // backend 가 충분히 의미있으면 그대로
   if (backend > 0) return backend
-  
-  // backend 가 0 인데 객체 변환 중이면 객체 진행률 사용
+
+  // backend 가 0 인데 객체 변환 중이면 객체 진행률 사용 (테이블 없는 잡)
   const op = objectsProgress.value
-  if (op && op.total > 0) {
-    const processedAll = op.done + op.failed  // 시도한 모든 객체
+  if (op && op.total > 0 && (!j || !j.table_total || j.table_total === 0)) {
+    const processedAll = op.done + op.failed
     return Math.min(100, Math.round((processedAll / op.total) * 100 * 10) / 10)
   }
   
   return 0
+})
+
+// v95_p47 (2026-05-05 본부장님): 객체 전체 진행률 (별도 진행바용)
+//   본부장님 호소: "객체는 시간 말고 단순 상태바로 따로 보여달라"
+//   처방: 객체 (FN/SP/VW/TR) 의 (done + failed) / total * 100
+const objectsOverallProgress = computed(() => {
+  const op = objectsProgress.value
+  if (!op || op.total === 0) return null
+  const processed = op.done + op.failed
+  return {
+    pct: Math.round((processed / op.total) * 100 * 10) / 10,
+    done: op.done,
+    failed: op.failed,
+    running: op.running,
+    total: op.total,
+    waiting: op.total - processed - op.running,
+  }
 })
 
 // ── ETA 포맷 공통 함수 ──────────────────────────────────────────
@@ -1661,7 +1885,38 @@ function setSort(key) {
 
 const allItems = computed(()=>{
   if(!job.value) return []
-  return Object.entries(job.value.item_statuses||{}).map(([name,v])=>({name,...v}))
+  // v92p16 (2026-04-30): 유령 항목 필터링
+  //   본부장님 호소: 빈 ○ 38개가 표시됨
+  //   원인: 백엔드가 src_bare 와 tgt_table 두 키로 같은 테이블을 등록 (이전 잔재).
+  //   안전망: status/type 도 없고 시작/완료 시간도 없는 항목은 표시 제외.
+  //          (백엔드 v92p16 패치로 신규 Job 은 자동 해소되지만, 기존 Job 화면 보호)
+  //
+  // v95_p17 (2026-05-03): 첫 시도 — return false (type 만 있어도 제외)
+  //   → 본부장님 환경에 미작동
+  //
+  // v95_p22 (2026-05-03): 진짜 본질 확정 — 본부장님 콘솔 진단 결과:
+  //   Person_AddressType → {checkpoint, rows_src:6, rows_tgt:6, rows_total:6, speed:17}
+  //   - rows 데이터는 있음 (이관은 됨)
+  //   - 그러나 type/status/started_at/finished_at 모두 없음 ← schema_name 중복 잔재!
+  //   - 이미 위에 bare name (AddressType) 으로 정상 표시됨
+  //   - 화면에 ○ 로 보이는 이유: type 필드 없어서 아이콘 결정 안 됨
+  //
+  // 본질 처방: type 없으면 schema_name 중복 잔재로 판단 → 제외
+  //   (본부장님 v95_p15 의 양방향 등록 처방 — 95% 도달 핵심 — 은 그대로 유지.
+  //    프론트 가드만 추가로 정제.)
+  return Object.entries(job.value.item_statuses||{})
+    .map(([name,v])=>({name,...v}))
+    .filter(item => {
+      // v95_p22: type 필드가 없으면 schema_name 중복 잔재 → 무조건 제외
+      //   (정상 항목은 백엔드가 type='table'/'function'/... 항상 설정함)
+      if (!item.type) return false
+      // 이하 v95_p17 가드 (type 있는 항목 중 의미 있는 것만 표시)
+      if (item.status && item.status !== '') return true
+      if (item.started_at || item.finished_at) return true
+      if (item.rows || item.rows_total || item.rows_src || item.rows_tgt) return true
+      // type 만 있고 나머지 다 비어있으면 → pending 객체 (정상 표시)
+      return true
+    })
 })
 const filteredItems = computed(()=>{
   let list = allItems.value
@@ -1944,8 +2199,104 @@ function progLabel(item){
 function statusLabel(s){ return {running:'진행중',done:'완료',pending:'대기',error:'오류',completed:'완료',idle:'대기',aborted:'중단'}[s]??s }
 
 // phase 순서 정의
-const PHASE_ORDER = ['FK_DISABLE','RUNNING','OBJECTS','FK_RESTORE','DONE']
+// v92p12 (2026-04-30): ADVISOR_APPLY 단계 추가 — AI DBA 권고 자동 적용
+const PHASE_ORDER = ['FK_DISABLE','RUNNING','OBJECTS','ADVISOR_APPLY','FK_RESTORE','DONE']
 const isCdc = computed(() => job.value?.job_type === 'cdc')
+
+// v92p12: AI DBA 권고가 적용 결정된 게 있는지 (단계 표시 여부)
+const hasAdvisorDecisions = computed(() => {
+  const decs = job.value?.advisor_decisions || []
+  return decs.some(d => d?.decision === 'applied' || d?.decision === 'edited')
+})
+// v92p12: 권고 적용 단계 진행률 (백엔드 self.job["advisor_apply"] 미러)
+const advisorApplyProgress = computed(() => {
+  const ap = job.value?.advisor_apply
+  if (!ap || !ap.total) return null
+  return {
+    total:  ap.total || 0,
+    done:   ap.done || 0,
+    failed: ap.failed || 0,
+    current: ap.current || '',
+  }
+})
+
+// v92p6 (2026-04-30): phase 정체 감지 — FK_DISABLE 등에서 stuck 되는지 카운트
+const phaseStuckSec = ref(0)
+let _phaseStuckTimer = null
+let _lastPhase = null
+let _phaseStartedAt = Date.now()
+function _trackPhaseStuck() {
+  const cur = job.value?.phase || ''
+  if (cur !== _lastPhase) {
+    _lastPhase = cur
+    _phaseStartedAt = Date.now()
+    phaseStuckSec.value = 0
+    return
+  }
+  if (job.value?.status === 'running') {
+    phaseStuckSec.value = Math.floor((Date.now() - _phaseStartedAt) / 1000)
+  } else {
+    phaseStuckSec.value = 0
+  }
+}
+onMounted(() => {
+  _phaseStuckTimer = setInterval(_trackPhaseStuck, 1000)
+})
+onUnmounted(() => {
+  if (_phaseStuckTimer) { clearInterval(_phaseStuckTimer); _phaseStuckTimer = null }
+})
+
+async function cancelStuckJob() {
+  if (!job.value?.id) return
+  if (!confirm(`Job ${job.value.id.substring(0,8)} 을 중단할까요? (FK 단계 stuck)`)) return
+  try {
+    await axios.post(`/api/v1/jobs/${job.value.id}/stop`)
+    app.notify('중단 요청 전송됨', 'success')
+  } catch (e) {
+    app.notify('중단 실패: ' + e.message, 'error')
+  }
+}
+
+// v92p15 (2026-04-30): AI 자동 재이관 실시간 토글
+//   본부장님 호소: "JobMonitor 의 자동이관 배지 클릭이 안 된다"
+//   진행 중인 Job 의 ai_auto_retry 플래그를 즉시 변경 → 다음 객체 이관부터 반영.
+const aiToggleBusy = ref(false)
+async function toggleAiAutoRetry() {
+  if (!job.value?.id) return
+  if (aiToggleBusy.value) return
+  if (!['running','paused'].includes(job.value.status)) {
+    app.notify('진행 중이거나 일시정지된 Job 만 토글 가능합니다', 'warn')
+    return
+  }
+  const newVal = !job.value.ai_auto_retry
+  // 사용자 명시 확인 (실수 방지)
+  const confirmMsg = newVal
+    ? '🤖 AI 자동 재이관을 켤까요?\n\n실패한 객체를 백엔드가 자동으로 AI 재시도합니다.\n다음 객체 이관부터 즉시 반영됩니다.'
+    : '🤖 AI 자동 재이관을 끌까요?\n\n앞으로 실패한 객체는 멈춥니다.\n수동으로 🤖 AI 재이관 버튼을 눌러야 재시도됩니다.'
+  if (!confirm(confirmMsg)) return
+
+  aiToggleBusy.value = true
+  try {
+    const { data } = await axios.patch(
+      `/api/v1/jobs/${job.value.id}/ai-auto-retry`,
+      { enabled: newVal }
+    )
+    // 즉시 화면 반영 (서버 응답 기다리지 않음, polling 으로도 결국 갱신됨)
+    job.value.ai_auto_retry = data.ai_auto_retry
+    if (data.ai_retry_count != null) job.value.ai_retry_count = data.ai_retry_count
+    app.notify(
+      `🤖 AI 자동 재이관 ${newVal ? 'ON' : 'OFF'} 적용됨`,
+      'success'
+    )
+  } catch (e) {
+    app.notify(
+      'AI 자동 재이관 토글 실패: ' + (e.response?.data?.detail || e.message),
+      'error'
+    )
+  } finally {
+    aiToggleBusy.value = false
+  }
+}
 
 function phaseStepClass(step) {
   const phase = job.value?.phase || 'INIT'
@@ -3030,6 +3381,163 @@ async function doRemig(item) {
 /* v90.67: 상태 카드 키우고 (1.1→1.4fr) 우측 KPI 카드 폭 약간 줄임 (1→0.85fr).
    전체 진행 카드는 1.8→1.6fr 로 살짝 양보. */
 .kpi-grid{display:grid;grid-template-columns:1.4fr 1.6fr 0.85fr 0.85fr 0.85fr;gap:10px}
+
+/* ════════════════════════════════════════════════════════════════ */
+/* v95_p91_compact (2026-05-08 본부장님 본질 처방):                    */
+/* 위 카드 줄이고 진행 중인 리스트 더 크게                             */
+/* ════════════════════════════════════════════════════════════════ */
+
+/* 컴팩트 진행 바 (접힘 모드) */
+.kpi-compact-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--bg-secondary, #f8fafc);
+  border: 1px solid var(--border-light, #e2e8f0);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.kpi-toggle-btn {
+  background: transparent;
+  border: 1px solid var(--border-light, #cbd5e1);
+  color: var(--text-secondary, #64748b);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all .15s;
+  flex-shrink: 0;
+}
+.kpi-toggle-btn:hover {
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary, #1e293b);
+  border-color: #94a3b8;
+}
+.kpi-toggle-collapse {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 5;
+}
+.kpi-section-wrapper {
+  position: relative;
+  margin-bottom: 12px;
+}
+
+.kpi-compact-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.kpi-compact-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+.kpi-compact-dot.running { background: #14b8a6; animation: pulse-running 1.5s ease-in-out infinite; }
+.kpi-compact-dot.completed { background: #16a34a; }
+.kpi-compact-dot.failed { background: #ef4444; }
+.kpi-compact-dot.paused { background: #f59e0b; }
+
+@keyframes pulse-running {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(20, 184, 166, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(20, 184, 166, 0); }
+}
+
+/* 현재 진행 중 단계 (깜빡임) */
+.kpi-compact-phase {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary, #475569);
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kpi-compact-blink {
+  display: inline-block;
+  color: #14b8a6;
+  font-size: 14px;
+  animation: spin-blink 1.2s linear infinite;
+}
+@keyframes spin-blink {
+  0% { transform: rotate(0deg); opacity: 1; }
+  50% { transform: rotate(180deg); opacity: 0.6; }
+  100% { transform: rotate(360deg); opacity: 1; }
+}
+
+/* 진행률 (컴팩트) */
+.kpi-compact-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 140px;
+}
+.kpi-compact-pct {
+  font-weight: 700;
+  color: var(--text-primary, #0f172a);
+  min-width: 38px;
+  text-align: right;
+}
+.kpi-compact-bar-track {
+  flex: 1;
+  height: 6px;
+  min-width: 80px;
+  background: var(--bg-tertiary, #e2e8f0);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.kpi-compact-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #14b8a6, #0d9488);
+  border-radius: 3px;
+  transition: width .3s;
+}
+
+/* 객체 진행 상태 */
+.kpi-compact-obj {
+  font-size: 12px;
+  background: rgba(20, 184, 166, .1);
+  color: #0d9488;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* 오류 배지 */
+.kpi-compact-err {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(239, 68, 68, .1);
+  color: #dc2626;
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all .15s;
+}
+.kpi-compact-err:hover {
+  background: rgba(239, 68, 68, .2);
+}
+
+/* 모바일 */
+@media (max-width: 768px) {
+  .kpi-compact-bar { flex-wrap: wrap; gap: 8px; }
+  .kpi-compact-progress { min-width: 100%; order: 99; }
+}
 @media(max-width:900px){.kpi-grid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:600px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
 .kpi-card{background:var(--bg-secondary);border:0.5px solid var(--border-light);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:5px;position:relative;overflow:visible}
@@ -3052,6 +3560,95 @@ async function doRemig(item) {
 .status-text.completed,.status-text.done{color:#22c55e}
 .status-text.error{color:#ef4444}
 .status-text.idle,.status-text.pending{color:var(--text-secondary)}
+
+/* v92p9 (2026-04-30): 상태 카드 압축
+   본부장님 호소: "줄 수가 너무 많아" → MSSQL→MYSQL 줄 제거,
+   진행중 라벨 옆에 객체 카운트 인라인 배치 */
+.kpi-status-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 4px; flex-wrap: wrap;
+}
+.status-blink { animation: status-blink-anim 1s ease-in-out infinite; }
+@keyframes status-blink-anim {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+.kpi-obj-inline {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font-size: .78rem; font-weight: 600;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-light);
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-obj-inline.fail { color: #b91c1c; background: rgba(239,68,68,.06); border-color: rgba(239,68,68,.25); }
+.kpi-obj-inline.done { color: #15803d; background: rgba(22,163,74,.08); border-color: rgba(22,163,74,.25); }
+.koi-icon { font-size: .85rem; font-weight: 700; font-style: italic; }
+.koi-val  { font-size: .75rem; }
+.koi-fail { font-size: .68rem; color: #dc2626; font-weight: 700; margin-left: 2px; }
+
+/* v92p13 (2026-04-30): 테이블 카운트 인라인 배지 (진행중 옆) */
+.kpi-tbl-inline {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font-size: .78rem; font-weight: 600;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-light);
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-tbl-inline.done {
+  color: #15803d;
+  background: rgba(22,163,74,.08);
+  border-color: rgba(22,163,74,.25);
+}
+.kti-icon { font-size: .85rem; font-weight: 700; }
+.kti-val  { font-size: .75rem; }
+
+/* v92p11 (2026-04-30): AI 자동이관 ON/OFF 배지
+   v92p15 (2026-04-30): 클릭 가능한 button 으로 변경 */
+.kpi-ai-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 6px;
+  font-size: .72rem; font-weight: 700;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  border: 0.5px solid var(--border-light);
+  cursor: pointer;
+  transition: all .15s;
+  font-family: inherit;
+  line-height: 1.4;
+}
+.kpi-ai-toggle:not(:disabled):hover {
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.kpi-ai-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.kpi-ai-toggle.on {
+  background: rgba(168,85,247,.1);
+  color: #7c3aed;
+  border-color: rgba(168,85,247,.3);
+}
+.kpi-ai-toggle.on:not(:disabled):hover {
+  background: rgba(168,85,247,.15);
+  border-color: rgba(168,85,247,.5);
+}
+.kat-ico { font-size: .8rem; }
+.kat-txt { letter-spacing: .02em; }
+.kat-spinner {
+  display: inline-block;
+  animation: spin .8s linear infinite;
+  font-size: .85rem;
+  margin-left: 2px;
+}
+
 .kpi-pct-badge{font-size:.73rem;font-weight:700;color:#3b82f6;background:rgba(59,130,246,.1);padding:1px 7px;border-radius:99px}
 .kpi-prog-track{height:5px;background:var(--border-light);border-radius:99px;overflow:hidden}
 .kpi-prog-fill{height:100%;background:#3b82f6;border-radius:99px;transition:width .5s ease}
@@ -3272,6 +3869,50 @@ async function doRemig(item) {
 .ps-icon{font-size:.8rem;width:14px;text-align:center;flex-shrink:0}
 .ps-active .ps-icon{animation:spin .8s linear infinite;display:inline-block}
 .ps-label{font-size:.71rem}
+
+/* v92p12: phase-step 안의 카운트 표시 */
+.ps-sub {
+  font-size: .65rem;
+  color: var(--text-tertiary);
+  margin-left: 4px;
+  font-weight: 500;
+}
+.ps-active .ps-sub { color: #1d4ed8; font-weight: 600; }
+.ps-done   .ps-sub { color: #15803d; }
+
+/* v92p12: ADVISOR_APPLY 중 현재 권고 표시 */
+.adv-current {
+  font-size: .78rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 4px 12px;
+  background: rgba(168,85,247,.06);
+  border-radius: 6px;
+  border-left: 2px solid #a855f7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* v92p6 (2026-04-30): phase 정체 경고 배너 */
+.phase-stuck-warn {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 8px; padding: 6px 10px;
+  background: rgba(239,68,68,0.08);
+  border: 0.5px solid rgba(239,68,68,0.3);
+  border-radius: 6px;
+  font-size: .72rem; color: #b91c1c;
+}
+.psw-ico { font-size: .85rem; }
+.psw-msg { flex: 1; font-weight: 500; }
+.psw-btn {
+  padding: 3px 9px; border-radius: 5px;
+  background: #dc2626; color: white; border: none;
+  font-size: .68rem; font-weight: 600; cursor: pointer;
+}
+.psw-btn:hover { background: #b91c1c; }
+
 @keyframes phase-pulse{0%,100%{opacity:1}50%{opacity:.6}}
 
 /* v90.67: 상태 카드 하단 — 테이블/객체 분리 진행률 */
@@ -3794,6 +4435,81 @@ async function doRemig(item) {
   padding-top: 6px;
   border-top: 1px dashed var(--border-light, #e2e8f0);
 }
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p47 (2026-05-05 본부장님): 객체 진행바 분리 + 한 줄 표시   */
+/* ════════════════════════════════════════════════════════════ */
+.kpi-obj-divider {
+  margin-top: 10px;
+  margin-bottom: 8px;
+  border-top: 1px dashed var(--border-light, #e2e8f0);
+}
+.kpi-obj-prog-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.kpi-obj-prog-label {
+  font-size: 11px;
+  color: var(--color-text-secondary, #64748b);
+  font-weight: 600;
+}
+.kpi-obj-prog-badge {
+  font-size: 11px; font-weight: 700;
+  color: var(--color-text-primary, #0f172a);
+}
+.kpi-obj-prog-track {
+  height: 6px;
+  background: var(--color-background-tertiary, #f1f5f9);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.kpi-obj-prog-fill {
+  height: 100%;
+  background: linear-gradient(to right, #3b82f6, #6366f1);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.kpi-obj-prog-fill.obj-prog-done {
+  background: linear-gradient(to right, #22c55e, #16a34a);
+}
+.kpi-obj-prog-fill.obj-prog-failed {
+  background: linear-gradient(to right, #f59e0b, #dc2626);
+}
+
+/* v95_p47: 한 줄 compact 객체 카운트 */
+.kpi-obj-row-compact {
+  display: flex;
+  flex-wrap: nowrap;          /* 한 줄 강제 */
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: none;
+  overflow: hidden;
+}
+.kpi-obj-item-compact {
+  flex: 1 1 0;                /* 균등 분배 */
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 2px 4px;
+  font-size: 9.5px;           /* 약간 축소 */
+  font-weight: 600;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.kpi-obj-item-compact .kpi-obj-icon {
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.kpi-obj-item-compact .kpi-obj-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .kpi-obj-item {
   display: inline-flex;
   align-items: center;

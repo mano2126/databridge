@@ -1,0 +1,441 @@
+# =============================================================
+# DataBridge 에러 프롬프트 지식 베이스 (KB)
+# =============================================================
+# 역할: 이관 에러 → 패턴 매칭 → AI 프롬프트에 교정 지침 주입
+# 포맷: 패턴 ID → { regex, category, cause, fix_type, fix_prompt, ... }
+#
+# fix_type:
+#   prompt_injection — AI 프롬프트에 지침 추가 (재시도 성공률 향상)
+#   config_change    — DBA 설정 변경 필요 (AI 호출 스킵, UI 안내)
+#   engine_rule      — DataBridge 엔진이 자동 처리 (AI 호출 스킵)
+#
+# 통계(stats)는 error_kb.py 의 SQLite 로 별도 관리
+# =============================================================
+
+patterns:
+
+  # ─── 1419 SUPER 권한 (AI 불필요, DBA 조치) ───
+  1419_SUPER:
+    error_code: "1419"
+    category: PERMISSION
+    regex: "1419.*SUPER privilege"
+    cause: "binary logging 활성 환경에서 Function/Procedure 생성 시 SUPER 권한 필요"
+    fix_type: config_change
+    ai_skip: true
+    fix_config:
+      description: "DBA 에게 log_bin_trust_function_creators 활성화 요청"
+      sql: "SET GLOBAL log_bin_trust_function_creators = 1;"
+      revert_sql: "SET GLOBAL log_bin_trust_function_creators = 0;"
+      permanent: |
+        [mysqld]
+        log_bin_trust_function_creators = 1
+
+  # ─── 1075 AUTO_INCREMENT (엔진이 자동 처리 — v10 #15) ───
+  1075_AUTO_INCREMENT:
+    error_code: "1075"
+    category: DDL
+    regex: "1075.*(auto column|Incorrect table definition)"
+    cause: "복합 PK 에서 AUTO_INCREMENT 컬럼이 KEY 첫번째가 아님"
+    fix_type: engine_rule
+    ai_skip: true
+    fix_engine_rule: "migration_engine._create_mysql_table v10 #15 AUTO_INCREMENT 자동 보강"
+
+  # ─── 1118 Row size (엔진이 자동 처리 — v10 #16) ───
+  1118_ROW_SIZE:
+    error_code: "1118"
+    category: DDL
+    regex: "1118.*Row size too large.*65535"
+    cause: "utf8mb4 환경에서 VARCHAR 합계가 행 크기 제한 초과"
+    fix_type: engine_rule
+    ai_skip: true
+    fix_engine_rule: "migration_engine._create_mysql_table v10 #16 긴 VARCHAR → TEXT 자동 변환"
+
+  # ─── 1064 UPDATE SET 쉼표 누락 (AI 프롬프트 주입) ───
+  1064_UPDATE_SET_COMMA:
+    error_code: "1064"
+    category: SYNTAX
+    # ';\n D_PAY_ID = p_D_PAY_ID,\n D_RESE' 같은 패턴: SET 문 중간에 세미콜론 또는 수정된 컬럼 나열
+    regex: "1064.*near.*(',[\\s\\\\]*n?\\s*\\w+\\s*=|;\\\\n\\s*\\w+\\s*=|WHERE\\s+\\w+\\s*=\\s*\\w+\\s*\\\\n)"
+    cause: "MSSQL UPDATE 문 변환 시 SET 절 각 컬럼 사이에 쉼표 누락 또는 세미콜론 위치 오류"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: UPDATE SET 절 쉼표/세미콜론]
+      MSSQL UPDATE 문의 SET 절을 MySQL 로 변환할 때:
+        1. 각 컬럼 할당 사이에 반드시 쉼표(,)
+        2. 마지막 할당 뒤에는 쉼표 없이 WHERE 또는 세미콜론
+        3. 문장 중간에 세미콜론 넣지 않기 (UPDATE ... SET ... WHERE ...; 이 전체가 한 문장)
+      예:
+        ❌ SET a = 1  b = 2        (쉼표 누락)
+        ❌ SET a = 1; b = 2        (세미콜론 오류)
+        ❌ SET a = 1, b = 2,       (trailing comma)
+        ✅ SET a = 1, b = 2, c = 3
+      특히 MSSQL 의 줄바꿈 기반 구분을 쉼표 없이 그대로 옮기지 마세요.
+
+  # ─── 1064 MSSQL PROC 파라미터 잔재 (AI 프롬프트 주입) ───
+  1064_PROC_PARAM_LEFTOVER:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*(['\"]?proc\\s+[`'\"]|CREATE\\s+PROCEDURE|p_\\w+\\s+VARCHAR)"
+    cause: "MSSQL 'CREATE PROC name @param VARCHAR = default' 구조를 MySQL 파라미터 형식으로 완전 변환 못함"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: 프로시저 파라미터 변환]
+      MSSQL 과 MySQL 의 프로시저 파라미터 문법 차이에 주의:
+        MSSQL: CREATE PROC name @p1 VARCHAR(10) = '', @p2 INT = 0 AS ...
+        MySQL: CREATE PROCEDURE name(IN p1 VARCHAR(10), IN p2 INT) ...
+      규칙:
+        1. @param → p_param (@ 제거, p_ prefix 권장)
+        2. = default 값은 제거 (MySQL 프로시저는 기본값 불가)
+        3. 파라미터는 괄호 ( ) 안에 넣기
+        4. AS → BEGIN ... END 로 감싸기
+        5. 'proc name' 같은 MSSQL 잔재 완전 제거
+
+  # ─── 1064 COLLATE 불완전 변환 (AI 프롬프트 주입) ───
+  1064_COLLATE_INCOMPLETE:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*COLLATE\\s+utf8mb4"
+    cause: "COLLATE 절을 자동 추가했으나 구문 위치가 잘못되어 MySQL 이 인식 못함"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: COLLATE 구문 위치]
+      MySQL 에서 COLLATE 는 특정 위치에서만 유효합니다:
+        ✅ WHERE a = 'x' COLLATE utf8mb4_unicode_ci
+        ✅ WHERE a COLLATE utf8mb4_unicode_ci = b
+        ✅ CREATE TABLE ... (col VARCHAR(10) COLLATE utf8mb4_unicode_ci)
+        ❌ LIMIT 1; END) = p_code COLLATE ... (END 뒤에 COLLATE 불가)
+        ❌ ORDER BY col COLLATE ... (ORDER BY 에는 불가)
+      문자열 비교 시 양쪽 컬럼/변수의 COLLATE 가 달라 1270 에러가 나는 경우에만 추가하고,
+      구조/DDL 내부에는 넣지 마세요.
+
+  # ─── 1064 DATE_FORMAT / LPAD 변환 미완 (AI 프롬프트 주입) ───
+  1064_DATE_FMT_INCOMPLETE:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*(LPAD|DATE_FORMAT|STR_TO_DATE)"
+    cause: "MSSQL 의 CAST/CONVERT + RIGHT/LEFT 조합을 MySQL LPAD/DATE_FORMAT 로 변환하다가 중단"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: 날짜/포맷 함수 변환]
+      MSSQL → MySQL 변환 매핑:
+        RIGHT('0' + CAST(x AS VARCHAR), 2)         → LPAD(CAST(x AS CHAR), 2, '0')
+        CONVERT(VARCHAR, GETDATE(), 112)           → DATE_FORMAT(NOW(), '%Y%m%d')
+        CONVERT(VARCHAR(8), date, 112)              → DATE_FORMAT(date, '%Y%m%d')
+        CAST(x AS VARCHAR)                          → CAST(x AS CHAR)
+      변환 시 괄호 균형, 세미콜론 위치, 문자열 인용 주의.
+      특히 중첩된 CAST 는 안쪽부터 풀어서 MySQL 문법으로 완전히 재작성하세요.
+
+  # ─── 1064 DECLARE / SET 문법 혼용 (AI 프롬프트 주입) ───
+  1064_DECLARE_USAGE:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*(:=|SELECT\\s+@)"
+    cause: "MSSQL 변수 할당(SELECT @x = ..., SET @x = ...)을 MySQL 의 := 또는 INTO 문법으로 변환 못함"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: 변수 할당 문법]
+      MSSQL → MySQL 변수 할당 변환:
+        MSSQL: DECLARE @x INT = 0;   MySQL: DECLARE x INT DEFAULT 0;
+        MSSQL: SET @x = 5;           MySQL: SET x = 5;
+        MSSQL: SELECT @x = col FROM t; MySQL: SELECT col INTO x FROM t;
+        MSSQL: SELECT @x = COUNT(*) FROM t WHERE ...;
+           → MySQL: SELECT COUNT(*) INTO x FROM t WHERE ...;
+      규칙:
+        1. @ prefix 제거, BEGIN 블록 맨 앞에서 DECLARE
+        2. 복합 SELECT ... = 을 INTO 로 변환
+        3. 할당 연산자 := 는 세션 변수용이며 DECLARE 된 지역 변수에는 = 사용
+
+  # ─── 1064 UPDATE FROM 구문 (AI 프롬프트 주입) ───
+  1064_UPDATE_FROM:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*UPDATE\\s+\\w+\\s+SET.*FROM"
+    cause: "MSSQL 의 UPDATE ... FROM ... 조인 문법을 MySQL UPDATE JOIN 으로 변환 못함"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: UPDATE JOIN 문법]
+      MSSQL 의 UPDATE ... FROM 을 MySQL UPDATE JOIN 으로 변환:
+        MSSQL:
+          UPDATE t SET col = v
+            FROM table1 t
+            JOIN table2 t2 ON t.id = t2.id
+            WHERE ...
+        MySQL:
+          UPDATE table1 t
+            JOIN table2 t2 ON t.id = t2.id
+            SET t.col = v
+            WHERE ...
+      핵심:
+        1. UPDATE 뒤에 바로 테이블/JOIN 배치
+        2. SET 절은 JOIN 뒤, WHERE 앞
+        3. FROM 키워드 제거
+
+  # ─── 1064 END IF 중첩 (AI 프롬프트 주입) ───
+  1064_END_IF_NESTING:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*END\\s+IF"
+    cause: "중첩 IF 블록에서 END IF 매칭이 맞지 않음 (MSSQL 의 블록 구조를 옮기며 발생)"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: IF ... END IF 블록]
+      MySQL 의 IF 블록 문법:
+        IF 조건 THEN
+          statements;
+        ELSEIF 조건 THEN
+          statements;
+        ELSE
+          statements;
+        END IF;
+      규칙:
+        1. 각 IF 는 정확히 1개의 END IF 로 종료
+        2. THEN 뒤에 세미콜론 없이 statements 나열
+        3. END IF 뒤에 세미콜론 필수
+        4. IF 중첩 시 안쪽부터 완전히 닫고 나오기
+        5. MSSQL 의 BEGIN ... END 블록은 MySQL 의 BEGIN ... END 로 유지하되 IF 블록의 END IF 와 혼동 주의
+
+  # ─── 1064 CREATE PROCEDURE 잔재 (AI 프롬프트 주입) ───
+  1064_CREATE_PROC_LEFTOVER:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*CREATE\\s+(TABLE|PROCEDURE|TRIGGER|VIEW)\\s+(IF\\s+NOT\\s+EXISTS\\s+)?\\w+"
+    cause: "AI 가 프로시저 안에 또 CREATE PROCEDURE 를 생성하거나, 동일 프로시저 선언을 중첩하는 경우"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: CREATE PROCEDURE 중첩 금지]
+      프로시저 본문 안에 또 다른 CREATE PROCEDURE 를 넣지 마세요.
+      MySQL 은 프로시저 안에서 다른 프로시저를 정의할 수 없습니다.
+      원본이 복잡한 경우 다음 중 하나를 선택:
+        1. 보조 프로시저를 밖으로 분리하여 각각 CREATE PROCEDURE
+        2. 하나의 프로시저로 통합 (인라인 처리)
+      또한 "CREATE PROCEDURE" 문자열이 주석이나 동적 SQL 안에 등장하는 경우도 escape 처리 주의.
+
+  # ─── 1064 외부 키워드 AS 혼용 (AI 프롬프트 주입) ───
+  1064_AS_KEYWORD_MISUSE:
+    error_code: "1064"
+    category: SYNTAX
+    regex: "1064.*near.*(AS\\s+DECLARE|AS\\s+BEGIN)"
+    cause: "MSSQL 의 'CREATE PROC name AS BEGIN' 구조 변환 시 AS 키워드 잔재"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: MSSQL AS 키워드 제거]
+      MSSQL: CREATE PROCEDURE name AS DECLARE @x INT; BEGIN ... END
+      MySQL: CREATE PROCEDURE name() BEGIN DECLARE x INT; ... END;
+      핵심:
+        1. 프로시저명 뒤의 AS 키워드는 MySQL 에 불필요 (제거)
+        2. AS 위치에 () 파라미터 괄호 필수
+        3. DECLARE 는 BEGIN 뒤에 위치
+        4. 본문을 BEGIN ... END 로 감싸기
+
+  # ─── 1270 Collation mismatch (AI 프롬프트 주입) ───
+  1270_COLLATION_MISMATCH:
+    error_code: "1270"
+    category: RUNTIME
+    regex: "1270.*Illegal mix of collations"
+    cause: "두 문자열 컬럼/변수의 collation 이 달라 비교/JOIN 실패"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: Collation 혼용 해결]
+      비교/JOIN 시 collation 이 다른 경우 한쪽에 명시적으로 COLLATE 추가:
+        WHERE col1 = col2 COLLATE utf8mb4_unicode_ci
+        ON t1.id = t2.id COLLATE utf8mb4_unicode_ci
+      VARCHAR 파라미터를 WHERE 절에서 사용 시:
+        WHERE col = p_param COLLATE utf8mb4_unicode_ci
+      DDL 레벨 통일이 더 근본적이지만, 이관 시점에는 구문 레벨 COLLATE 추가가 현실적.
+
+  # ─── 데이터 타입 변환 일반 (AI 프롬프트 주입) ───
+  TYPE_CONVERSION_GENERAL:
+    error_code: "*"  # 여러 에러코드에서 공통
+    category: TYPE
+    regex: "hierarchyid|geography|geometry|sql_variant|rowversion|timestamp"
+    cause: "MSSQL 전용 특수 타입을 MySQL 로 변환 필요"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: MSSQL 특수 타입 매핑]
+      MSSQL 전용 타입 → MySQL 대체:
+        XML           → LONGTEXT (또는 JSON 으로 재구조화)
+        hierarchyid   → VARCHAR(900) (경로 문자열로)
+        geography     → GEOMETRY 또는 JSON
+        geometry      → GEOMETRY
+        sql_variant   → JSON 또는 TEXT
+        rowversion / timestamp → TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        uniqueidentifier → CHAR(36) (GUID 문자열)
+        datetimeoffset → DATETIME(6) (MySQL 은 타임존 정보 없음, 애플리케이션에서 관리)
+        datetime2(n)   → DATETIME(n)
+        time(n)        → TIME(n)
+
+  # ─── CURSOR / OUTPUT / CROSS APPLY 등 (AI 프롬프트 주입, 고급) ───
+  ADVANCED_TSQL_CONSTRUCTS:
+    error_code: "*"
+    category: SEMANTIC
+    regex: "DECLARE\\s+.*\\bCURSOR\\b|CROSS\\s+APPLY|OUTPUT\\s+INSERTED|MERGE\\s+INTO"
+    cause: "MSSQL 의 의미론적 고급 구문을 MySQL 로 재설계 필요"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [주의: 고급 T-SQL 구문 재설계]
+      MSSQL → MySQL 재설계 가이드:
+
+      CURSOR:
+        MSSQL: DECLARE c CURSOR FOR SELECT ...; OPEN c; FETCH NEXT FROM c INTO @x; ...
+        MySQL: DECLARE c CURSOR FOR SELECT ...; DECLARE CONTINUE HANDLER FOR NOT FOUND ...;
+               OPEN c; read_loop: LOOP FETCH c INTO var; ... END LOOP; CLOSE c;
+
+      CROSS APPLY (상관 테이블 함수):
+        MSSQL: SELECT ... FROM t CROSS APPLY fn(t.id) fa
+        MySQL: SELECT ... FROM t, LATERAL (SELECT ... WHERE col = t.id) fa (MySQL 8.0.14+)
+        또는 서브쿼리로 재작성
+
+      OUTPUT 절:
+        MSSQL: INSERT INTO t (...) OUTPUT INSERTED.id VALUES (...);
+        MySQL: INSERT 후 SELECT LAST_INSERT_ID(); 또는 triggers 로 별도 테이블에 기록
+
+      MERGE INTO:
+        MySQL: INSERT ... ON DUPLICATE KEY UPDATE ... (단순 upsert)
+        복잡한 MERGE 는 개별 INSERT/UPDATE/DELETE 로 분해 필요
+
+      TRY...CATCH:
+        MSSQL: BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH
+        MySQL: DECLARE EXIT HANDLER FOR SQLEXCEPTION ... (블록 시작에 선언)
+
+  # ════════════════════════════════════════════════════════════════
+  # v94_p5 (2026-05-01) 본부장님 호소 처방 — 정식 패턴 등록
+  # 두 패턴 반복 발생 → KB 자산 정식화 → preflight 사전 적용
+  # ════════════════════════════════════════════════════════════════
+
+  # ─── 1064 LEAVE 세미콜론 누락 (FUNCTION 내 LOOP) ───
+  1064_LEAVE_MISSING_SEMI:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [FUNCTION, PROCEDURE]
+    regex: "1064.*near.*'?(LEAVE|ITERATE).*END\\s+(IF|LOOP)"
+    cause: |
+      MySQL 의 LEAVE/ITERATE 문은 ; 로 종료해야 하는데
+      AI 변환 시 종종 ; 빠뜨림 → END IF / END LOOP 직전이라 파서가 혼란
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — LEAVE/ITERATE 세미콜론]
+      MySQL stored function/procedure 의 LEAVE/ITERATE 문은 *반드시* 세미콜론(;) 으로 종료.
+      특히 IF/ELSE 분기 안에서 LEAVE 하는 경우 자주 빠뜨림.
+
+      [잘못된 예시 — 절대 출력 금지]
+        ELSE
+            LEAVE loop_label    ← ; 누락
+        END IF;
+
+      [올바른 예시]
+        ELSE
+            LEAVE loop_label;   ← ; 필수
+        END IF;
+
+      [점검 체크리스트]
+      - LEAVE/ITERATE/RETURN 문 끝에 모두 ; 있는가?
+      - 각 SET 문 끝에 ; 있는가?
+      - END IF / END LOOP / END 직전 라인은 ; 로 끝나는가?
+      ===END===
+
+  # ─── 1064 DELIMITER 명령 (pymysql 환경) ───
+  1064_DELIMITER_NOT_SUPPORTED:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [FUNCTION, PROCEDURE, TRIGGER]
+    regex: "1064.*near.*'?(//|\\$\\$|DELIMITER)"
+    cause: |
+      DELIMITER 는 mysql CLI 클라이언트의 명령이고
+      pymysql 같은 드라이버는 단일 statement 를 직접 실행하므로 DELIMITER 인식 못 함
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — DELIMITER 절대 금지]
+      DataBridge 는 pymysql/MySQL Connector 환경에서 직접 statement 를 실행합니다.
+      DELIMITER //, DELIMITER ;, DELIMITER $$ 등의 명령은 *절대 출력 금지*.
+      종료 마커 //, $$ 도 출력 금지.
+
+      [잘못된 예시 — 절대 출력 금지]
+        DELIMITER //
+        CREATE PROCEDURE foo()
+        BEGIN ... END//
+        DELIMITER ;
+
+      [올바른 예시 — DELIMITER 없이 단일 statement]
+        CREATE PROCEDURE foo()
+        BEGIN ... END;
+
+      [출력 형식]
+      - 각 statement 는 표준 ; 로 종료
+      - DELIMITER 명령 전혀 사용하지 않음
+      - JSON 응답의 statements 배열에 각 statement 를 별도 항목으로
+      ===END===
+
+  # ════════════════════════════════════════════════════════════════
+  # v94_p7 (2026-05-01) 본부장님 호소 처방 — 정식 패턴 등록
+  # 오브젝트 검증 9개 ✗ 분석 결과 추가 패턴 발견
+  # ════════════════════════════════════════════════════════════════
+
+  # ─── 1318 TVF 변환 시 파라미터 손실 ───
+  1318_TVF_PARAM_LOST:
+    error_code: "1318"
+    category: SIGNATURE
+    applies_to: [FUNCTION]
+    regex: "1318.*expected 0.*got"
+    cause: |
+      MSSQL TVF (table-valued function) 를 MySQL 로 변환할 때
+      AI 가 파라미터 시그니처를 잃고 0 인자 함수로 만든 케이스.
+      tvf_daily_trx(@d date) → CALL tvf_daily_trx() 처럼 변환되면 발생.
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — TVF 파라미터 보존]
+      MSSQL TVF 를 MySQL PROCEDURE 로 변환할 때 *원본 파라미터 시그니처를 그대로 유지*.
+
+      [원본 MSSQL TVF 예]
+        CREATE FUNCTION tvf_daily_trx(@d date)
+        RETURNS TABLE AS RETURN
+        (SELECT * FROM trx WHERE trx_date = @d)
+
+      [올바른 MySQL 변환]
+        CREATE PROCEDURE tvf_daily_trx(IN p_d DATE)   ← @d → p_d 로 IN 파라미터
+        BEGIN
+          SELECT * FROM trx WHERE trx_date = p_d;
+        END
+
+      [잘못된 예 — 절대 금지]
+        CREATE PROCEDURE tvf_daily_trx()              ← 파라미터 잃음!
+        ...
+
+      [점검]
+      - 원본 파라미터 개수와 변환 후 파라미터 개수 일치하는가?
+      - 각 @ 변수가 p_ 접두사 IN 파라미터로 매핑됐는가?
+      ===END===
+
+  # ─── 1305 타겟에 함수/프로시저 없음 (이름 매핑 실패) ───
+  1305_OBJECT_NAME_MISMATCH:
+    error_code: "1305"
+    category: NAMING
+    applies_to: [FUNCTION, PROCEDURE]
+    regex: "1305.*does not exist"
+    cause: |
+      MSSQL 의 schema.object 패턴이 MySQL 변환 시 일관되지 않게 적용됨.
+      schema_object (underscore) 또는 그냥 object (drop) 정책 차이.
+      DataBridge 의 schema_strategy 설정과 AI 변환 결과가 일치해야 함.
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — 객체 이름 정책 일관성]
+      DataBridge 의 schema_strategy 설정이 'underscore' 면
+      모든 객체 이름은 schema_object 형식으로 변환:
+
+      [올바른 변환]
+        MSSQL: collection.tvf_delinq_ranking
+        MySQL: collection_tvf_delinq_ranking  (underscore 정책)
+
+      [점검]
+      - 원본의 점(.) 표기를 underscore(_) 로 일관되게 치환
+      - 다른 객체 (테이블, 함수) 와 동일한 정책 적용
+      ===END===
+
+
+# =============================================================
+# 초기 통계 (구현 시점 기본값)
+# 실제 통계는 backend/data/kb_stats.db (SQLite) 에 누적
+# =============================================================

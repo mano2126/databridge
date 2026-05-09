@@ -686,17 +686,19 @@ async function confirmRestart() {
 .f-cnt{font-size:10px;background:var(--bg-tertiary);color:var(--text-tertiary);padding:0 5px;border-radius:8px}
 .filter-btn.active .f-cnt{background:var(--accent-blue);color:#fff}
 
-/* 테이블 */
+/* 테이블 — v95_p16_ui (2026-05-03): 본부장님 컴팩트화 처방 — 엔터프라이즈 룩 */
+/* 기존: padding:9px 10px / 12px → 행 높이 약 50px (정보 밀도 낮음) */
+/* 처방: padding:5px 8px / 11.5px → 행 높이 약 35px (30% 감소, 한 화면 ~16개) */
 .job-tbl{width:100%;border-collapse:collapse}
-.job-tbl th{background:var(--bg-secondary);font-size:11px;font-weight:500;color:var(--text-tertiary);padding:9px 10px;text-align:left;border-bottom:0.5px solid var(--border-light);white-space:nowrap}
-.job-tbl td{padding:9px 10px;font-size:12px;border-bottom:0.5px solid var(--border-light);color:var(--text-primary);vertical-align:middle}
+.job-tbl th{background:var(--bg-secondary);font-size:10.5px;font-weight:500;color:var(--text-tertiary);padding:6px 8px;text-align:left;border-bottom:0.5px solid var(--border-light);white-space:nowrap;letter-spacing:0.2px}
+.job-tbl td{padding:5px 8px;font-size:11.5px;border-bottom:0.5px solid var(--border-light);color:var(--text-primary);vertical-align:middle;line-height:1.4}
 .job-tbl tr:last-child td{border-bottom:none}
 .job-tbl tr.row-err td{background:rgba(163,45,45,.04)}
 .job-tbl tr.row-run td{background:rgba(55,138,221,.03)}
 .job-tbl tr:hover td{filter:brightness(.97)}
 .job-name-cell{font-weight:500;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mini-ico{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;font-size:8.5px;font-weight:700;flex-shrink:0}
-.tbl-tag{background:var(--bg-info);color:var(--text-info);padding:1px 7px;border-radius:4px;font-family:'Consolas','SF Mono',monospace;font-size:11px;font-weight:500}
+.mini-ico{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;font-size:8px;font-weight:700;flex-shrink:0}
+.tbl-tag{background:var(--bg-info);color:var(--text-info);padding:1px 6px;border-radius:3px;font-family:'Consolas','SF Mono',monospace;font-size:10.5px;font-weight:500}
 
 /* v9 #64: CDC Job 그룹화 UI */
 .row-cdc-group td{background:rgba(37,99,235,.035)}
@@ -725,9 +727,9 @@ async function confirmRestart() {
 .cdc-grp-btn.open svg{transform:rotate(90deg)}
 .cdc-grp-cnt{font-size:10.5px;font-weight:700}
 
-/* 버튼 그룹 */
-.btn-group{display:flex;gap:3px;flex-wrap:wrap}
-.jb{font-size:10.5px;padding:3px 7px;border-radius:var(--radius-sm);border:0.5px solid var(--border-mid);background:transparent;color:var(--text-secondary);cursor:pointer;font-family:var(--font);transition:all .12s;white-space:nowrap}
+/* 버튼 그룹 — v95_p16_ui: 컴팩트화 (10.5px 7px → 9.5px 5px) */
+.btn-group{display:flex;gap:2px;flex-wrap:wrap}
+.jb{font-size:9.5px;padding:2px 5px;border-radius:var(--radius-sm);border:0.5px solid var(--border-mid);background:transparent;color:var(--text-secondary);cursor:pointer;font-family:var(--font);transition:all .12s;white-space:nowrap;line-height:1.2}
 .jb:hover{background:var(--bg-secondary);color:var(--text-primary)}
 .jb.primary{border-color:var(--accent-blue);color:var(--text-info);background:var(--bg-info)}
 .jb.primary:hover{background:var(--accent-blue);color:#fff}

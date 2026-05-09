@@ -254,6 +254,23 @@
         </template>
         <!-- v43: 실행 / 일시정지 / 중단 3단계 버튼 그룹 -->
         <div class="vp-run-grp">
+          <!-- ════════════════════════════════════════════════════════════════
+            v95_p2 hotfix1 (2026-05-02) 본부장님 명령 — 메인 검증 버튼 왼쪽에
+              "오브젝트 검증 실행 (41개)" 큰 파란 버튼 왼쪽에 동시 실행 옵션
+            ════════════════════════════════════════════════════════════════ -->
+          <div v-if="vType === 'object' && !running && !objRunning"
+               class="vp-conc-wrap">
+            <label class="vp-conc-label">동시:</label>
+            <select v-model.number="objConcurrency" class="vp-conc-select"
+                    :disabled="objRunning || objTesting || remigrateLoading">
+              <option :value="1">1개 (순차)</option>
+              <option :value="3">3개 (권장)</option>
+              <option :value="5">5개</option>
+              <option :value="10">10개</option>
+              <option :value="20">20개 (최대)</option>
+            </select>
+          </div>
+
           <!-- 대기 상태: 단일 실행 버튼 -->
           <button v-if="!running && !objRunning && !tblRs.isPaused.value && !objRs.isPaused.value"
                   class="chip chip-run"
@@ -827,10 +844,24 @@
 
         <!-- 소스 오브젝트 목록 — 타입별 세로 리스트 -->
         <div v-if="hasAnyObjects || objLoading" class="vp-obj-panel">
-          <!-- 패널 헤더 -->
-          <div class="vp-obj-hdr">
+          <!-- ════════════════════════════════════════════════════════════════
+            v95_p2 hotfix2 (2026-05-02) 본부장님 명령
+              - 검증 실행 시 자동 접힘 (검증 결과 영역 더 넓게)
+              - 헤더 바 클릭 시 다시 펼침 (토글)
+            ════════════════════════════════════════════════════════════════ -->
+          <!-- 패널 헤더 (클릭 시 토글) -->
+          <div class="vp-obj-hdr vp-obj-hdr-toggle"
+               @click="objPanelCollapsed = !objPanelCollapsed"
+               :title="objPanelCollapsed ? '클릭하여 펼치기' : '클릭하여 접기'">
+            <!-- 토글 화살표 -->
+            <svg class="vp-obj-toggle-arrow"
+                 :class="{collapsed: objPanelCollapsed}"
+                 viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                 stroke-width="1.8" style="width:11px;height:11px;flex-shrink:0">
+              <polyline points="3,4 6,8 9,4"/>
+            </svg>
             <span class="vp-obj-hdr-title">소스 오브젝트 선택</span>
-            <div style="display:flex;gap:5px;align-items:center">
+            <div style="display:flex;gap:5px;align-items:center;margin-left:auto" @click.stop>
               <div v-if="objLoading" class="vp-ldots" style="margin-right:4px"><span/><span/><span/></div>
               <span v-else class="vp-cnt-badge" style="margin-right:4px">
                 {{ objGroups.filter(g=>selObjTypes.includes(g.type)).reduce((s,g)=>s+g.items.length,0) }}개
@@ -843,45 +874,48 @@
             </div>
           </div>
 
-          <!-- 로딩 중 -->
-          <div v-if="objLoading" class="vp-tbl-loading" style="padding:20px">
-            <div class="vp-ldots"><span/><span/><span/></div> 오브젝트 목록 로딩 중...
-          </div>
+          <!-- 접힘 가능 영역 (objPanelCollapsed=true 면 숨김) -->
+          <template v-if="!objPanelCollapsed">
+            <!-- 로딩 중 -->
+            <div v-if="objLoading" class="vp-tbl-loading" style="padding:20px">
+              <div class="vp-ldots"><span/><span/><span/></div> 오브젝트 목록 로딩 중...
+            </div>
 
-          <!-- 타입별 섹션 — 4분할 가로 레이아웃 -->
-          <div v-else class="vp-obj-sections">
-            <template v-for="grp in objGroups" :key="grp.type">
-              <div v-if="grp.items.length && selObjTypes.includes(grp.type)"
-                   class="vp-obj-section">
+            <!-- 타입별 섹션 — 4분할 가로 레이아웃 -->
+            <div v-else class="vp-obj-sections">
+              <template v-for="grp in objGroups" :key="grp.type">
+                <div v-if="grp.items.length && selObjTypes.includes(grp.type)"
+                     class="vp-obj-section">
 
-                <!-- 섹션 헤더 (v90.78: 헤더 전체 영역 클릭으로 전체 선택/해제) -->
-                <div class="vp-obj-sec-hdr vp-obj-sec-hdr-clickable"
-                     @click="toggleGrp(grp)"
-                     :title="`${grp.label} 전체 ${grp.items.every(o=>o._sel) ? '해제' : '선택'}`">
-                  <label class="vp-obj-sec-chk-all" @click.stop>
-                    <input type="checkbox"
-                      :checked="grp.items.every(o=>o._sel)"
-                      :indeterminate.prop="grp.items.some(o=>o._sel) && !grp.items.every(o=>o._sel)"
-                      @change="toggleGrp(grp)"
-                      class="vp-chk"/>
-                  </label>
-                  <span class="vp-obj-sec-ico">{{ grp.icon }}</span>
-                  <span class="vp-obj-sec-label">{{ grp.label }}</span>
-                  <span class="vp-cnt-badge" style="margin-left:auto">{{ grp.items.filter(o=>o._sel).length }}/{{ grp.items.length }}</span>
+                  <!-- 섹션 헤더 (v90.78: 헤더 전체 영역 클릭으로 전체 선택/해제) -->
+                  <div class="vp-obj-sec-hdr vp-obj-sec-hdr-clickable"
+                       @click="toggleGrp(grp)"
+                       :title="`${grp.label} 전체 ${grp.items.every(o=>o._sel) ? '해제' : '선택'}`">
+                    <label class="vp-obj-sec-chk-all" @click.stop>
+                      <input type="checkbox"
+                        :checked="grp.items.every(o=>o._sel)"
+                        :indeterminate.prop="grp.items.some(o=>o._sel) && !grp.items.every(o=>o._sel)"
+                        @change="toggleGrp(grp)"
+                        class="vp-chk"/>
+                    </label>
+                    <span class="vp-obj-sec-ico">{{ grp.icon }}</span>
+                    <span class="vp-obj-sec-label">{{ grp.label }}</span>
+                    <span class="vp-cnt-badge" style="margin-left:auto">{{ grp.items.filter(o=>o._sel).length }}/{{ grp.items.length }}</span>
+                  </div>
+
+                  <!-- 세로 리스트 -->
+                  <div class="vp-obj-list">
+                    <label v-for="o in grp.items" :key="o.name"
+                           class="vp-obj-row"
+                           :class="{selected: o._sel}">
+                      <input type="checkbox" v-model="o._sel" class="vp-chk"/>
+                      <span class="vp-obj-nm">{{ o.name }}</span>
+                    </label>
+                  </div>
                 </div>
-
-                <!-- 세로 리스트 -->
-                <div class="vp-obj-list">
-                  <label v-for="o in grp.items" :key="o.name"
-                         class="vp-obj-row"
-                         :class="{selected: o._sel}">
-                    <input type="checkbox" v-model="o._sel" class="vp-chk"/>
-                    <span class="vp-obj-nm">{{ o.name }}</span>
-                  </label>
-                </div>
-              </div>
-            </template>
-          </div>
+              </template>
+            </div>
+          </template>
         </div>
 
         <!-- 소스 오브젝트 없을 때 안내 -->
@@ -1056,6 +1090,25 @@
                 <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" style="width:10px;height:10px"><polyline points="1,8 6,4 11,8"/></svg>
                 전체 닫기
               </button>
+              <!-- ════════════════════════════════════════════════════════════════
+                v95_p2 (2026-05-02) 본부장님 명령 — 동시 실행 옵션
+                  "실행 버튼 왼쪽에 동시 실행 옵션 추가"
+                  "텍스트 두 줄 안 나오게 충분한 폭 확보"
+                  "기능 연동돼서 멀티로 수행"
+                  "테이블 검증의 경합 분석은 v95_p3"
+                ════════════════════════════════════════════════════════════════ -->
+              <div v-if="selObjCount > 0 || objResults.filter(r=>r.status==='ok').length"
+                   class="vp-conc-wrap">
+                <label class="vp-conc-label">동시:</label>
+                <select v-model.number="objConcurrency" class="vp-conc-select"
+                        :disabled="objTesting || remigrateLoading">
+                  <option :value="1">1개 (순차)</option>
+                  <option :value="3">3개 (권장)</option>
+                  <option :value="5">5개</option>
+                  <option :value="10">10개</option>
+                  <option :value="20">20개 (최대)</option>
+                </select>
+              </div>
               <!-- 선택 실행 — 체크박스 선택 항목만 -->
               <button v-if="selObjCount > 0" class="chip chip-run vp-sel-run-btn"
                       @click="runSelectedObjTest" :disabled="objTesting || remigrateLoading"
@@ -2216,6 +2269,8 @@ async function loadTables() {
     // v90.49: 정책에 따라 소스 이름을 타겟 이름 형식으로 변환 (매칭 키 일관화)
     //   본부장님 결정 (2026-04-27): underscore 정책 — customer.profile → customer_profile
     //   백엔드 schema_conversion_policy.map_table_name 과 동일 로직 (프론트 미러)
+    // v95_p11 (2026-05-02): 방어 가드 추가 — 백엔드가 schema_name 에 db명 박는
+    //   회귀 발생해도 프론트에서 자동 복구 (이중 방어)
     const _policyKey = (t) => {
       let sch = ''
       let bare = ''
@@ -2234,8 +2289,33 @@ async function loadTables() {
       if (!bare) return ''
       // dbo / 빈 schema 는 결합 안 함
       if (!sch || sch.toLowerCase() === 'dbo') return bare
-      // 이미 schema_ 접두어 있으면 중복 방지
+      // ─────────────────────────────────────────────────────────
+      // v95_p11: MySQL "schema=DB" 패턴 방어
+      //   타겟 DB 이름이 schema_name 에 들어오면 (백엔드 회귀 시나리오)
+      //   결합하지 않고 bare 만 반환.
+      //   bare 가 이미 schema_ 접두어로 시작하면 (예: customer_profile)
+      //   추가 결합 불필요 → 아래 가드에서 처리됨.
+      // ─────────────────────────────────────────────────────────
+      // v95_p96 (2026-05-08 본부장님): quickTgt 비어있을 때 connector fallback
+      //   본부장님 본질: 검증 페이지에서 quickTgt.database 비어있으면
+      //   가드 우회 → 잘못된 키 생성 → 매칭 실패
+      //   → connector.target.database 도 fallback 으로 사용
+      const tgtDb  = (quickTgt?.database || connector?.target?.database || '').toLowerCase()
+      const srcDb  = (quickSrc?.database || connector?.source?.database || '').toLowerCase()
+      const schLow = sch.toLowerCase()
+      if (tgtDb && schLow === tgtDb) return bare  // 타겟 DB명이 schema 자리에 옴
+      if (srcDb && schLow === srcDb) return bare  // 소스 DB명도 동일 가드
+      // v95_p96 (2026-05-08 본부장님): 이미 underscore 결합된 형식 가드 강화
+      //   bare 가 'AWBuildVersion' 같은 단일 식별자인데 schema 가 DB명이면
+      //   결합하지 않음 (위 tgtDb/srcDb 가드 보강)
+      // 이미 schema_ 접두어 있으면 중복 방지 (대소문자 무시)
       if (bare.toLowerCase().startsWith(sch.toLowerCase() + '_')) return bare
+      // v95_p96 추가 가드: schema 가 DB명 패턴 (영숫자 + 숫자 끝)이고 
+      //   알려진 source/target schema 가 아니면 → bare 반환
+      //   (스키마는 보통 'HumanResources', 'Sales' 같은 의미 있는 이름)
+      //   DB 이름은 'AdventureWorks2022', 'mydb_prod' 같은 패턴
+      const isLikelyDbName = /\d{4}$|_prod$|_dev$|_test$/i.test(sch) || sch.length > 30
+      if (isLikelyDbName) return bare  // DB 이름으로 의심되면 결합 안 함
       const strat = schemaStrategy.value || 'underscore'
       if (strat === 'underscore') return `${sch}_${bare}`
       // drop / database 정책: bare 만
@@ -2471,6 +2551,9 @@ async function runValidate() {
   //   처방: 매 검증 실행마다 강제 reload — 최신 DB 상태로 검증
   await loadTables()
   if (!srcTables.value.length) { app.notify('테이블 목록을 불러오지 못했습니다', 'error'); return }
+
+  // v95_p7: 좌측 메뉴 진행 표시기 — 테이블 검증 시작
+  app.setValidateRunning('table', srcTables.value.length, '테이블 검증')
   
   running.value=true; results.value=[]; summary.value=null
   progPct.value=0; progCurrent.value=0; progTotal.value=0
@@ -2566,6 +2649,8 @@ async function runValidate() {
     running.value=false
     tblRs.finish()  // v43: composable 상태 idle 로 복원
     _stopProgTimer()
+    // v95_p7: 좌측 메뉴 진행 표시기 — 테이블 검증 종료
+    app.clearValidateRunning()
     if (!_wasAborted) {
       setTimeout(()=>{ progPct.value=0; progMsg.value=''; progTable.value=''; progCurrent.value=0 }, 2000)
     } else {
@@ -3292,6 +3377,23 @@ const allObjSel      = computed(()=>objResults.value.length&&objResults.value.ev
 const selObjResults  = computed(()=>objResults.value.filter(r=>r._sel && r.status==='ok'))
 const selObjCount    = computed(()=>selObjResults.value.length)
 
+// ════════════════════════════════════════════════════════════════════
+// v95_p2 (2026-05-02) 본부장님 명령 — 동시 실행 옵션
+//   default 3 (권장값) — DB 부하 분산 + 속도 균형
+//   1: 순차 (안전, 느림)
+//   3: 권장 (대부분 환경)
+//   5-10: 빠름 (DB 여유 있을 때)
+//   20: 최대 (소규모 객체 대량 검증 시)
+// ════════════════════════════════════════════════════════════════════
+const objConcurrency = ref(3)
+
+// ════════════════════════════════════════════════════════════════════
+// v95_p2 hotfix2 (2026-05-02) 본부장님 명령 — 패널 접기/펴기
+//   "검증 실행 누르면 소스 오브젝트 선택 창은 닫힘 → 결과 영역 더 넓게"
+//   "타이틀 바 누르면 다시 열림 (토글)"
+// ════════════════════════════════════════════════════════════════════
+const objPanelCollapsed = ref(false)
+
 // v90.78e: reload 시 _sel 깜박임 제거를 위한 pending backup
 //   runObjValidate 가 loadSrcObjects 호출 전에 이 맵에 백업
 //   → watch(srcObjects) 가 새 _sel 만들 때 즉시 이 맵 참조 (default=true 안 거침)
@@ -3401,6 +3503,18 @@ async function runObjValidate(){
   if (!connector.source.host) { app.notify('소스 DB를 먼저 연결하세요', 'warn'); return }
   if (!connector.target.host) { app.notify('타겟 DB를 연결해야 검증이 가능합니다', 'warn'); return }
 
+  // ════════════════════════════════════════════════════════════════
+  // v95_p2 hotfix2 (2026-05-02) 본부장님 명령 — 검증 실행 시 패널 자동 접기
+  //   "오브젝트 검증 실행 누르면 '소스 오브젝트 선택' 창은 닫힘 → 결과 영역 더 넓게"
+  //   타이틀 바 클릭 시 다시 펼침 (사용자 의도)
+  // ════════════════════════════════════════════════════════════════
+  objPanelCollapsed.value = true
+
+  // v95_p7 (2026-05-02) 본부장님 명령 — 좌측 메뉴 진행 표시기
+  //   "어느 페이지에서 작업 수행 중인지 알 수 있어야"
+  //   오브젝트 검증 시작 → /validate, /validate/tables 메뉴에 수레바퀴
+  app.setValidateRunning('object', 0, '오브젝트 검증')
+
   // v90.78e (2026-04-29): _sel 깜박임 제거
   //   호소: "2개만 체크했는데 검증 실행 시 16개 다 실행됨" (v90.78d 에서 fix 했지만 깜박임)
   //   원인: loadSrcObjects → watch 가 default true 로 만든 후 사후 복원 → 깜박임
@@ -3508,18 +3622,19 @@ async function runObjValidate(){
   await objRs.start()  // v43
   const tgt = connector.target
   let _objAborted = false
-  for (const r of objResults.value) {
-    // v43: 일시정지 대기 + 중단 플래그 체크
-    await objRs.waitIfPaused()
-    if (objRs.stopFlag.value) {
-      _objAborted = true
-      console.log('[v43 runObjValidate] stopped by user at', r.name)
-      break
-    }
+
+  // ════════════════════════════════════════════════════════════════
+  // v95_p2 hotfix1 (2026-05-02) 본부장님 명령 — 객체 검증 동시 실행
+  //   "기능 연동돼서 멀티로 수행"
+  //   배치 크기 = objConcurrency (1=순차 / 3-20=병렬)
+  //   각 배치 내: Promise.all 로 병렬 (독립적 CHECK_EXISTS API 호출)
+  //   배치 사이: 일시정지/중단 체크 + 짧은 대기 (DB 부하 분산)
+  // ════════════════════════════════════════════════════════════════
+  const _checkOne = async (r) => {
     let exists = false
     let matchedName = null
     let nameVariant = null
-    let diagnostics = null   // v50: 진단 정보
+    let diagnostics = null
     try {
       const { data } = await axios.post('/api/v1/schema/execute-object', {
         db_type: tgt.dbType, host: tgt.host, port: tgt.port,
@@ -3537,8 +3652,6 @@ async function runObjValidate(){
 
       // v57: similar_names 에 단 1개만 있으면 — 즉 이름 prefix/suffix 만 다른 변형이
       // 타겟에 확실히 존재하면 — 그 이름을 실제 매칭으로 인정.
-      // 예: bare='sp_reverse_trx' similar=['settlement_sp_reverse_trx'] → 존재 인정.
-      // 이렇게 해야 사용자가 "타겟 없음" 으로 오진단받고 AI 재변환을 다시 돌리는 헛수고를 없앰.
       if (!exists && diagnostics?.similar_names?.length === 1) {
         exists = true
         matchedName = diagnostics.similar_names[0]
@@ -3547,7 +3660,6 @@ async function runObjValidate(){
           `[CHECK_EXISTS] ✓ ${r.name} (similar_names 자동 매칭 → '${matchedName}')`
         )
       } else if (!exists && diagnostics) {
-        // v50: 진단 로그 — "타겟 없음" 오진단 시 콘솔에서 즉시 원인 파악 가능
         console.warn(
           `[CHECK_EXISTS] ✗ NOT FOUND: ${r.name}`,
           `\n  타겟 DB: ${diagnostics.db}`,
@@ -3567,7 +3679,29 @@ async function runObjValidate(){
     r.status = exists ? 'ok' : 'missing'
     r.matched_name = matchedName
     r.name_variant = nameVariant
-    r.diagnostics = diagnostics   // v50: 진단 정보 행에 저장 — UI 툴팁/펼침용
+    r.diagnostics = diagnostics
+  }
+
+  // 동시 실행 배치 처리
+  const batchSize = Math.max(1, objConcurrency.value || 1)
+  const allTargets = objResults.value
+  for (let i = 0; i < allTargets.length; i += batchSize) {
+    // 일시정지 대기 + 중단 플래그 체크 (각 배치 *시작* 시점)
+    await objRs.waitIfPaused()
+    if (objRs.stopFlag.value) {
+      _objAborted = true
+      console.log('[v43 runObjValidate] stopped by user at batch', Math.floor(i/batchSize)+1)
+      break
+    }
+
+    const batch = allTargets.slice(i, i + batchSize)
+    // 배치 내 병렬 실행
+    await Promise.all(batch.map(_checkOne))
+
+    // 배치 사이 짧은 대기 (DB 부하 분산, 마지막 배치는 생략)
+    if (i + batchSize < allTargets.length) {
+      await new Promise(res => setTimeout(res, 150))
+    }
   }
   objRunning.value = false
   objRs.finish()  // v43
@@ -3575,6 +3709,8 @@ async function runObjValidate(){
   if (_objAborted) {
     const checked = objResults.value.filter(r => r.status !== 'checking').length
     app.notify(`오브젝트 검증 중단됨 — ${checked}/${objResults.value.length}개 부분 결과 보존`, 'warn')
+    // v95_p7: 좌측 메뉴 진행 표시기 — abort 종료
+    app.clearValidateRunning()
     return
   }
 
@@ -3583,6 +3719,8 @@ async function runObjValidate(){
 
   // 목록 로드 직후 자동으로 전체 테스트 실행
   await runAllObjTest()
+  // v95_p7: 좌측 메뉴 진행 표시기 — 모든 종료 (정상 + 자동 테스트 완료)
+  app.clearValidateRunning()
 }
 
 // v50: 진단 정보 표시 — "타겟 없음"인데 실제로 존재하는 경우 원인 분석
@@ -4705,17 +4843,41 @@ async function runSelectedObjTest() {
   if (!testable.length) { app.notify('선택된 항목이 없습니다', 'warn'); return }
   objTesting.value  = true
   objTestTotal.value = testable.length
-  for (let i = 0; i < testable.length; i++) {
-    const r = testable[i]
-    objTestIdx.value     = i + 1
-    objTestCurName.value = r.name
-    await runObjTest(r, false)
-    await new Promise(res => setTimeout(res, 300))
+
+  // ════════════════════════════════════════════════════════════════
+  // v95_p2 (2026-05-02) 본부장님 명령 — 동시 실행 (배치 병렬)
+  //   배치 크기 = objConcurrency (1=순차 / 3-20=병렬)
+  //   각 배치 내: Promise.all 로 병렬
+  //   배치 사이: 200ms 대기 (DB 부하 분산)
+  // ════════════════════════════════════════════════════════════════
+  const batchSize = Math.max(1, objConcurrency.value || 1)
+  let processed = 0
+  for (let i = 0; i < testable.length; i += batchSize) {
+    const batch = testable.slice(i, i + batchSize)
+    objTestCurName.value = batch.length > 1
+      ? `${batch.length}개 동시 실행 중 (${batch[0].name} 외)`
+      : batch[0].name
+    // 병렬 실행
+    await Promise.all(batch.map(async r => {
+      const idx = ++processed
+      objTestIdx.value = idx
+      try {
+        await runObjTest(r, false)
+      } catch (e) {
+        console.warn('[v95_p2] runObjTest 실패:', r.name, e)
+      }
+    }))
+    // 배치 사이 짧은 대기 (DB 부하 분산, 마지막 배치는 생략)
+    if (i + batchSize < testable.length) {
+      await new Promise(res => setTimeout(res, 200))
+    }
   }
+
   objTestCurName.value = ''
   const pass = testable.filter(r=>r.testStatus==='pass'&&r.srcTestStatus==='pass').length
   const fail = testable.filter(r=>r.testStatus==='fail'||r.srcTestStatus==='fail').length
-  app.notify(`선택 테스트 완료 — 성공 ${pass}개 / 실패 ${fail}개`, fail?'warn':'success')
+  const concMsg = batchSize > 1 ? ` (동시 ${batchSize}개)` : ''
+  app.notify(`선택 테스트 완료${concMsg} — 성공 ${pass}개 / 실패 ${fail}개`, fail?'warn':'success')
   objTesting.value = false
   // v70: 자동 팝업 — 이미 재이관 팝업/루프 실행 중이면 무시.
   //   예전엔 검증 끝 → 800ms 후 무조건 openRemigrateModal() → 기존 팝업 덮어써서 루프 중단 버그 유발.
@@ -4753,17 +4915,36 @@ async function runAllObjTest() {
   if (!testable.length) return
   objTesting.value   = true
   objTestTotal.value = testable.length
-  for (let i = 0; i < testable.length; i++) {
-    const r = testable[i]
-    objTestIdx.value     = i + 1
-    objTestCurName.value = r.name
-    await runObjTest(r, false)
-    await new Promise(res => setTimeout(res, 300))
+
+  // ════════════════════════════════════════════════════════════════
+  // v95_p2 (2026-05-02) 본부장님 명령 — 동시 실행 (배치 병렬)
+  // ════════════════════════════════════════════════════════════════
+  const batchSize = Math.max(1, objConcurrency.value || 1)
+  let processed = 0
+  for (let i = 0; i < testable.length; i += batchSize) {
+    const batch = testable.slice(i, i + batchSize)
+    objTestCurName.value = batch.length > 1
+      ? `${batch.length}개 동시 실행 중 (${batch[0].name} 외)`
+      : batch[0].name
+    await Promise.all(batch.map(async r => {
+      const idx = ++processed
+      objTestIdx.value = idx
+      try {
+        await runObjTest(r, false)
+      } catch (e) {
+        console.warn('[v95_p2] runObjTest 실패:', r.name, e)
+      }
+    }))
+    if (i + batchSize < testable.length) {
+      await new Promise(res => setTimeout(res, 200))
+    }
   }
+
   objTestCurName.value = ''
   const pass = objResults.value.filter(r=>r.testStatus==='pass' && r.srcTestStatus==='pass').length
   const fail = objResults.value.filter(r=>r.testStatus==='fail' || r.srcTestStatus==='fail').length
-  app.notify(`실행 테스트 완료 — 성공 ${pass}개 / 실패 ${fail}개`, fail ? 'warn' : 'success')
+  const concMsg = batchSize > 1 ? ` (동시 ${batchSize}개)` : ''
+  app.notify(`실행 테스트 완료${concMsg} — 성공 ${pass}개 / 실패 ${fail}개`, fail ? 'warn' : 'success')
   objTesting.value = false
   // v70: 동일한 방어 — 진행 중 재이관 덮어쓰기 방지
   if (fail > 0) {
@@ -6206,11 +6387,35 @@ onMounted(()=>{
 .vp-obj-panel { border:0.5px solid var(--border-light); border-radius:10px; overflow:hidden; }
 
 .vp-obj-hdr {
-  display:flex; align-items:center; justify-content:space-between;
+  display:flex; align-items:center;
   padding:8px 14px; background:var(--bg-secondary);
   border-bottom:0.5px solid var(--border-light);
+  gap: 8px;
 }
 .vp-obj-hdr-title { font-size:12.5px; font-weight:600; color:var(--text-primary); }
+
+/* ════════════════════════════════════════════════════════════════
+   v95_p2 hotfix2 (2026-05-02) 본부장님 명령 — 패널 토글
+   ════════════════════════════════════════════════════════════════ */
+.vp-obj-hdr-toggle {
+  cursor: pointer;
+  user-select: none;
+  transition: background-color .12s;
+}
+.vp-obj-hdr-toggle:hover {
+  background: var(--bg-hover, rgba(59,130,246,.06));
+}
+.vp-obj-toggle-arrow {
+  color: var(--text-secondary, #64748b);
+  transition: transform .15s ease;
+}
+.vp-obj-toggle-arrow.collapsed {
+  transform: rotate(-90deg);   /* 접힘 시 ▶ 모양 */
+}
+/* 접힘 시 헤더 하단 border 제거 (모서리 깔끔하게) */
+.vp-obj-panel:has(.vp-obj-toggle-arrow.collapsed) .vp-obj-hdr {
+  border-bottom: 0;
+}
 
 /* 4분할 가로 레이아웃 */
 .vp-obj-sections {
@@ -6801,6 +7006,60 @@ onMounted(()=>{
 /* 선택 실행 버튼 — 일반 chip-run보다 강조 */
 .vp-sel-run-btn {
   box-shadow: 0 0 0 2px rgba(59,130,246,.25);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   v95_p2 (2026-05-02) 본부장님 명령 — 동시 실행 옵션 UI
+     "텍스트 두 줄 안 나오게 충분한 폭 확보"
+   처방: white-space:nowrap + min-width 충분 + flex inline
+   ════════════════════════════════════════════════════════════════ */
+.vp-conc-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;          /* 두 줄 방지 */
+  height: 28px;
+  padding: 0 6px;
+  background: var(--bg-secondary, #f8fafc);
+  border: 0.5px solid var(--border-mid, rgba(0,0,0,0.1));
+  border-radius: 6px;
+}
+.vp-conc-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary, #64748b);
+  white-space: nowrap;
+  margin: 0;
+}
+.vp-conc-select {
+  min-width: 110px;             /* "3개 (권장)" 텍스트 한 줄에 충분 */
+  height: 22px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-family: inherit;
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary, #1e293b);
+  border: 0.5px solid var(--border-mid, rgba(0,0,0,0.15));
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  outline: none;
+  transition: border-color .12s, box-shadow .12s;
+}
+.vp-conc-select:hover:not(:disabled) {
+  border-color: rgba(59,130,246,.5);
+}
+.vp-conc-select:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59,130,246,.15);
+}
+.vp-conc-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.vp-conc-select option {
+  white-space: nowrap;          /* 옵션 한 줄 */
+  padding: 4px 8px;
 }
 
 /* 파라미터 추천 소스 아이콘 */

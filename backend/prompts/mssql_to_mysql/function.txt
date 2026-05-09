@@ -10,6 +10,45 @@
      ...
    END
 
+   ★★ v95_p88+ 핵심 규칙 — 타입에 백틱 절대 금지 + AS 키워드 금지 ★★
+
+   ✅ 올바른 예 (DO):
+      CREATE FUNCTION `ufn_get_price`
+      (p_ProductID INT, p_OrderDate DATETIME)
+      RETURNS DECIMAL(19,4)
+      DETERMINISTIC
+      BEGIN
+        DECLARE v_price DECIMAL(19,4);
+        SELECT price INTO v_price FROM Production_Product WHERE ProductID = p_ProductID;
+        RETURN v_price;
+      END
+
+   ❌ 잘못된 예 (DON'T) — 1064 오류 발생:
+      CREATE FUNCTION `ufn_get_price`
+      (p_ProductID `int`, p_OrderDate `datetime`)   ← 타입에 백틱 금지
+      RETURNS `money`                                ← 타입에 백틱 + MSSQL 타입 금지
+      AS                                             ← AS 키워드 금지 (MSSQL 잔재)
+      BEGIN
+        ...
+      END
+
+   규칙 요약:
+   - 백틱 O: `함수명`, `테이블명`, `컬럼명` (식별자)
+   - 백틱 X: INT, DATETIME, VARCHAR(255), DECIMAL(19,4) 등 모든 타입
+   - AS 키워드: MSSQL 만 사용 — MySQL 에서는 RETURNS 다음 바로 DETERMINISTIC + BEGIN
+   - DETERMINISTIC 또는 NOT DETERMINISTIC 반드시 명시 (없으면 1418 오류)
+
+   MSSQL → MySQL 타입 매핑 (반드시 적용):
+   - MSSQL `MONEY` → MySQL DECIMAL(19,4)
+   - MSSQL `SMALLMONEY` → MySQL DECIMAL(10,4)
+   - MSSQL `DATETIME2` → MySQL DATETIME(6)
+   - MSSQL `DATETIMEOFFSET` → MySQL VARCHAR(35)
+   - MSSQL `UNIQUEIDENTIFIER` → MySQL VARCHAR(36)
+   - MSSQL `HIERARCHYID` → MySQL VARCHAR(500)
+   - MSSQL `XML` → MySQL LONGTEXT
+   - MSSQL `NVARCHAR(N)` → MySQL VARCHAR(N) (utf8mb4)
+   - MSSQL `NVARCHAR(MAX)` → MySQL LONGTEXT
+
 2. DETERMINISTIC 명시 필수
    - 같은 입력에 같은 결과 → DETERMINISTIC
    - 랜덤/시간/외부 의존 → NOT DETERMINISTIC
@@ -100,3 +139,96 @@
      );
      RETURN IFNULL(v_result, JSON_ARRAY());
    END
+
+# ════════════════════════════════════════════════════════════════
+# v92p17 (2026-04-30): WHILE 루프 + 인라인 TVF 변환 예시
+# ════════════════════════════════════════════════════════════════
+
+# 예시 A: WHILE 루프 정확한 변환
+# 출처: ref.fn_next_business_day (capital_midsize 환경)
+
+# T-SQL 원본:
+#   CREATE FUNCTION ref.fn_next_business_day(@dt DATE)
+#   RETURNS DATE AS
+#   BEGIN
+#       DECLARE @d DATE = DATEADD(day, 1, @dt);
+#       WHILE DATEPART(weekday, @d) IN (1, 7)
+#             OR EXISTS (SELECT 1 FROM ref.holiday WHERE holiday_date = @d)
+#       BEGIN
+#           SET @d = DATEADD(day, 1, @d);
+#       END
+#       RETURN @d;
+#   END
+
+# MySQL 정확한 변환:
+DELIMITER //
+CREATE FUNCTION ref_fn_next_business_day(p_dt DATE)
+RETURNS DATE
+DETERMINISTIC
+READS SQL DATA
+BEGIN
+    DECLARE v_d DATE DEFAULT DATE_ADD(p_dt, INTERVAL 1 DAY);
+    WHILE DAYOFWEEK(v_d) IN (1, 7)
+          OR EXISTS (SELECT 1 FROM ref_holiday WHERE holiday_date = v_d)
+    DO
+        SET v_d = DATE_ADD(v_d, INTERVAL 1 DAY);
+    END WHILE;
+    RETURN v_d;
+END //
+DELIMITER ;
+
+# 핵심 변환 규칙:
+#   T-SQL                      MySQL
+#   WHILE cond BEGIN ... END   WHILE cond DO ... END WHILE;
+#   DATEPART(weekday, x)       DAYOFWEEK(x)
+#   DATEADD(day, n, x)         DATE_ADD(x, INTERVAL n DAY)
+#   schema.table               schema_table (underscore 정책)
+#   DECLARE @x DATE = expr     DECLARE v_x DATE DEFAULT expr
+# 
+# 절대 금지:
+#   ❌ WHILE 안에 IF/END IF 추가 (1064 오류)
+#   ❌ END WHILE 누락 또는 END 만 작성
+
+
+# 예시 B: 인라인 TVF — VIEW 또는 PROCEDURE 로 재설계
+# 출처: settlement.tvf_daily_trx (capital_midsize 환경)
+
+# T-SQL 원본:
+#   CREATE FUNCTION settlement.tvf_daily_trx(@d DATE)
+#   RETURNS TABLE AS
+#   RETURN (
+#       SELECT trx_type, COUNT(*) AS cnt, SUM(amount) AS total
+#       FROM settlement.trx_history
+#       WHERE CAST(trx_date AS DATE) = @d
+#       GROUP BY trx_type
+#   );
+
+# MySQL — 옵션 A (VIEW, 권장):
+CREATE OR REPLACE VIEW settlement_v_daily_trx AS
+SELECT DATE(trx_date) AS d, trx_type,
+       COUNT(*) AS cnt, SUM(amount) AS total
+FROM settlement_trx_history
+GROUP BY DATE(trx_date), trx_type;
+
+# 호출 변경:
+#   T-SQL: SELECT * FROM settlement.tvf_daily_trx('2024-01-01');
+#   MySQL: SELECT * FROM settlement_v_daily_trx WHERE d = '2024-01-01';
+
+# MySQL — 옵션 B (PROCEDURE, 파라미터 유지):
+DELIMITER //
+CREATE PROCEDURE settlement_tvf_daily_trx(IN p_d DATE)
+BEGIN
+    SELECT trx_type, COUNT(*) AS cnt, SUM(amount) AS total
+    FROM settlement_trx_history
+    WHERE DATE(trx_date) = p_d
+    GROUP BY trx_type;
+END //
+DELIMITER ;
+
+# 호출:
+#   CALL settlement_tvf_daily_trx('2024-01-01');
+
+# 결정 가이드:
+#   - 호출 패턴이 SELECT FROM tvf(...)  → 옵션 A (VIEW)
+#   - 호출 패턴이 EXEC / 단독 호출      → 옵션 B (PROCEDURE)
+#   - 모르면 기본 옵션 A

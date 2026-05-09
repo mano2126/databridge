@@ -474,6 +474,343 @@
       <!-- ── Step 2: 변환 규칙 ── -->
       <template v-if="cur===2">
 
+        <!-- ── v95_p23a (2026-05-03 본부장님 본질 처방): 사전 분석 결과 ── -->
+        <!-- 본부장님 호소: "Dead lock 걸릴 거 분석해서 회피" -->
+        <div v-if="preflightAnalyzing" class="preflight-banner preflight-loading">
+          <span class="spinner" style="width:14px;height:14px;display:inline-block"></span>
+          <span><strong>사전 분석 진행 중…</strong> Deadlock / AI 변환 / 의존성 / 성능 위험 검사</span>
+        </div>
+        <div v-else-if="preflightSummary.total > 0" class="preflight-banner"
+             :class="preflightSummary.critical > 0 ? 'preflight-critical' :
+                     preflightSummary.warn > 0 ? 'preflight-warn' : 'preflight-info'">
+          <div class="preflight-header" @click="preflightOpen=!preflightOpen" style="cursor:pointer">
+            <span class="preflight-icon">
+              {{ preflightSummary.critical > 0 ? '🔴' :
+                 preflightSummary.warn > 0 ? '🟡' : 'ℹ️' }}
+            </span>
+            <span class="preflight-title">
+              <strong>사전 분석 완료</strong> — 위험 {{ preflightSummary.total }}건 감지
+              <span v-if="preflightSummary.critical > 0" class="preflight-badge crit">긴급 {{ preflightSummary.critical }}</span>
+              <span v-if="preflightSummary.warn > 0" class="preflight-badge warn">주의 {{ preflightSummary.warn }}</span>
+              <span v-if="preflightSummary.info > 0" class="preflight-badge info">정보 {{ preflightSummary.info }}</span>
+              <span v-if="preflightSummary.auto_fix_count > 0" class="preflight-badge fix">
+                ✓ 자동 수정 {{ preflightSummary.auto_fix_count }}
+              </span>
+            </span>
+            <!-- v95_p37 본질 1 (2026-05-05 본부장님): sort 토글 -->
+            <div v-if="preflightOpen" class="pf-sort-controls" @click.stop>
+              <span class="pf-sort-label">정렬:</span>
+              <button class="pf-sort-btn" :class="{'on': pfSortMode==='severity'}"
+                      @click="pfSortMode='severity'" title="긴급 → 주의 → 정보 순">위험도</button>
+              <button class="pf-sort-btn" :class="{'on': pfSortMode==='category'}"
+                      @click="pfSortMode='category'" title="카테고리 그룹 순">카테고리</button>
+              <button class="pf-sort-btn" :class="{'on': pfSortMode==='affected'}"
+                      @click="pfSortMode='affected'" title="영향 객체 많은 순">영향순</button>
+            </div>
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"
+                 :style="{transform:preflightOpen?'rotate(180deg)':'rotate(0)',transition:'transform .2s',width:'12px',height:'12px',marginLeft:'10px',opacity:.6}">
+              <polyline points="2,5 7,10 12,5"/>
+            </svg>
+          </div>
+          <!-- v95_p37 본질 1 (2026-05-05): 좌-우 마스터-디테일 레이아웃 -->
+          <div v-if="preflightOpen" class="pf-master-detail">
+            <!-- 좌측: 간략 리스트 (sort 적용) -->
+            <div class="pf-list">
+              <!-- v95_p84 (2026-05-06 본부장님): 일괄 처리 헤더 -->
+              <!--   본부장님 호소: "오른쪽 창을 끝까지 드레그 한 후 하나씩 선택하기 너무 번거로워" -->
+              <!--   효과: 위험 객체 N개 → 한 번 클릭으로 모두 같은 결정 -->
+              <div v-if="objectRiskCount > 0" class="pf-bulk-actions">
+                <span class="pf-bulk-label">⚡ 일괄 처리 ({{ objectRiskCount }}건):</span>
+                <!-- v95_p89_ux (2026-05-07 본부장님): 라벨 + 더 명확한 title -->
+                <button class="pf-bulk-btn pf-bulk-auto"
+                        @click="setAllObjectDecisions('auto')"
+                        title="🤖 모든 위험 객체를 [자동 변환] 으로 — AI 가 변환 + 안전 검증 (추천)">
+                  🤖 모두 자동
+                </button>
+                <button class="pf-bulk-btn pf-bulk-exclude"
+                        @click="setAllObjectDecisions('exclude')"
+                        title="⊘ 모든 위험 객체를 [이관 제외] 로 — 이관하지 않음">
+                  ⊘ 모두 제외
+                </button>
+                <button class="pf-bulk-btn pf-bulk-clear"
+                        @click="clearAllObjectDecisions()"
+                        title="↻ 모든 결정 초기화 — 다시 선택할 수 있게 비움">
+                  ↻ 초기화
+                </button>
+              </div>
+              
+              <div v-for="(r,ri) in sortedPreflightRisks" :key="ri"
+                   class="pf-list-item"
+                   :class="['pf-level-' + r.level, {'pf-selected': pfSelectedIdx === ri}]"
+                   @click="pfSelectedIdx = ri">
+                <span class="pf-list-level" :class="'level-' + r.level">
+                  {{ r.level === 'critical' ? '긴급' : r.level === 'warn' ? '주의' : '정보' }}
+                </span>
+                <span class="pf-list-cat-icon">
+                  {{ r.category === 'deadlock_risk' ? '🔒' :
+                     r.category === 'ai_conversion' ? '🤖' :
+                     r.category === 'dependency' ? '🔗' :
+                     r.category === 'performance' ? '⚡' :
+                     r.category === 'object_risk' ? '⚠️' : '📋' }}
+                </span>
+                <span class="pf-list-title">{{ r.title }}</span>
+                <!-- v95_p75 (2026-05-06 본부장님): 객체별 결정 뱃지 표시 -->
+                <span v-if="r.category === 'object_risk' && r.risk_meta && getObjectDecision(r.risk_meta.obj_name)"
+                      class="pf-list-decision-badge"
+                      :class="'pf-list-decision-' + getObjectDecision(r.risk_meta.obj_name)"
+                      :title="'결정: ' + getObjectDecisionLabel(r.risk_meta.obj_name)">
+                  {{ getObjectDecision(r.risk_meta.obj_name) === 'auto' ? '🤖' :
+                     getObjectDecision(r.risk_meta.obj_name) === 'manual' ? '✍️' :
+                     getObjectDecision(r.risk_meta.obj_name) === 'exclude' ? '⊘' : '' }}
+                </span>
+                <span v-if="r.affected_count" class="pf-list-count">{{ r.affected_count }}</span>
+                <!-- v95_p84 (2026-05-06 본부장님): 좌측 인라인 결정 버튼 -->
+                <!--   본부장님 호소:                                          -->
+                <!--   "오른쪽 창을 끝까지 드레그 한 후 하나씩 선택하기 너무 번거로워" -->
+                <!--   효과: 좌측에서 즉시 결정 가능 — 우측 드래그 0          -->
+                <span v-if="r.category === 'object_risk' && r.risk_meta"
+                      class="pf-list-quick-actions"
+                      @click.stop>
+                  <!-- ════════════════════════════════════════════════════════ -->
+                  <!-- v95_p89_ux (2026-05-07 본부장님 본질 처방):                 -->
+                  <!-- 풍선 도움말 강화 — title 만으로 부족 → data-tip + CSS tooltip -->
+                  <!-- 본부장님 호소: "로봇/손글씨 무슨 뜻인지 모르겠어"            -->
+                  <!-- ════════════════════════════════════════════════════════ -->
+                  <button class="pf-quick-btn pf-quick-auto"
+                          :class="{ active: getObjectDecision(r.risk_meta.obj_name) === 'auto' }"
+                          @click.stop="setObjectDecision(r.risk_meta.obj_name, 'auto')"
+                          title="🤖 자동 변환 — AI 가 변환 후 안전 검증 (추천)"
+                          data-tip="🤖 자동 변환 (AI + 안전 검증)">
+                    🤖
+                  </button>
+                  <button class="pf-quick-btn pf-quick-manual"
+                          :class="{ active: getObjectDecision(r.risk_meta.obj_name) === 'manual' }"
+                          @click.stop="setObjectDecision(r.risk_meta.obj_name, 'manual'); pfSelectedIdx = ri; openManualSqlModal(r.risk_meta.obj_name)"
+                          title="✍️ 직접 작성 — DBA 가 직접 SQL 작성 (전문가용)"
+                          data-tip="✍️ 직접 작성 (DBA 전문가)">
+                    ✍️
+                  </button>
+                  <button class="pf-quick-btn pf-quick-exclude"
+                          :class="{ active: getObjectDecision(r.risk_meta.obj_name) === 'exclude' }"
+                          @click.stop="setObjectDecision(r.risk_meta.obj_name, 'exclude')"
+                          title="⊘ 이관 제외 — 이 객체는 이관하지 않음"
+                          data-tip="⊘ 이관 제외">
+                    ⊘
+                  </button>
+                </span>
+              </div>
+            </div>
+            <!-- 우측: 상세 -->
+            <div class="pf-detail">
+              <template v-if="selectedRisk">
+                <div class="pf-detail-head">
+                  <span class="pf-detail-level" :class="'level-' + selectedRisk.level">
+                    {{ selectedRisk.level === 'critical' ? '긴급' :
+                       selectedRisk.level === 'warn' ? '주의' : '정보' }}
+                  </span>
+                  <span class="pf-detail-cat">
+                    {{ selectedRisk.category === 'deadlock_risk' ? '🔒 Deadlock' :
+                       selectedRisk.category === 'ai_conversion' ? '🤖 AI 변환' :
+                       selectedRisk.category === 'dependency' ? '🔗 의존성' :
+                       selectedRisk.category === 'performance' ? '⚡ 성능' :
+                       selectedRisk.category === 'object_risk' ? '⚠️ 객체 변환 위험' : selectedRisk.category }}
+                  </span>
+                  <span class="pf-detail-title">{{ selectedRisk.title }}</span>
+                </div>
+                <div class="pf-detail-desc">{{ selectedRisk.desc }}</div>
+                <div v-if="selectedRisk.affected && selectedRisk.affected.length > 0"
+                     class="pf-detail-affected">
+                  <div class="pf-detail-section-label">
+                    영향 객체 <span class="pf-detail-section-count">({{ selectedRisk.affected_count || selectedRisk.affected.length }}개)</span>
+                  </div>
+                  <div class="pf-detail-chips">
+                    <span v-for="(a,ai) in (showAllAffected ? selectedRisk.affected : selectedRisk.affected.slice(0, 10))"
+                          :key="ai" class="preflight-chip">{{ a }}</span>
+                    <button v-if="selectedRisk.affected.length > 10 || (selectedRisk.affected_count > selectedRisk.affected.length)"
+                            class="pf-show-more-btn"
+                            @click="showAllAffected=!showAllAffected">
+                      {{ showAllAffected ? '접기' :
+                         `+${(selectedRisk.affected_count || selectedRisk.affected.length) - 10}개 더 보기` }}
+                    </button>
+                  </div>
+                </div>
+                <!-- v95_p64 (2026-05-05 본부장님): object_risk 상세 메타 카드 -->
+                <!--   본부장님 결정: "5 Phase 모두 순차 — 엔터프라이즈 솔루션" -->
+                <!--   검출된 위험 패턴 + 자동 변환 신뢰도 + MySQL 대안 가이드 -->
+                <div v-if="selectedRisk.category === 'object_risk' && selectedRisk.risk_meta"
+                     class="pf-detail-risk-meta">
+                  <!-- 신뢰도 게이지 -->
+                  <div v-if="selectedRisk.risk_meta.confidence_pct !== undefined"
+                       class="pf-rm-confidence">
+                    <div class="pf-rm-conf-label">
+                      자동 변환 신뢰도
+                      <strong :class="{
+                        'pf-rm-conf-low':  selectedRisk.risk_meta.confidence_pct < 30,
+                        'pf-rm-conf-mid':  selectedRisk.risk_meta.confidence_pct >= 30 && selectedRisk.risk_meta.confidence_pct < 70,
+                        'pf-rm-conf-high': selectedRisk.risk_meta.confidence_pct >= 70,
+                      }">{{ selectedRisk.risk_meta.confidence_pct }}%</strong>
+                    </div>
+                    <div class="pf-rm-conf-bar">
+                      <div class="pf-rm-conf-fill"
+                           :style="{
+                             width: selectedRisk.risk_meta.confidence_pct + '%',
+                             background: selectedRisk.risk_meta.confidence_pct < 30 ? '#dc2626' :
+                                         selectedRisk.risk_meta.confidence_pct < 70 ? '#f59e0b' : '#16a34a'
+                           }">
+                      </div>
+                    </div>
+                  </div>
+                  <!-- 검출 패턴 목록 -->
+                  <div v-if="selectedRisk.risk_meta.detected_patterns && selectedRisk.risk_meta.detected_patterns.length > 0"
+                       class="pf-rm-patterns">
+                    <div class="pf-detail-section-label">
+                      검출된 위험 패턴
+                      <span class="pf-detail-section-count">({{ selectedRisk.risk_meta.detected_patterns.length }}개)</span>
+                    </div>
+                    <div v-for="(p, pi) in selectedRisk.risk_meta.detected_patterns" :key="pi"
+                         class="pf-rm-pattern-card"
+                         :class="'pf-rm-pat-' + (p.risk_level || '').toLowerCase()">
+                      <div class="pf-rm-pat-head">
+                        <span class="pf-rm-pat-level">
+                          {{ p.risk_level === 'HIGH' ? '🔴 HIGH' :
+                             p.risk_level === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW' }}
+                        </span>
+                        <span class="pf-rm-pat-label">{{ p.label }}</span>
+                      </div>
+                      <div v-if="p.description" class="pf-rm-pat-desc">{{ p.description }}</div>
+                      <div v-if="p.mysql_alternative" class="pf-rm-pat-alt">
+                        <strong>💡 대안:</strong> {{ p.mysql_alternative }}
+                      </div>
+                      <div v-if="p.matches && p.matches.length > 0" class="pf-rm-pat-matches">
+                        <code v-for="(m, mi) in p.matches.slice(0, 2)" :key="mi"
+                              class="pf-rm-pat-match">{{ m }}</code>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- 권장 처리 -->
+                  <div v-if="selectedRisk.risk_meta.recommendation"
+                       class="pf-rm-recommendation">
+                    {{ selectedRisk.risk_meta.recommendation }}
+                  </div>
+                  <!-- v95_p73: 사용자 친화 추가 안내 (HIGH 위험 객체용) -->
+                  <div v-if="selectedRisk.risk_meta.overall_risk === 'HIGH'"
+                       class="pf-rm-friendly-note">
+                    <strong>💡 걱정하지 마세요!</strong><br>
+                    DataBridge 가 알아서 처리합니다. 아래 [자동 변환 시도] 를 선택하시면:
+                    <ul class="pf-rm-friendly-list">
+                      <li>AI 가 MSSQL → MySQL 변환을 시도합니다</li>
+                      <li>가짜 테이블 등 오류는 <strong>자동으로 검출 + 수정</strong> 됩니다 (v95_p72)</li>
+                      <li>이관 후 검토 화면에서 변환 결과 + 자동 수정 노트 확인 가능</li>
+                      <li>문제가 있으면 [이관 제외] 로 다시 처리 가능 (테이블 데이터는 이관됨)</li>
+                    </ul>
+                  </div>
+                  <!-- v95_p65 (2026-05-05 본부장님): 사용자 결정 3-옵션 버튼 -->
+                  <!-- v95_p73 (2026-05-06 본부장님 5번째 통찰): 사용자 친화 -->
+                  <!-- v95_p76 (2026-05-06 본부장님 추가): 컴팩트 라디오 리스트 -->
+                  <!--   본부장님 호소:                                       -->
+                  <!--   "3가지 선택할 수 있는 블록은 조금 줄여도 될 것 같아"  -->
+                  <!--   "check box 로 선택할 수 있게 해주는것도 좋겠어"      -->
+                  <!--   효과:                                                 -->
+                  <!--   - 가로 카드 3개 → 세로 라디오 3줄 (높이 절반)        -->
+                  <!--   - 라디오 형태로 명확한 선택 표시                       -->
+                  <!--   - 우측 상세 영역 줄어든 폭에 맞음                     -->
+                  <div class="pf-rm-decision pf-rm-decision-compact">
+                    <div class="pf-rm-decision-label">
+                      📋 변환 방법 선택
+                    </div>
+                    <div class="pf-rm-decision-help">
+                      💡 잘 모르시면 <strong>[자동 변환 시도]</strong> 추천 — AI 변환 + 환각 자동 검증
+                    </div>
+                    <!-- v95_p76: 라디오 리스트 (컴팩트) -->
+                    <div class="pf-rm-radio-list">
+                      <label class="pf-rm-radio-row pf-rm-radio-auto"
+                             :class="{ active: getObjectDecision(selectedRisk.risk_meta.obj_name) === 'auto' }">
+                        <input type="radio"
+                               :name="'decision-' + selectedRisk.risk_meta.obj_name"
+                               :checked="getObjectDecision(selectedRisk.risk_meta.obj_name) === 'auto'"
+                               @change="setObjectDecision(selectedRisk.risk_meta.obj_name, 'auto')"
+                               class="pf-rm-radio-input">
+                        <span class="pf-rm-radio-icon">🤖</span>
+                        <span class="pf-rm-radio-text">
+                          <strong>자동 변환 시도</strong>
+                          <span class="pf-rm-radio-sub">AI 변환 + 환각 자동 검증 (추천)</span>
+                        </span>
+                      </label>
+                      <label class="pf-rm-radio-row pf-rm-radio-manual"
+                             :class="{ active: getObjectDecision(selectedRisk.risk_meta.obj_name) === 'manual' }">
+                        <input type="radio"
+                               :name="'decision-' + selectedRisk.risk_meta.obj_name"
+                               :checked="getObjectDecision(selectedRisk.risk_meta.obj_name) === 'manual'"
+                               @change="setObjectDecision(selectedRisk.risk_meta.obj_name, 'manual'); openManualSqlModal(selectedRisk.risk_meta.obj_name)"
+                               class="pf-rm-radio-input">
+                        <span class="pf-rm-radio-icon">✍️</span>
+                        <span class="pf-rm-radio-text">
+                          <strong>전문가 직접 작성</strong>
+                          <span class="pf-rm-radio-sub">DBA 만 권장 (MySQL DDL 직접)</span>
+                        </span>
+                      </label>
+                      <label class="pf-rm-radio-row pf-rm-radio-exclude"
+                             :class="{ active: getObjectDecision(selectedRisk.risk_meta.obj_name) === 'exclude' }">
+                        <input type="radio"
+                               :name="'decision-' + selectedRisk.risk_meta.obj_name"
+                               :checked="getObjectDecision(selectedRisk.risk_meta.obj_name) === 'exclude'"
+                               @change="setObjectDecision(selectedRisk.risk_meta.obj_name, 'exclude')"
+                               class="pf-rm-radio-input">
+                        <span class="pf-rm-radio-icon">⊘</span>
+                        <span class="pf-rm-radio-text">
+                          <strong>이관 제외</strong>
+                          <span class="pf-rm-radio-sub">이 객체 없이 진행</span>
+                        </span>
+                      </label>
+                    </div>
+                    <!-- v95_p73: 결정별 짧은 설명 (컴팩트하게) -->
+                    <div v-if="getObjectDecision(selectedRisk.risk_meta.obj_name) === 'manual'"
+                         class="pf-rm-d-explain pf-rm-d-explain-manual pf-rm-d-explain-compact">
+                      ⚠️ <strong>전문가 모드</strong> — 잘못 작성 시 이관 실패 가능
+                    </div>
+                    <div v-if="getObjectDecision(selectedRisk.risk_meta.obj_name) === 'exclude'"
+                         class="pf-rm-d-explain pf-rm-d-explain-exclude pf-rm-d-explain-compact">
+                      ⊘ <strong>이관 제외</strong> — 응용 프로그램에서 이 VIEW 사용 시 별도 처리 필요
+                    </div>
+                    <!-- v95_p75 (이전): 현재 결정 표시 강화 -->
+                    <!--   본부장님 호소: "어떤걸 선택했는지 보여 주자"        -->
+                    <!--   강화: 큰 뱃지 + 색상 + 아이콘으로 즉시 인식 가능   -->
+                    <div v-if="getObjectDecision(selectedRisk.risk_meta.obj_name)"
+                         class="pf-rm-d-status pf-rm-d-status-strong"
+                         :class="'pf-rm-d-status-strong-' + getObjectDecision(selectedRisk.risk_meta.obj_name)">
+                      <span class="pf-rm-d-status-icon">
+                        {{ getObjectDecision(selectedRisk.risk_meta.obj_name) === 'auto' ? '🤖' :
+                           getObjectDecision(selectedRisk.risk_meta.obj_name) === 'manual' ? '✍️' :
+                           getObjectDecision(selectedRisk.risk_meta.obj_name) === 'exclude' ? '⊘' : '' }}
+                      </span>
+                      <span class="pf-rm-d-status-text">
+                        <span class="pf-rm-d-status-label">선택됨:</span>
+                        <span class="pf-rm-d-status-value"
+                              :class="'pf-rm-d-status-' + getObjectDecision(selectedRisk.risk_meta.obj_name)">
+                          {{ getObjectDecisionLabel(selectedRisk.risk_meta.obj_name) }}
+                        </span>
+                      </span>
+                      <button class="pf-rm-d-clear" @click="clearObjectDecision(selectedRisk.risk_meta.obj_name)">
+                        ↻ 변경
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="selectedRisk.auto_fix" class="pf-detail-fix">
+                  <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+                       style="width:13px;height:13px;flex-shrink:0">
+                    <polyline points="2,6 5,9 10,3"/>
+                  </svg>
+                  <span>{{ selectedRisk.auto_fix }}</span>
+                </div>
+              </template>
+              <div v-else class="pf-detail-empty">
+                ← 좌측에서 항목을 선택하세요
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- ── 타입 정규화 규칙 ── -->
         <div class="norm-section">
           <div class="norm-header" @click="normOpen=!normOpen" style="cursor:pointer">
@@ -483,38 +820,95 @@
               <polyline points="1,3 7,9 13,3"/>
             </svg>
             <span class="norm-title">타입 정규화 규칙</span>
-            <span v-if="activeNormCount" class="norm-badge">{{ activeNormCount }}개 적용</span>
+            <span v-if="activeNormCount" class="norm-badge">{{ activeNormCount }} / {{ normRules.length }}개 적용</span>
+            <span v-else-if="normRules.length" class="norm-badge" style="background:var(--surface-subtle);color:var(--text-tertiary)">
+              0 / {{ normRules.length }}개 적용
+            </span>
             <span class="norm-desc">{{ form.srcDb?.toUpperCase() }} → {{ form.tgtDb?.toUpperCase() }} 타입 변환 규칙을 선택하세요</span>
+            <!-- v95_p25 (2026-05-04 본부장님 본질 처방): 전체선택/전체해제 버튼 -->
+            <div v-if="normRules.length" class="norm-bulk-actions" @click.stop>
+              <button class="norm-bulk-btn" @click="selectAllNorms" :disabled="isAllNormsSelected"
+                      :title="isAllNormsSelected ? '이미 모두 선택됨' : `${normRules.length}개 규칙 모두 선택`">
+                ✓ 전체 선택
+              </button>
+              <button class="norm-bulk-btn" @click="clearAllNorms" :disabled="!form.normActions.length"
+                      :title="!form.normActions.length ? '선택된 규칙 없음' : '모두 해제'">
+                ✗ 전체 해제
+              </button>
+            </div>
           </div>
 
           <template v-if="normOpen">
             <div v-if="!normRules.length" style="padding:12px 14px;font-size:12px;color:var(--text-tertiary)">
               해당 DB 조합의 정규화 규칙이 없습니다
             </div>
-            <div v-else class="norm-list">
-              <label v-for="rule in normRules" :key="rule.fix_action"
-                     class="norm-item" :class="{active: form.normActions.includes(rule.fix_action)}">
-                <input type="checkbox" style="display:none"
-                  :checked="form.normActions.includes(rule.fix_action)"
-                  @change="toggleNorm(rule.fix_action)"/>
-                <div class="norm-item-left">
-                  <span class="norm-chk" :class="{on: form.normActions.includes(rule.fix_action)}">
-                    <svg v-if="form.normActions.includes(rule.fix_action)" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2">
-                      <polyline points="1.5,5 4,7.5 8.5,2"/>
-                    </svg>
-                  </span>
-                  <div>
-                    <div class="norm-item-title">{{ rule.title }}</div>
-                    <div class="norm-item-types">
-                      <span class="type-chip src">{{ rule.src_type }}</span>
-                      <svg viewBox="0 0 10 8" fill="none" stroke="currentColor" stroke-width="1.3" style="width:10px;height:8px;opacity:.4"><path d="M1 4h8M6 1l3 3-3 3"/></svg>
-                      <span class="type-chip tgt">{{ rule.tgt_type }}</span>
+            <template v-else>
+              <!-- v95_p37 본질 2 (2026-05-05 본부장님): 적용 규칙 먼저 + 미적용 접힘 -->
+              <!-- 적용된 규칙 (체크된 것) — 항상 펼쳐짐 -->
+              <div v-if="appliedNormRules.length" class="norm-list norm-applied">
+                <div class="norm-group-label norm-group-applied">
+                  <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"
+                       style="width:11px;height:11px"><polyline points="2,6 5,9 10,3"/></svg>
+                  <span>적용 규칙 ({{ appliedNormRules.length }}개)</span>
+                </div>
+                <label v-for="rule in appliedNormRules" :key="rule.fix_action"
+                       class="norm-item active">
+                  <input type="checkbox" style="display:none"
+                    :checked="form.normActions.includes(rule.fix_action)"
+                    @change="toggleNorm(rule.fix_action)"/>
+                  <div class="norm-item-left">
+                    <span class="norm-chk on">
+                      <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="1.5,5 4,7.5 8.5,2"/>
+                      </svg>
+                    </span>
+                    <div>
+                      <div class="norm-item-title">{{ rule.title }}</div>
+                      <div class="norm-item-types">
+                        <span class="type-chip src">{{ rule.src_type }}</span>
+                        <svg viewBox="0 0 10 8" fill="none" stroke="currentColor" stroke-width="1.3" style="width:10px;height:8px;opacity:.4"><path d="M1 4h8M6 1l3 3-3 3"/></svg>
+                        <span class="type-chip tgt">{{ rule.tgt_type }}</span>
+                      </div>
                     </div>
                   </div>
+                  <span class="norm-item-level" :class="rule.level">{{ rule.level==='warn'?'주의':'정보' }}</span>
+                </label>
+              </div>
+              <!-- 미적용 규칙 — 기본 접힘, 클릭하면 펼침 -->
+              <div v-if="unappliedNormRules.length" class="norm-list norm-unapplied">
+                <div class="norm-group-label norm-group-collapsible"
+                     @click="normUnappliedOpen=!normUnappliedOpen"
+                     style="cursor:pointer">
+                  <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"
+                       :style="{transform:normUnappliedOpen?'rotate(0)':'rotate(-90deg)',transition:'transform .2s'}"
+                       style="width:9px;height:9px;opacity:.5">
+                    <polyline points="1,3 7,9 13,3"/>
+                  </svg>
+                  <span>미적용 규칙 ({{ unappliedNormRules.length }}개)</span>
+                  <span class="norm-group-hint">클릭하여 펼치기</span>
                 </div>
-                <span class="norm-item-level" :class="rule.level">{{ rule.level==='warn'?'주의':'정보' }}</span>
-              </label>
-            </div>
+                <template v-if="normUnappliedOpen">
+                  <label v-for="rule in unappliedNormRules" :key="rule.fix_action"
+                         class="norm-item">
+                    <input type="checkbox" style="display:none"
+                      :checked="form.normActions.includes(rule.fix_action)"
+                      @change="toggleNorm(rule.fix_action)"/>
+                    <div class="norm-item-left">
+                      <span class="norm-chk"></span>
+                      <div>
+                        <div class="norm-item-title">{{ rule.title }}</div>
+                        <div class="norm-item-types">
+                          <span class="type-chip src">{{ rule.src_type }}</span>
+                          <svg viewBox="0 0 10 8" fill="none" stroke="currentColor" stroke-width="1.3" style="width:10px;height:8px;opacity:.4"><path d="M1 4h8M6 1l3 3-3 3"/></svg>
+                          <span class="type-chip tgt">{{ rule.tgt_type }}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <span class="norm-item-level" :class="rule.level">{{ rule.level==='warn'?'주의':'정보' }}</span>
+                  </label>
+                </template>
+              </div>
+            </template>
           </template>
         </div>
 
@@ -753,6 +1147,24 @@
                   </span>
                 </div>
               </label>
+              <!-- v92p11 (2026-04-30): AI 자동 재이관 토글
+                   본부장님 결정 — 기본 OFF. 명시적 ON 시에만 자동 재시도.
+                   OFF 일 때는 실패 객체를 화면에서 🤖 AI 재이관 버튼으로 수동 처리. -->
+              <label class="tbl-opt-row" v-if="hasObjects">
+                <input type="checkbox" v-model="form.aiAutoRetry"/>
+                <div class="tbl-opt-info">
+                  <div class="tbl-opt-label">
+                    <span class="opt-tag" style="background:#a855f7;color:white">🤖 AUTO</span>
+                    AI 자동 재이관
+                    <span v-if="form.aiAutoRetry" style="margin-left:8px;font-size:.72rem;color:#16a34a;font-weight:700">활성</span>
+                    <span v-else style="margin-left:8px;font-size:.72rem;color:var(--text-tertiary)">비활성 (기본)</span>
+                  </div>
+                  <span class="tbl-opt-desc">
+                    객체 이관 실패 시 AI 가 오류를 분석해 자동 재시도 (최대 {{ form.aiAutoRetryCount }}회).
+                    <span style="color:#dc2626">OFF 권장 — 운영 환경에선 실패를 인지 후 수동 재이관이 안전.</span>
+                  </span>
+                </div>
+              </label>
             </div>
             </template><!-- /tables > 0 -->
 
@@ -815,59 +1227,178 @@
       <!-- ── Step 5: 검토 & 실행 + 스케줄링 (v88: 기존 Step 4에서 재번호) ── -->
       <template v-if="cur===5">
         <h4 class="wh">설정 최종 검토</h4>
-        <div class="review-grid">
-          <div class="rv-item"><span class="rv-l">Job 이름</span><span class="rv-v">{{ form.name }}</span></div>
-          <div class="rv-item"><span class="rv-l">소스 DB</span><span class="rv-v">{{ form.srcDb }} / {{ connector.source.database }}</span></div>
-          <div class="rv-item"><span class="rv-l">타겟 DB</span><span class="rv-v">{{ form.tgtDb }} / {{ connector.target.database }}</span></div>
-          <div class="rv-item"><span class="rv-l">테이블</span><span class="rv-v">{{ form.tables.length }}개</span></div>
-          <div class="rv-item"><span class="rv-l">프로시저</span><span class="rv-v">{{ form.procedures.length }}개</span></div>
-          <div class="rv-item"><span class="rv-l">함수</span><span class="rv-v">{{ form.functions.length }}개</span></div>
-          <div class="rv-item"><span class="rv-l">트리거</span><span class="rv-v">{{ form.triggers.length }}개</span></div>
-          <div class="rv-item"><span class="rv-l">뷰</span><span class="rv-v">{{ form.views.length }}개</span></div>
-          <div class="rv-item" v-if="form.views.length > 0">
-            <span class="rv-l">뷰 이관 모드</span>
-            <span class="rv-v">{{ {drop_recreate:'DROP 후 재생성', skip_existing:'있으면 스킵', replace:'OR REPLACE'}[form.viewMode] }}</span>
+
+        <!-- v95_p37 본질 4 (2026-05-05 본부장님): 두 블록으로 분리 (기본 + 상세) -->
+
+        <!-- 기본 정보 블록 — 한눈에 봐야 할 핵심 정보 -->
+        <!-- v95_p40 (2026-05-05 본부장님): 기본 정보 — Job 이름 헤더로, 소스/타겟 좌우, 2줄 압축 -->
+        <div class="review-section">
+          <div class="review-section-head review-section-head-primary">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5"
+                 style="width:13px;height:13px;color:#2563eb">
+              <circle cx="7" cy="7" r="5.5"/>
+              <line x1="7" y1="4" x2="7" y2="7.5"/>
+              <circle cx="7" cy="9.8" r="0.6" fill="currentColor"/>
+            </svg>
+            <span class="review-section-title">기본 정보</span>
+            <!-- v95_p40: Job 이름을 섹션 헤더 우측에 배치 -->
+            <span class="review-section-jobname" :title="form.name">{{ form.name || '(이름 없음)' }}</span>
           </div>
-          <div class="rv-item" v-if="(form.procedures.length+form.functions.length+form.triggers.length)>0">
-            <span class="rv-l">오브젝트 모드</span>
-            <span class="rv-v">{{ {drop_recreate:'DROP 후 재생성', skip_existing:'있으면 스킵'}[form.objMode] }}</span>
+          <!-- v95_p40: 2줄 압축 — 1줄: 소스 DB ↔ 타겟 DB, 2줄: 이관 모드 / AI DBA 분석 / 자동 수정 -->
+          <div class="review-basic-body">
+            <!-- 1줄: 소스 (좌) → 타겟 (우) -->
+            <div class="review-dbflow-row">
+              <div class="review-db-card review-db-source">
+                <div class="review-db-label">소스 DB</div>
+                <div class="review-db-value">
+                  <span class="review-db-engine">{{ form.srcDb }}</span>
+                  <span class="review-db-sep">/</span>
+                  <span class="review-db-name">{{ connector.source.database }}</span>
+                </div>
+              </div>
+              <div class="review-dbflow-arrow">
+                <svg viewBox="0 0 24 12" fill="none" stroke="currentColor" stroke-width="1.5"
+                     style="width:32px;height:14px;color:#2563eb">
+                  <path d="M2 6 L20 6 M16 2 L20 6 L16 10"/>
+                </svg>
+              </div>
+              <div class="review-db-card review-db-target">
+                <div class="review-db-label">타겟 DB</div>
+                <div class="review-db-value">
+                  <span class="review-db-engine">{{ form.tgtDb }}</span>
+                  <span class="review-db-sep">/</span>
+                  <span class="review-db-name">{{ connector.target.database }}</span>
+                </div>
+              </div>
+            </div>
+            <!-- v95_p52 (2026-05-05 본부장님): 5칸 한 줄 — DDL/객체 엔진 합침 -->
+            <div class="review-attr-row review-attr-row-5col">
+              <div class="rv-item rv-item-compact">
+                <span class="rv-l">이관 모드</span>
+                <span class="rv-v">
+                  {{ {schema_only:'스키마만', schema_data:'스키마+데이터', data_only:'데이터만'}[form.tableMode] }}
+                </span>
+              </div>
+              <div class="rv-item rv-item-compact">
+                <span class="rv-l">AI DBA 분석</span>
+                <span class="rv-v" :style="form.advisorSkipped?'color:var(--text-tertiary)':'color:#6d28d9;font-weight:600'">
+                  {{ form.advisorSkipped
+                      ? '건너뜀'
+                      : ({smart:'🟢 경제형', hybrid:'🟡 균형형', deep:'🔴 전수 분석'}[form.advisorMode] || form.advisorMode) }}
+                </span>
+              </div>
+              <div class="rv-item rv-item-compact">
+                <span class="rv-l">자동 수정</span>
+                <span class="rv-v" style="color:var(--text-success)">{{ autoFixEnabledCount }}건</span>
+              </div>
+              <div class="rv-item rv-item-compact">
+                <span class="rv-l">DDL 엔진</span>
+                <span class="rv-v" :style="{color:form.ddlEngine==='claude'?'#6d28d9':'var(--text-secondary)', fontWeight: 600}">
+                  {{ form.ddlEngine==='claude'?'🤖 AI':'⚙ 규칙' }}
+                </span>
+              </div>
+              <div class="rv-item rv-item-compact">
+                <span class="rv-l">객체 엔진</span>
+                <span class="rv-v" :style="{color:form.objEngine==='claude'?'#6d28d9':'var(--text-secondary)', fontWeight: 600}">
+                  {{ form.objEngine==='claude'?'🤖 AI':'⚙ 규칙' }}
+                </span>
+              </div>
+            </div>
           </div>
-          <div class="rv-item"><span class="rv-l">배치 크기</span><span class="rv-v">{{ form.batchSize.toLocaleString() }}</span></div>
-          <div class="rv-item"><span class="rv-l">자동 수정</span><span class="rv-v" style="color:var(--text-success)">{{ autoFixEnabledCount }}건</span></div>
-          <div class="rv-item"><span class="rv-l">오브젝트 변환</span><span class="rv-v">{{ form.convertObjs?'자동 변환':'수동' }}</span></div>
-          <div class="rv-item"><span class="rv-l">DDL 변환 엔진</span>
-            <span class="rv-v" :style="{color:form.ddlEngine==='claude'?'#6d28d9':'var(--text-secondary)'}">
-              {{ form.ddlEngine==='claude'?'🤖 Claude AI':'⚙ 규칙 기반' }}
+        </div>
+
+        <!-- v95_p48 (2026-05-05 본부장님): 이관 객체 + 변환·실행 한 카드, 표 형식, 4-column -->
+        <div class="review-section">
+          <div class="review-section-head review-section-head-collapsible"
+               @click="reviewDetailOpen=!reviewDetailOpen" style="cursor:pointer">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"
+                 :style="{transform:reviewDetailOpen?'rotate(0)':'rotate(-90deg)',transition:'transform .2s'}"
+                 style="width:9px;height:9px;opacity:.5;color:var(--text-secondary)">
+              <polyline points="1,3 7,9 13,3"/>
+            </svg>
+            <span class="review-section-title">상세 정보</span>
+            <span class="review-section-count">
+              테이블 {{ form.tables.length }} ·
+              SP {{ form.procedures.length }} ·
+              FUNC {{ form.functions.length }} ·
+              TRIG {{ form.triggers.length }} ·
+              VIEW {{ form.views.length }}
+              &nbsp;|&nbsp;
+              {{ form.ddlEngine==='claude'?'🤖':'⚙' }} DDL ·
+              {{ form.objEngine==='claude'?'🤖':'⚙' }} 객체 ·
+              배치 {{ form.batchSize.toLocaleString() }}
             </span>
           </div>
-          <div class="rv-item"><span class="rv-l">오브젝트 변환 엔진</span>
-            <span class="rv-v" :style="{color:form.objEngine==='claude'?'#6d28d9':'var(--text-secondary)'}">
-              {{ form.objEngine==='claude'?'🤖 Claude AI':'⚙ 규칙 기반' }}
-            </span>
-          </div>
-          <div class="rv-item">
-            <span class="rv-l">이관 모드</span>
-            <span class="rv-v">
-              {{ {schema_only:'스키마만', schema_data:'스키마+데이터', data_only:'데이터만'}[form.tableMode] }}
-            </span>
-          </div>
-          <div class="rv-item"><span class="rv-l">이관전 DROP</span><span class="rv-v" :style="form.dropTbl?'color:#dc2626;font-weight:700':''" >{{ form.dropTbl?'✓ DROP 후 재생성':'아니오' }}</span></div>
-              <div class="rv-item"><span class="rv-l">TRUNCATE</span><span class="rv-v">{{ form.dropTbl?'—(DROP 사용)':form.truncate?'예':'아니오' }}</span></div>
-          <!-- v88 P1: AI DBA 권고 결과 요약 -->
-          <div class="rv-item">
-            <span class="rv-l">AI DBA 분석</span>
-            <span class="rv-v" :style="form.advisorSkipped?'color:var(--text-tertiary)':'color:#6d28d9;font-weight:600'">
-              {{ form.advisorSkipped
-                  ? '건너뜀 (원본 그대로)'
-                  : ({smart:'🟢 경제형', hybrid:'🟡 균형형', deep:'🔴 전수 분석'}[form.advisorMode] || form.advisorMode) }}
-            </span>
-          </div>
-          <div class="rv-item" v-if="!form.advisorSkipped && form.advisorDecisions.length > 0">
-            <span class="rv-l">적용 권고 수</span>
-            <span class="rv-v">
-              {{ form.advisorDecisions.filter(d => d.decision === 'applied' || d.decision === 'edited').length }}건
-              / 총 {{ form.advisorDecisions.length }}건
-            </span>
+          <div v-if="reviewDetailOpen" class="review-detail-body">
+            <!-- v95_p50 (2026-05-05 본부장님): 이관 객체 + 변환·실행 각각 한 줄 -->
+            <!-- ── 그룹 1: 이관 객체 (한 줄, 6 컬럼) ─────────── -->
+            <div class="review-group">
+              <div class="review-group-title">
+                <span class="review-group-bullet"></span>
+                이관 객체
+              </div>
+              <table class="review-table review-table-6col">
+                <tbody>
+                  <tr class="review-table-labels">
+                    <td>테이블</td>
+                    <td>프로시저</td>
+                    <td>함수</td>
+                    <td>트리거</td>
+                    <td>뷰</td>
+                    <td>적용 권고</td>
+                  </tr>
+                  <tr class="review-table-values">
+                    <td>{{ form.tables.length }}<span class="review-unit">개</span></td>
+                    <td>{{ form.procedures.length }}<span class="review-unit">개</span></td>
+                    <td>{{ form.functions.length }}<span class="review-unit">개</span></td>
+                    <td>{{ form.triggers.length }}<span class="review-unit">개</span></td>
+                    <td>{{ form.views.length }}<span class="review-unit">개</span></td>
+                    <td v-if="!form.advisorSkipped && form.advisorDecisions.length > 0">
+                      {{ form.advisorDecisions.filter(d => d.decision === 'applied' || d.decision === 'edited').length }}<span class="review-unit"> / {{ form.advisorDecisions.length }}건</span>
+                    </td>
+                    <td v-else><span class="review-unit">—</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- ── 그룹 2: 변환 · 실행 설정 (v95_p54: 6칸 한 줄 — 이관 객체와 통일) ──── -->
+            <div class="review-group">
+              <div class="review-group-title">
+                <span class="review-group-bullet review-group-bullet-cfg"></span>
+                변환 · 실행 설정
+              </div>
+              <table class="review-table review-table-6col">
+                <tbody>
+                  <tr class="review-table-labels">
+                    <td>배치 크기</td>
+                    <td v-if="form.views.length > 0">뷰 모드</td>
+                    <td v-else>—</td>
+                    <td v-if="(form.procedures.length+form.functions.length+form.triggers.length)>0">객체 모드</td>
+                    <td v-else>—</td>
+                    <td>객체 변환</td>
+                    <td>이관전 DROP</td>
+                    <td>TRUNCATE</td>
+                  </tr>
+                  <tr class="review-table-values">
+                    <td>{{ form.batchSize.toLocaleString() }}</td>
+                    <td v-if="form.views.length > 0">
+                      {{ {drop_recreate:'DROP 후 재생성', skip_existing:'스킵', replace:'OR REPLACE'}[form.viewMode] }}
+                    </td>
+                    <td v-else><span class="review-unit">—</span></td>
+                    <td v-if="(form.procedures.length+form.functions.length+form.triggers.length)>0">
+                      {{ {drop_recreate:'DROP 후 재생성', skip_existing:'스킵'}[form.objMode] }}
+                    </td>
+                    <td v-else><span class="review-unit">—</span></td>
+                    <td>{{ form.convertObjs?'자동 변환':'수동' }}</td>
+                    <td :class="{'rv-warn': form.dropTbl}">
+                      {{ form.dropTbl?'✓ DROP':'아니오' }}
+                    </td>
+                    <td>{{ form.dropTbl?'—':form.truncate?'예':'아니오' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
 
@@ -1041,6 +1572,11 @@
       <!-- 2026-04-23 UX: [이전] 옆에 [다음 단계] 바로 붙임, 오른쪽은 비움 -->
       <!-- 의도: Step 3 AI DBA 화면에서 '분석 시작' 이 주 CTA가 되도록 상단 강조.
            전 스텝 일관성 유지 (모든 스텝에서 동일 배치). -->
+      <!-- v95_p25 (2026-05-04 본부장님 본질 처방): [새로 시작] 버튼 추가
+           본부장님 호소: "단계별로 새로시작 버튼 좀 달아줘 새로시작하면
+                          단계전체가 clear 되서 새로시작할 수 있는 기능이야"
+           - 모든 단계에서 표시 (Step 0 부터 Step 5 까지)
+           - 클릭 시 확인 다이얼로그 → form/sched/cur/sessionStorage 모두 초기화 -->
       <div style="display:flex;align-items:center;gap:8px;width:100%">
         <button class="btn" @click="cur>0?cur--:$router.push('/connector')">← {{ cur>0?'이전':'연결 설정' }}</button>
         <button v-if="cur<5" class="wiz-btn-next" @click="nextStep" :disabled="analyzingWarn" :style="analyzingWarn?'opacity:.5;cursor:not-allowed':''">
@@ -1050,6 +1586,14 @@
           </svg>
         </button>
         <div style="flex:1"></div>
+        <button class="btn wiz-btn-restart" @click="restartWizard"
+                title="모든 입력값을 초기화하고 처음부터 다시 시작합니다">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" style="width:12px;height:12px">
+            <path d="M2 7a5 5 0 1 0 1.5-3.5"/>
+            <polyline points="2,2 2,5 5,5"/>
+          </svg>
+          새로 시작
+        </button>
         <template v-if="cur===5">
           <button class="btn btn-success" @click="submit(false)" :disabled="submitting">
             <span v-if="submitting&&!schedEnabled" class="spinner" style="width:13px;height:13px;border-top-color:#fff"></span>
@@ -1062,6 +1606,76 @@
             스케줄 등록
           </button>
         </template>
+      </div>
+    </div>
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <!-- v95_p66 (2026-05-05 본부장님): 수동 SQL 입력 모달 (Phase 5-1) -->
+    <!-- ════════════════════════════════════════════════════════════ -->
+    <div v-if="manualSqlModal.open" class="msql-modal-overlay" @click.self="closeManualSqlModal">
+      <div class="msql-modal">
+        <div class="msql-modal-head">
+          <h3>✍️ 수동 SQL 작성 — {{ manualSqlModal.obj_name }}</h3>
+          <button class="msql-modal-close" @click="closeManualSqlModal" title="닫기">✕</button>
+        </div>
+        <div class="msql-modal-body">
+          <!-- 좌측: MSSQL 원본 -->
+          <div class="msql-modal-pane msql-pane-src">
+            <div class="msql-pane-label">
+              <span class="msql-pane-icon">📜</span>
+              MSSQL 원본 DDL ({{ manualSqlModal.obj_type }}) — <em>참고용</em>
+            </div>
+            <textarea class="msql-textarea msql-textarea-readonly"
+                      readonly
+                      :value="manualSqlModal.src_ddl"></textarea>
+          </div>
+          <!-- 우측: MySQL 사용자 작성 -->
+          <div class="msql-modal-pane msql-pane-tgt">
+            <div class="msql-pane-label">
+              <span class="msql-pane-icon">⚡</span>
+              MySQL DDL — <strong>직접 작성</strong>
+            </div>
+            <textarea class="msql-textarea msql-textarea-editable"
+                      v-model="manualSqlModal.mysql_sql"
+                      placeholder="CREATE VIEW vMyView AS&#10;SELECT ...&#10;FROM ...;&#10;&#10;-- MSSQL XML/CROSS APPLY 등 → MySQL JSON_EXTRACT/LATERAL JOIN 으로 변환"></textarea>
+            <!-- 검증 결과 -->
+            <div v-if="manualSqlModal.validation" class="msql-validation"
+                 :class="{ ok: manualSqlModal.validation.ok, fail: !manualSqlModal.validation.ok }">
+              {{ manualSqlModal.validation.message }}
+              <ul v-if="manualSqlModal.validation.details && manualSqlModal.validation.details.length > 0">
+                <li v-for="(d, di) in manualSqlModal.validation.details" :key="di">{{ d }}</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <!-- 검출 패턴 가이드 -->
+        <div v-if="manualSqlModal.patterns && manualSqlModal.patterns.length > 0"
+             class="msql-pattern-guide">
+          <div class="msql-pg-label">💡 검출된 위험 패턴 + MySQL 변환 가이드:</div>
+          <div v-for="(p, pi) in manualSqlModal.patterns" :key="pi" class="msql-pg-item">
+            <span class="msql-pg-level" :class="'msql-pg-' + (p.risk_level || '').toLowerCase()">
+              {{ p.risk_level === 'HIGH' ? '🔴' : p.risk_level === 'MEDIUM' ? '🟡' : '🟢' }}
+              {{ p.label }}
+            </span>
+            <span v-if="p.mysql_alternative" class="msql-pg-alt">→ {{ p.mysql_alternative }}</span>
+          </div>
+        </div>
+        <!-- 버튼 -->
+        <div class="msql-modal-foot">
+          <button class="msql-btn msql-btn-validate"
+                  @click="validateManualSql"
+                  :disabled="manualSqlModal.validating || !manualSqlModal.mysql_sql.trim()">
+            <span v-if="manualSqlModal.validating" class="spinner" style="width:12px;height:12px"></span>
+            🔎 SQL 문법 검증
+          </button>
+          <button class="msql-btn msql-btn-cancel" @click="closeManualSqlModal">
+            취소
+          </button>
+          <button class="msql-btn msql-btn-save"
+                  @click="saveManualSql"
+                  :disabled="!manualSqlModal.mysql_sql.trim()">
+            💾 저장 + KB 등록
+          </button>
+        </div>
       </div>
     </div>
 </template>
@@ -1153,6 +1767,61 @@ const activeNormCount = computed(() => form.value.normActions.length)
 const analyzingWarn= ref(false)
 const openRules    = ref({})
 
+// v95_p23a (2026-05-03 본부장님 본질 처방): 사전 분석 (Pre-Flight)
+//   본부장님 호소: 위저드 다음 단계로 넘어갈 때 위험 분석 → 회피
+const preflightAnalyzing = ref(false)
+const preflightRisks     = ref([])         // 위험 목록
+const preflightSummary   = ref({total:0, critical:0, warn:0, info:0, auto_fix_count:0})
+const preflightOpen      = ref(false)      // 결과 패널 표시 여부
+
+// v95_p37 본질 1 (2026-05-05 본부장님): 사전 분석 마스터-디테일 + sort
+const pfSelectedIdx   = ref(0)              // 선택된 위험 인덱스 (좌측 클릭)
+const pfSortMode      = ref('severity')     // 'severity' | 'category' | 'affected'
+const showAllAffected = ref(false)          // 영향 객체 더보기 토글
+
+// 정렬된 위험 목록 (좌측 리스트용)
+const sortedPreflightRisks = computed(() => {
+  const list = [...(preflightRisks.value || [])]
+  if (pfSortMode.value === 'severity') {
+    const order = { critical: 0, warn: 1, info: 2 }
+    list.sort((a, b) => (order[a.level] ?? 9) - (order[b.level] ?? 9))
+  } else if (pfSortMode.value === 'category') {
+    list.sort((a, b) => String(a.category || '').localeCompare(String(b.category || '')))
+  } else if (pfSortMode.value === 'affected') {
+    list.sort((a, b) => (b.affected_count || 0) - (a.affected_count || 0))
+  }
+  return list
+})
+
+// 우측 상세에 표시될 선택된 위험 (sortedPreflightRisks 기준)
+const selectedRisk = computed(() => {
+  const list = sortedPreflightRisks.value
+  if (!list.length) return null
+  const idx = Math.min(Math.max(0, pfSelectedIdx.value), list.length - 1)
+  return list[idx]
+})
+
+// v95_p37 본질 2 (2026-05-05 본부장님): 타입 정규화 적용/미적용 그룹 분리
+const normUnappliedOpen = ref(false)  // 미적용 그룹 기본 접힘
+const appliedNormRules = computed(() =>
+  (normRules.value || []).filter(r => form.value.normActions.includes(r.fix_action))
+)
+const unappliedNormRules = computed(() =>
+  (normRules.value || []).filter(r => !form.value.normActions.includes(r.fix_action))
+)
+
+// v95_p37 본질 4 (2026-05-05 본부장님): Step 6 검토 화면 두 블록 분리
+const reviewObjOpen = ref(true)   // 이관 객체 블록 - 기본 펼침
+const reviewCfgOpen = ref(true)   // 변환·실행 설정 블록 - 기본 펼침
+// v95_p48 (2026-05-05 본부장님): 두 블록 합친 상세 정보 — 기본 펼침
+const reviewDetailOpen = ref(true)
+
+// 사전 분석 패널 펼쳐질 때 인덱스 초기화 (sort 변경 시에도)
+watch([pfSortMode, preflightOpen], () => {
+  pfSelectedIdx.value = 0
+  showAllAffected.value = false
+})
+
 // ── Step 4 스케줄 ──
 const schedEnabled = ref(false)
 const schedType    = ref('once')
@@ -1202,6 +1871,11 @@ const form = ref({
   objMode:'drop_recreate',   // drop_recreate | skip_existing
   ddlEngine:'claude',        // DDL 변환 엔진: auto | rules | claude
   objEngine:'claude',        // 오브젝트 변환 엔진: auto | rules | claude
+  // v92p11 (2026-04-30): 본부장님 호소 — "자동 재이관은 명시적 토글로만"
+  //   기본값 false — 실패 시 멈추고 사용자가 수동 🤖 AI 재이관 클릭
+  //   true 로 켤 경우만 백엔드가 자동으로 AI 재시도 (최대 2회)
+  aiAutoRetry: false,
+  aiAutoRetryCount: 2,
   // v9 패치 #20: 대량 이관 로더 선택
   bulkMode: 'auto',          // auto | executemany | bcp | pymssql
   bulkThresholdRows: 100000,
@@ -1230,6 +1904,30 @@ const form = ref({
 
   // v90.1: 이관 시나리오 (Step 0 에서 선택, AI DBA + PII 자동 적용)
   migrationScenario: '',      // 'prod_to_dev' / 'prod_to_qa' / 'prod_to_dr' 등
+  
+  // ════════════════════════════════════════════════════════════
+  // v95_p65 (2026-05-05 본부장님): 객체 변환 결정 (Phase 4-2)
+  // ════════════════════════════════════════════════════════════
+  // 본부장님 결정: "5 Phase 모두 — 엔터프라이즈 솔루션"
+  //
+  // 본질: vProductModelInstructions / vJobCandidateEducation 같은 위험 객체에
+  //       대해 사용자가 명시적 결정 가능 (자동/수동/제외)
+  //
+  // 구조: { obj_name: { decision: 'auto'|'manual'|'exclude',
+  //                     manual_sql: '...' (수동 시),
+  //                     decided_at: ISO date } }
+  //
+  // Phase 5 에서 manual_sql 작성 → KB 등록
+  // Phase 6 (실행) 에서 obj_executor 가 결정 우선 적용:
+  //   exclude → 이관 스킵
+  //   manual  → manual_sql 직접 사용 (AI 호출 0)
+  //   auto    → 기존 AI 변환 흐름
+  //
+  // 부작용 0:
+  //   - 빈 객체 ({}) 면 옛 흐름 그대로 (auto)
+  //   - v95_p60 위저드 state 보존에 자동 통합 (form 일부)
+  // ════════════════════════════════════════════════════════════
+  objectDecisions: {},
 })
 
 // v90.12 + v90.20: PII 탭 방문 + 활성 탭 저장 (sessionStorage 보존)
@@ -1260,6 +1958,60 @@ function saveWizardState() {
       form: form.value,
       privacyTabVisited: privacyTabVisited.value,
       analysisTabsLoaded: analysisTabsLoaded.value,
+      // v95_p59: allObjects + allTables 도 저장
+      allTables: allTables.value,
+      allObjects: allObjects.value,
+      // ════════════════════════════════════════════════════════════
+      // v95_p60 (2026-05-05 본부장님): 위저드 전체 사용자 작업 데이터 저장
+      // ════════════════════════════════════════════════════════════
+      // 본부장님 호소: "변환규칙도 선택후 다른 화면 갔다 오면 없어져 버려"
+      //               "위저드 전체적으로 다른 화면 갔다 오면 변경된 내용까지 유지"
+      //
+      // 본질: form/allObjects 외에 사용자 작업 데이터가 여러 ref 에 분산:
+      //   - warnRules/normRules: AI 분석 결과 (API 호출 비용 큼!)
+      //   - preflightRisks: AI DBA 분석 결과 (역시 비용)
+      //   - sched: 스케줄 설정
+      //   - objTab/objSearch: UI 상태 (덜 중요하지만 UX 향상)
+      //
+      // 처방: 사용자 작업/AI 분석 결과 모두 저장 → 복원 시 즉시 복귀
+      // 효과:
+      //   - 다른 화면 → 위저드 복귀 시 모든 작업 보존 ✅
+      //   - AI 재분석 비용 0 (warnRules/preflightRisks 보존)
+      //
+      // 부작용 0:
+      //   - sessionStorage 5MB 한계 vs 전체 ~200KB 추산
+      //   - 1시간 TTL 그대로
+      //   - 새로 시작 (?fresh=1) 흐름 그대로
+      // ════════════════════════════════════════════════════════════
+      // 변환 규칙 (사용자 작업 + AI 분석 결과)
+      warnRules: warnRules.value,
+      normRules: normRules.value,
+      normOpen: normOpen.value,
+      openRules: openRules.value,
+      normUnappliedOpen: normUnappliedOpen.value,
+      // AI DBA 분석 결과
+      preflightRisks: preflightRisks.value,
+      preflightSummary: preflightSummary.value,
+      preflightOpen: preflightOpen.value,
+      pfSelectedIdx: pfSelectedIdx.value,
+      pfSortMode: pfSortMode.value,
+      showAllAffected: showAllAffected.value,
+      // 스케줄
+      schedEnabled: schedEnabled.value,
+      schedType: schedType.value,
+      sched: sched.value,
+      // 검토 화면 펼침 상태
+      reviewObjOpen: reviewObjOpen.value,
+      reviewCfgOpen: reviewCfgOpen.value,
+      reviewDetailOpen: reviewDetailOpen.value,
+      // UI 상태 (UX 향상)
+      objTab: objTab.value,
+      objSearch: objSearch.value,
+      tableSort: tableSort.value,
+      procSort: procSort.value,
+      funcSort: funcSort.value,
+      trigSort: trigSort.value,
+      viewSort: viewSort.value,
       // 상태 저장 시각 (오래된 상태 자동 폐기용)
       savedAt: Date.now(),
     }
@@ -1284,9 +2036,54 @@ function restoreWizardState() {
       // form 의 모든 키를 복원 (누락된 신규 키 대비 spread)
       form.value = { ...form.value, ...state.form }
     }
+    // v95_p59: allTables / allObjects 복원
+    if (Array.isArray(state.allTables)) {
+      allTables.value = state.allTables
+    }
+    if (state.allObjects && typeof state.allObjects === 'object') {
+      allObjects.value = {
+        procedures: Array.isArray(state.allObjects.procedures) ? state.allObjects.procedures : [],
+        functions:  Array.isArray(state.allObjects.functions)  ? state.allObjects.functions  : [],
+        triggers:   Array.isArray(state.allObjects.triggers)   ? state.allObjects.triggers   : [],
+        views:      Array.isArray(state.allObjects.views)      ? state.allObjects.views      : [],
+      }
+    }
     if (state.privacyTabVisited) privacyTabVisited.value = true
     if (state.analysisTabsLoaded) analysisTabsLoaded.value = true
-    console.log(`[Wizard] 상태 복원 - cur=${cur.value}, 작업 중이던 화면으로 이동`)
+    // ════════════════════════════════════════════════════════════
+    // v95_p60: 전체 사용자 작업 데이터 복원
+    // ════════════════════════════════════════════════════════════
+    // 변환 규칙 복원 (AI 재분석 비용 절감)
+    if (Array.isArray(state.warnRules)) warnRules.value = state.warnRules
+    if (Array.isArray(state.normRules)) normRules.value = state.normRules
+    if (typeof state.normOpen === 'boolean') normOpen.value = state.normOpen
+    if (state.openRules && typeof state.openRules === 'object') openRules.value = state.openRules
+    if (typeof state.normUnappliedOpen === 'boolean') normUnappliedOpen.value = state.normUnappliedOpen
+    // AI DBA 분석 결과 복원
+    if (Array.isArray(state.preflightRisks)) preflightRisks.value = state.preflightRisks
+    if (state.preflightSummary && typeof state.preflightSummary === 'object') preflightSummary.value = state.preflightSummary
+    if (typeof state.preflightOpen === 'boolean') preflightOpen.value = state.preflightOpen
+    if (typeof state.pfSelectedIdx === 'number') pfSelectedIdx.value = state.pfSelectedIdx
+    if (typeof state.pfSortMode === 'string') pfSortMode.value = state.pfSortMode
+    if (typeof state.showAllAffected === 'boolean') showAllAffected.value = state.showAllAffected
+    // 스케줄 복원
+    if (typeof state.schedEnabled === 'boolean') schedEnabled.value = state.schedEnabled
+    if (typeof state.schedType === 'string') schedType.value = state.schedType
+    if (state.sched && typeof state.sched === 'object') sched.value = { ...sched.value, ...state.sched }
+    // 검토 화면 펼침 상태 복원
+    if (typeof state.reviewObjOpen === 'boolean') reviewObjOpen.value = state.reviewObjOpen
+    if (typeof state.reviewCfgOpen === 'boolean') reviewCfgOpen.value = state.reviewCfgOpen
+    if (typeof state.reviewDetailOpen === 'boolean') reviewDetailOpen.value = state.reviewDetailOpen
+    // UI 상태 복원
+    if (typeof state.objTab === 'string') objTab.value = state.objTab
+    if (typeof state.objSearch === 'string') objSearch.value = state.objSearch
+    if (state.tableSort && typeof state.tableSort === 'object') tableSort.value = state.tableSort
+    if (state.procSort && typeof state.procSort === 'object') procSort.value = state.procSort
+    if (state.funcSort && typeof state.funcSort === 'object') funcSort.value = state.funcSort
+    if (state.trigSort && typeof state.trigSort === 'object') trigSort.value = state.trigSort
+    if (state.viewSort && typeof state.viewSort === 'object') viewSort.value = state.viewSort
+    // ════════════════════════════════════════════════════════════
+    console.log(`[Wizard v95_p60] 상태 복원 - cur=${cur.value}, allTables=${allTables.value.length}, warnRules=${warnRules.value.length}, normRules=${normRules.value.length}, preflightRisks=${preflightRisks.value.length}`)
     return true
   } catch (e) {
     console.warn('[Wizard] 상태 복원 실패:', e)
@@ -1300,6 +2097,105 @@ function clearWizardState() {
   } catch (e) { /* 무시 */ }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// v95_p25 (2026-05-04 본부장님 본질 처방): 단계별 [새로 시작] 버튼
+// ────────────────────────────────────────────────────────────────────
+// 본부장님 호소:
+//   "단계별로 새로시작 버튼 좀 달아줘 새로시작하면
+//    단계전체가 clear 되서 새로시작할 수 있는 기능이야"
+//
+// 처방 흐름:
+//   1) 사용자 확인 다이얼로그 (실수 클릭 방지)
+//   2) sessionStorage 의 위저드 상태 제거
+//   3) 모든 ref 상태를 초기값으로 리셋
+//   4) cur = 0 (Step 0 으로 이동)
+//
+// 부작용 0:
+//   - 사용자 확인 안 하면 아무 변경 없음
+//   - connector store 는 건드리지 않음 (DB 연결 정보는 보존 — 이게 "위저드만"
+//     리셋의 의미)
+function restartWizard() {
+  // eslint-disable-next-line no-alert
+  const ok = confirm(
+    '위저드를 처음부터 새로 시작하시겠습니까?\n\n'
+    + '입력하신 모든 내용이 초기화됩니다:\n'
+    + '  · 객체 선택 (테이블/프로시저/함수/트리거/뷰)\n'
+    + '  · 변환 규칙 / 자동 수정 토글\n'
+    + '  · AI DBA 권고 결정\n'
+    + '  · PII 마스킹 결정\n'
+    + '  · 실행 옵션 / 스케줄\n\n'
+    + '※ DB 연결 정보는 그대로 유지됩니다.'
+  )
+  if (!ok) return
+
+  // 1) sessionStorage 정리
+  clearWizardState()
+
+  // 2) form 전체 초기화 (Vue ref 재할당으로 watcher 트리거)
+  form.value = {
+    srcDb: connector.source.dbType || 'mysql',
+    tgtDb: connector.target.dbType || 'mssql',
+    tables: [], procedures: [], functions: [], triggers: [], views: [],
+    name: (connector.source.database && connector.target.database)
+      ? `${connector.source.database} → ${connector.target.database} 이관`
+      : '',
+    batchSize: 5000, workers: 4, onError: 'skip',
+    dropTbl: false, truncate: true, createTbl: true, withIdx: true, convertObjs: true,
+    skipTriggers: false,
+    schemaStrategy: 'underscore',
+    tableMode: 'schema_data',
+    viewMode: 'drop_recreate',
+    objMode: 'drop_recreate',
+    ddlEngine: 'claude',
+    objEngine: 'claude',
+    aiAutoRetry: false,
+    aiAutoRetryCount: 2,
+    bulkMode: 'auto',
+    bulkThresholdRows: 100000,
+    parallelTables: 3,
+    mssqlTuning: false,
+    mssqlDisableIndexes: false,
+    normActions: [],
+    advisorMode: 'smart',
+    advisorSkipped: false,
+    advisorDecisions: [],
+    advisorAnalysis: null,
+    activeAnalysisTab: 'advisor',
+    privacyPreset: '',
+    privacyDecisions: [],
+    privacyScan: null,
+    privacySkipped: false,
+    migrationScenario: '',
+  }
+
+  // 3) 단계별 ref 리셋
+  cur.value = 0
+  warnRules.value = []
+  normRules.value = []
+  openRules.value = {}
+  preflightRisks.value = []
+  preflightSummary.value = { total: 0, critical: 0, warn: 0, info: 0, auto_fix_count: 0 }
+  preflightOpen.value = false
+  allTables.value = []
+  allObjects.value = { procedures: [], functions: [], triggers: [], views: [] }
+  privacyTabVisited.value = false
+  analysisTabsLoaded.value = false
+  schedEnabled.value = false
+  schedType.value = 'once'
+  sched.value = {
+    date: '', time: '09:00', interval: 'daily', dows: [], day: 1,
+    endType: 'never', endDate: '', count: 1, cron: '',
+  }
+
+  console.log('[v95_p25] 위저드 새로 시작 — 모든 상태 초기화 완료')
+  // 4) 사용자에게 시각 피드백 (notify 가능하면 사용)
+  try {
+    if (typeof app !== 'undefined' && app.notify) {
+      app.notify('위저드를 처음부터 새로 시작합니다', 'info')
+    }
+  } catch { /* notify 미지원 환경 무시 */ }
+}
+
 // cur 변경 시 자동 저장
 watch(() => cur.value, () => saveWizardState())
 
@@ -1309,6 +2205,44 @@ watch(form, () => saveWizardState(), { deep: true })
 // privacyTabVisited 도 자동 저장
 watch(privacyTabVisited, () => saveWizardState())
 watch(analysisTabsLoaded, () => saveWizardState())
+
+// v95_p59 (2026-05-05 본부장님): allTables / allObjects 도 자동 저장
+//   본부장님 호소: "다른 화면 갔다 왔더니 카드 비어있음"
+//   본질: 객체 목록 변경 시 sessionStorage 갱신 안 됨 → 복원 시 누락
+watch(allTables, () => saveWizardState(), { deep: true })
+watch(allObjects, () => saveWizardState(), { deep: true })
+
+// ════════════════════════════════════════════════════════════
+// v95_p60 (2026-05-05 본부장님): 위저드 전체 사용자 작업 watch
+// ════════════════════════════════════════════════════════════
+// 본부장님 호소: "위저드 전체적으로 다른 화면 갔다 오면 변경된 내용까지 유지"
+// 처방: 모든 사용자 작업/AI 분석 결과 변경 시 자동 저장
+// 변환 규칙
+watch(warnRules, () => saveWizardState(), { deep: true })
+watch(normRules, () => saveWizardState(), { deep: true })
+watch(normOpen, () => saveWizardState())
+watch(openRules, () => saveWizardState(), { deep: true })
+watch(normUnappliedOpen, () => saveWizardState())
+// AI DBA 분석
+watch(preflightRisks, () => saveWizardState(), { deep: true })
+watch(preflightSummary, () => saveWizardState(), { deep: true })
+watch(preflightOpen, () => saveWizardState())
+watch(pfSelectedIdx, () => saveWizardState())
+watch(pfSortMode, () => saveWizardState())
+watch(showAllAffected, () => saveWizardState())
+// 스케줄
+watch(schedEnabled, () => saveWizardState())
+watch(schedType, () => saveWizardState())
+watch(sched, () => saveWizardState(), { deep: true })
+// 검토 화면 펼침 상태
+watch(reviewObjOpen, () => saveWizardState())
+watch(reviewCfgOpen, () => saveWizardState())
+watch(reviewDetailOpen, () => saveWizardState())
+// UI 상태 (UX 향상)
+watch(objTab, () => saveWizardState())
+watch(objSearch, () => saveWizardState())
+// v95_p61: tableSort/procSort/funcSort/trigSort/viewSort watch 는
+//          정의 (line 2048+) 후로 이동 — TDZ 회피
 
 const dbUsageHistory = ref({ source: [], target: [] })  // v90.2: DB 사용 이력
 
@@ -1438,6 +2372,17 @@ const funcSort  = ref({ key: 'name', dir: 'asc' })   // name | type | date
 const trigSort  = ref({ key: 'name', dir: 'asc' })   // name | event | table
 const viewSort  = ref({ key: 'name', dir: 'asc' })   // name
 
+// v95_p61 (2026-05-05 본부장님): sort watch 를 정의 직후로 이동 (TDZ 회피)
+//   본부장님 환경 에러: "Cannot access 'tableSort' before initialization"
+//   본질: v95_p60 watch 가 line 1920 에 있는데 정의는 line 2048
+//         → JavaScript Temporal Dead Zone 위반
+//   처방: watch 를 정의 직후로 이동 (다른 19개 watch 는 모두 정상)
+watch(tableSort, () => saveWizardState(), { deep: true })
+watch(procSort,  () => saveWizardState(), { deep: true })
+watch(funcSort,  () => saveWizardState(), { deep: true })
+watch(trigSort,  () => saveWizardState(), { deep: true })
+watch(viewSort,  () => saveWizardState(), { deep: true })
+
 // 박스별 토글 함수 (한 컬럼 다시 클릭 → asc↔desc, 다른 컬럼 클릭 → asc 부터)
 function _toggleSortFor(sortRef, key) {
   if (sortRef.value.key === key) {
@@ -1561,10 +2506,32 @@ function toggleNorm(action) {
   else form.value.normActions.push(action)
 }
 
-function loadNormRules() {
-  const key = `${form.value.srcDb}→${form.value.tgtDb}`
-  // 백엔드 API 대신 프론트에서 규칙 보관
-  const NORM_RULES = {
+// ────────────────────────────────────────────────────────────────────
+// v95_p24b (2026-05-04 본부장님 본질 처방): 정규화 규칙 KB 활용
+// ────────────────────────────────────────────────────────────────────
+// 본부장님 호소:
+//   "타입 정규화 규칙도 6개만 보여주고 3개가 적용된다고 기본 check 되있는데,
+//    정말 6개가 다야? 3개만 선택된 이유가 뭐야? 필요하면 모두 선택시키고,
+//    그리고 KB에 내용이 더 있다면 최대한 이용해서 초기 설정을 하고
+//    다음 단계로 들어 가야 되는거 아냐?"
+//
+// 진짜 본질:
+//   - 백엔드 KB (/api/v1/mapping/rules) 에 mssql→mysql 54건 있음 (전체 283건)
+//   - 위저드는 자기가 박은 6개 하드코딩만 사용 (KB 무시)
+//   - default check 도 'warn' 만 = 6개 중 3개 (자의적)
+//
+// v95_p24b 처방:
+//   - 백엔드 KB API 호출하여 실제 등록된 규칙 가져옴
+//   - warning=true 인 규칙은 모두 default check (level='warn' 만 limit 안 함)
+//   - 카테고리도 백엔드 KB의 category 사용
+//   - 부작용 0: API 실패 시 기존 하드코딩 6개 fallback
+//   - 본부장님 모토 "KB = 살아있는 자산, 누적이 미래 AI 호출 빈도 줄임" 충족
+async function loadNormRules() {
+  const srcKey = (form.value.srcDb || '').toLowerCase()
+  const tgtKey = (form.value.tgtDb || '').toLowerCase()
+
+  // ── Phase 1: 하드코딩 fallback 데이터 (KB API 실패 시 사용) ───
+  const NORM_RULES_FALLBACK = {
     'mssql→mysql': [
       { fix_action:'DATETIMEOFFSET_TO_DATETIME', title:'DATETIMEOFFSET → DATETIME(6)',   src_type:'DATETIMEOFFSET', tgt_type:'DATETIME(6)',    level:'warn',
         desc:'시간대(UTC) 변환 후 DATETIME(6)으로 저장. 시간대 정보는 소실됩니다.' },
@@ -1587,14 +2554,83 @@ function loadNormRules() {
       { fix_action:'DATETIME2_CONVERT', title:'DATETIME → DATETIME2(6)',        src_type:'DATETIME',       tgt_type:'DATETIME2(6)',  level:'info' },
     ],
   }
-  normRules.value = NORM_RULES[key] || []
-  // 경고 수준 규칙 기본 선택
+  const fallbackKey = `${srcKey}→${tgtKey}`
+  const fallbackRules = NORM_RULES_FALLBACK[fallbackKey] || []
+
+  // ── Phase 2: 백엔드 KB API 호출 (진짜 자산 활용) ──────────────
+  let rulesFromKb = []
+  let kbLoaded = false
+  try {
+    const { data } = await axios.get('/api/v1/mapping/rules', {
+      params: { src_db: srcKey, tgt_db: tgtKey },
+      timeout: 5000
+    })
+    if (Array.isArray(data) && data.length > 0) {
+      // KB 규칙을 위저드용 형태로 변환
+      // KB schema: {id, src_db, tgt_db, src_type, tgt_type, category, note, warning, custom, source}
+      // Wizard schema: {fix_action, title, src_type, tgt_type, level, desc}
+      rulesFromKb = data.map(r => ({
+        fix_action: `KB_${r.id}`,  // KB 규칙은 id 기반 고유 action
+        title: `${r.src_type} → ${r.tgt_type}` + (r.category ? ` (${r.category})` : ''),
+        src_type: r.src_type,
+        tgt_type: r.tgt_type,
+        level: r.warning ? 'warn' : 'info',
+        desc: r.note || '',
+        kb_id: r.id,
+        kb_category: r.category || '',
+        kb_source: r.source || 'manual',
+      }))
+      kbLoaded = true
+      console.log(`[v95_p24b] KB 규칙 ${rulesFromKb.length}건 로드 (${srcKey}→${tgtKey})`)
+    } else {
+      console.warn(`[v95_p24b] KB 규칙 0건 (${srcKey}→${tgtKey}) — fallback 사용`)
+    }
+  } catch (e) {
+    console.warn('[v95_p24b] KB API 실패 (fallback 사용):', e.message || e)
+  }
+
+  // ── Phase 3: 최종 규칙 결정 (KB 우선, 실패 시 fallback) ────────
+  if (kbLoaded && rulesFromKb.length > 0) {
+    normRules.value = rulesFromKb
+  } else {
+    normRules.value = fallbackRules
+  }
+
+  // ── Phase 4: default check 강화 ──────────────────────────────
+  // 본부장님 호소: "필요하면 모두 선택시키고"
+  // 진짜 본질: 'warn' level 만 default check 는 자의적 → KB 의 warning=true 인 모든 규칙 default
   if (normRules.value.length && !form.value.normActions.length) {
     form.value.normActions = normRules.value
-      .filter(r => r.level === 'warn')
+      .filter(r => r.level === 'warn')  // 데이터 손실 가능성 있는 것만 default
       .map(r => r.fix_action)
+    console.log(`[v95_p24b] default check ${form.value.normActions.length}/${normRules.value.length}건 (warn level 자동 선택)`)
   }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// v95_p25 (2026-05-04 본부장님 본질 처방): 정규화 규칙 전체선택/해제
+// ────────────────────────────────────────────────────────────────────
+// 본부장님 호소: "전체선택 버튼 만들어 줘"
+//                "지금은 3개 적용이라고 글자가 fix 되 있는데"
+//
+// 처방:
+//   - 전체선택: 모든 normRules 의 fix_action 을 normActions 에 채움
+//   - 전체해제: normActions 비우기
+//   - "N / M개 적용" 표시는 템플릿에서 처리 (분모 노출)
+function selectAllNorms() {
+  form.value.normActions = normRules.value.map(r => r.fix_action)
+  console.log(`[v95_p25] 전체 선택 ${form.value.normActions.length}/${normRules.value.length}건`)
+}
+
+function clearAllNorms() {
+  form.value.normActions = []
+  console.log('[v95_p25] 전체 해제')
+}
+
+const isAllNormsSelected = computed(() => {
+  return normRules.value.length > 0
+    && form.value.normActions.length === normRules.value.length
+})
 
 function toggleAutoFixAll(){ const t=!autoFixAll.value; warnRules.value.forEach(r=>{if(r.auto_fix)r.fixEnabled=t}) }
 function toggleDow(v){ const i=sched.value.dows.indexOf(v); i>=0?sched.value.dows.splice(i,1):sched.value.dows.push(v) }
@@ -1705,7 +2741,7 @@ async function loadAll(){
 
 async function analyzeWarnings(){
   analyzingWarn.value=true; warnRules.value=[]; openRules.value={}
-  loadNormRules()  // 정규화 규칙 로드
+  await loadNormRules()  // v95_p24b: KB API 호출하므로 async 대기
   const c=connector.source
   try{
     const {data}=await axios.post('/api/v1/schema/analyze-warnings',{
@@ -1718,6 +2754,374 @@ async function analyzeWarnings(){
     data.forEach((r,i)=>{ if(r.affected_count>0) openRules.value[i]=true })
   } catch(e){ app.notify('경고 분석 실패','error') }
   finally{ analyzingWarn.value=false }
+}
+
+// v95_p23a (2026-05-03 본부장님 본질 처방): 사전 분석 (Pre-Flight)
+//   본부장님 호소: "Dead lock 걸릴 거 분석해서 회피해서 순서를 정해야 되는거 아냐?"
+//
+//   분석 카테고리 (4가지):
+//     1) deadlock_risk   - 동시 CREATE TABLE lock 충돌 위험
+//     2) ai_conversion   - FUNC/SP/TRIG AI 변환 함정 패턴
+//     3) dependency      - VIEW 의존 테이블 미선택/미존재
+//     4) performance     - 대용량 테이블 동시 처리 위험
+//
+//   하드코딩 0%: src_db / tgt_db / 객체 종류만으로 동적 분석
+//                Northwind / WideWorldImporters / 캐피탈사 운영 DB 동일 작동
+// ════════════════════════════════════════════════════════════════
+// v95_p65 (2026-05-05 본부장님): 객체별 사용자 결정 헬퍼
+// ════════════════════════════════════════════════════════════════
+// 
+// API:
+//   getObjectDecision(name)      → 'auto' | 'manual' | 'exclude' | null
+//   setObjectDecision(name, dec) → form.objectDecisions[name] 설정
+//   clearObjectDecision(name)    → 결정 제거
+//   getObjectDecisionLabel(name) → 사용자 친화 라벨
+function getObjectDecision(objName) {
+  if (!objName) return null
+  const d = (form.value.objectDecisions || {})[objName]
+  return d ? d.decision : null
+}
+
+function setObjectDecision(objName, decision) {
+  if (!objName) return
+  if (!form.value.objectDecisions) form.value.objectDecisions = {}
+  // 'manual' 결정 시 다음 v95_p66 (수동 SQL 모달) 에서 작성
+  // 현재는 결정만 기록 (manual_sql 은 빈 문자열)
+  const prev = form.value.objectDecisions[objName] || {}
+  form.value.objectDecisions[objName] = {
+    decision: decision,
+    manual_sql: prev.manual_sql || '',  // 기존 수동 SQL 보존
+    decided_at: new Date().toISOString(),
+  }
+  console.log(`[v95_p65] 객체 결정: [${objName}] → ${decision}`)
+  // 안내 (manual 결정 시)
+  if (decision === 'manual') {
+    try {
+      app.notify(
+        `[${objName}] 수동 SQL 작성으로 설정 — 다음 v95_p66 패치에서 SQL 입력 모달 사용 가능`,
+        'info'
+      )
+    } catch { /* notify 없으면 무시 */ }
+  }
+}
+
+function clearObjectDecision(objName) {
+  if (!objName || !form.value.objectDecisions) return
+  delete form.value.objectDecisions[objName]
+  console.log(`[v95_p65] 객체 결정 취소: [${objName}]`)
+}
+
+function getObjectDecisionLabel(objName) {
+  const dec = getObjectDecision(objName)
+  if (dec === 'auto') return '🤖 자동 변환 시도'
+  if (dec === 'manual') return '✍️ 수동 SQL 작성'
+  if (dec === 'exclude') return '⊘ 이관 제외'
+  return ''
+}
+
+// ════════════════════════════════════════════════════════════════
+// v95_p84 (2026-05-06 본부장님): 일괄 결정 + 좌측 인라인 결정
+// ════════════════════════════════════════════════════════════════
+// 본부장님 호소:
+//   "오른쪽 창을 끝까지 드레그 한 후 하나씩 선택하기 너무 번거로워"
+//   "여기 목록에서 AI 바로 선택하게 할 수 있을까?"
+// 효과:
+//   - 좌측 리스트의 각 객체 옆에 [🤖] [✍️] [⊘] 인라인 버튼
+//   - 헤더에 일괄 처리: [모두 자동] [모두 제외] [초기화]
+//   - 우측 드래그 + 스크롤 0 — 좌측에서 즉시 결정
+// ════════════════════════════════════════════════════════════════
+
+// object_risk 카테고리의 위험 객체 수 (일괄 처리 헤더에 표시)
+const objectRiskCount = computed(() => {
+  const risks = preflightRisks.value || []
+  return risks.filter(r =>
+    r.category === 'object_risk' && r.risk_meta && r.risk_meta.obj_name
+  ).length
+})
+
+// 모든 위험 객체에 일괄 결정 적용
+function setAllObjectDecisions(decision) {
+  const risks = preflightRisks.value || []
+  const objectRisks = risks.filter(r =>
+    r.category === 'object_risk' && r.risk_meta && r.risk_meta.obj_name
+  )
+  if (objectRisks.length === 0) return
+  
+  // 사용자 확인 (manual 일괄은 의미 없으므로 제외 — auto 또는 exclude 만 일괄)
+  const decisionLabel = decision === 'auto' ? '🤖 자동 변환 시도' :
+                        decision === 'exclude' ? '⊘ 이관 제외' : decision
+  if (!confirm(`${objectRisks.length}개 위험 객체를 모두 [${decisionLabel}] 로 설정할까요?`)) {
+    return
+  }
+  
+  let count = 0
+  for (const r of objectRisks) {
+    setObjectDecision(r.risk_meta.obj_name, decision)
+    count++
+  }
+  console.log(`[v95_p84] 일괄 결정 적용: ${count}건 → ${decision}`)
+  
+  // 사용자에게 짧은 피드백 (alert 보다 우호적)
+  // 결정 뱃지가 자동 표시되므로 추가 UI 불필요
+}
+
+// 모든 객체 결정 초기화
+function clearAllObjectDecisions() {
+  if (!form.value.objectDecisions) return
+  const count = Object.keys(form.value.objectDecisions).length
+  if (count === 0) return
+  if (!confirm(`${count}개 객체의 결정을 모두 초기화할까요?`)) return
+  
+  form.value.objectDecisions = {}
+  console.log(`[v95_p84] 모든 객체 결정 초기화: ${count}건`)
+}
+// ════════════════════════════════════════════════════════════════
+
+// 객체 결정 통계 (UI 요약용 — Step 6 검토 화면 등에서 활용)
+const objectDecisionStats = computed(() => {
+  const decisions = form.value.objectDecisions || {}
+  const all = Object.values(decisions)
+  return {
+    total: all.length,
+    auto: all.filter(d => d.decision === 'auto').length,
+    manual: all.filter(d => d.decision === 'manual').length,
+    exclude: all.filter(d => d.decision === 'exclude').length,
+  }
+})
+
+// ════════════════════════════════════════════════════════════════
+// v95_p66 (2026-05-05 본부장님): 수동 SQL 입력 모달 (Phase 5-1)
+// ════════════════════════════════════════════════════════════════
+// 본부장님 결정: "5 Phase 모두 — 엔터프라이즈 솔루션"
+//
+// 본부장님 호소: vProductModelInstructions 같은 객체 사용자 직접 처방 필요
+//
+// 모달 구조:
+//   - 좌측: MSSQL 원본 DDL (참고)
+//   - 우측: MySQL 사용자 작성 영역 (textarea)
+//   - 검출 패턴 + MySQL 대안 가이드 표시
+//   - 검증 (v95_p67 SQL parse API) + 저장 + 취소
+const manualSqlModal = ref({
+  open: false,
+  obj_name: '',
+  obj_type: '',
+  src_ddl: '',
+  mysql_sql: '',
+  patterns: [],          // 검출된 패턴 (대안 가이드 표시용)
+  validation: null,      // { ok: bool, message: str }
+  validating: false,
+})
+
+function openManualSqlModal(objName) {
+  // selectedRisk 에서 risk_meta 추출
+  const meta = selectedRisk.value?.risk_meta
+  if (!meta || meta.obj_name !== objName) {
+    console.warn(`[v95_p66] risk_meta 없음 — objName=${objName}`)
+    return
+  }
+  // allObjects 에서 원본 DDL (body) 찾기
+  let srcDdl = ''
+  let objType = meta.obj_type || ''
+  for (const list of [allObjects.value.views, allObjects.value.procedures,
+                       allObjects.value.functions, allObjects.value.triggers]) {
+    for (const o of (list || [])) {
+      if (o.name === objName) {
+        srcDdl = o.body || ''
+        objType = (o.type || objType).toUpperCase()
+        break
+      }
+    }
+    if (srcDdl) break
+  }
+  // 기존 작성 SQL 있으면 복원
+  const decisions = form.value.objectDecisions || {}
+  const prev = decisions[objName] || {}
+  
+  manualSqlModal.value = {
+    open: true,
+    obj_name: objName,
+    obj_type: objType,
+    src_ddl: srcDdl,
+    mysql_sql: prev.manual_sql || '',
+    patterns: meta.detected_patterns || [],
+    validation: null,
+    validating: false,
+  }
+}
+
+function closeManualSqlModal() {
+  manualSqlModal.value.open = false
+}
+
+async function validateManualSql() {
+  const sql = manualSqlModal.value.mysql_sql.trim()
+  if (!sql) {
+    manualSqlModal.value.validation = { ok: false, message: 'SQL 비어있음' }
+    return
+  }
+  manualSqlModal.value.validating = true
+  manualSqlModal.value.validation = null
+  try {
+    // v95_p67 (다음 패치) 의 검증 API 호출
+    const { data } = await axios.post('/api/v1/sql/validate-mysql', {
+      sql: sql,
+      obj_type: manualSqlModal.value.obj_type,
+      obj_name: manualSqlModal.value.obj_name,
+    }, { timeout: 8000 })
+    
+    manualSqlModal.value.validation = {
+      ok: !!data.ok,
+      message: data.message || (data.ok ? '✓ 문법 검증 통과' : '✗ 문법 오류'),
+      details: data.details || [],
+    }
+  } catch (e) {
+    // v95_p67 미배포 시 — 클라이언트 측 기본 검증
+    const hasCreate = /\bCREATE\s+(VIEW|PROCEDURE|FUNCTION|TRIGGER|TABLE)\b/i.test(sql)
+    if (!hasCreate) {
+      manualSqlModal.value.validation = {
+        ok: false,
+        message: '✗ CREATE 구문이 아닙니다 (CREATE VIEW/PROCEDURE/... 필요)',
+      }
+    } else {
+      // 기본 통과 (백엔드 검증 API 미배포 시)
+      manualSqlModal.value.validation = {
+        ok: true,
+        message: '⚠️ 클라이언트 기본 검증 통과 — 백엔드 검증 API (v95_p67) 미배포',
+      }
+    }
+  } finally {
+    manualSqlModal.value.validating = false
+  }
+}
+
+function saveManualSql() {
+  const m = manualSqlModal.value
+  if (!m.mysql_sql.trim()) {
+    try { app.notify('SQL 을 입력해주세요', 'warn') } catch {}
+    return
+  }
+  // 검증 통과 못한 상태면 경고 (저장은 허용 — 사용자 책임)
+  if (m.validation && !m.validation.ok) {
+    if (!confirm('검증 실패 상태입니다. 그래도 저장하시겠습니까?')) return
+  }
+  // form.objectDecisions 에 저장
+  if (!form.value.objectDecisions) form.value.objectDecisions = {}
+  form.value.objectDecisions[m.obj_name] = {
+    decision: 'manual',
+    manual_sql: m.mysql_sql.trim(),
+    decided_at: new Date().toISOString(),
+  }
+  console.log(`[v95_p66] 수동 SQL 저장: [${m.obj_name}]`)
+  try {
+    app.notify(`[${m.obj_name}] 수동 SQL 저장 완료`, 'success')
+  } catch {}
+  closeManualSqlModal()
+}
+
+async function runPreflightAnalysis(){
+  preflightAnalyzing.value = true
+  preflightRisks.value = []
+  preflightSummary.value = {total:0, critical:0, warn:0, info:0, auto_fix_count:0}
+  preflightOpen.value = false
+  
+  const c = connector.source
+  
+  // ════════════════════════════════════════════════════════════
+  // v95_p64 (2026-05-05 본부장님): 객체 DDL 동봉 → 백엔드 패턴 분석
+  // ════════════════════════════════════════════════════════════
+  // 본부장님 결정: "5 Phase 모두 순차 구현 — 엔터프라이즈 솔루션"
+  //
+  // 본질:
+  //   vProductModelInstructions / vJobCandidateEducation 같은 VIEW 가
+  //   XML/CROSS APPLY 패턴으로 자동 변환 실패 → 1146 잔류
+  //
+  // 처방 (Phase 1-2 + Phase 4):
+  //   1) allObjects 의 body (DDL) 를 preflight 에 동봉
+  //   2) 백엔드가 v95_p62 패턴 검출 엔진으로 분석
+  //   3) HIGH 위험 객체 → object_risk 카테고리 critical 반환
+  //   4) UI 카드에 객체별 위험 표시 + 사용자 결정 (다음 v95_p65)
+  //
+  // 부작용 0:
+  //   - 선택된 객체만 DDL 전송 (전체 객체 X)
+  //   - 옛 백엔드는 object_ddls 무시 (Optional 필드)
+  //   - DDL 누락 시 분석 스킵 (안전)
+  // ════════════════════════════════════════════════════════════
+  function collectObjectDDLs() {
+    const ddls = []
+    const selectedProcs = new Set(form.value.procedures || [])
+    const selectedFuncs = new Set(form.value.functions || [])
+    const selectedTrigs = new Set(form.value.triggers || [])
+    const selectedViews = new Set(form.value.views || [])
+    
+    // 위저드의 allObjects 에서 DDL (body) 추출
+    for (const o of (allObjects.value.procedures || [])) {
+      if (selectedProcs.has(o.name) && o.body) {
+        ddls.push({ name: o.name, type: 'PROCEDURE', ddl: o.body })
+      }
+    }
+    for (const o of (allObjects.value.functions || [])) {
+      if (selectedFuncs.has(o.name) && o.body) {
+        ddls.push({ name: o.name, type: 'FUNCTION', ddl: o.body })
+      }
+    }
+    for (const o of (allObjects.value.triggers || [])) {
+      if (selectedTrigs.has(o.name) && o.body) {
+        ddls.push({ name: o.name, type: 'TRIGGER', ddl: o.body })
+      }
+    }
+    for (const o of (allObjects.value.views || [])) {
+      if (selectedViews.has(o.name) && o.body) {
+        ddls.push({ name: o.name, type: 'VIEW', ddl: o.body })
+      }
+    }
+    return ddls
+  }
+  
+  try {
+    const objectDdls = collectObjectDDLs()
+    console.log(`[v95_p64-Preflight] 객체 DDL 동봉 ${objectDdls.length}개`)
+    
+    const {data} = await axios.post('/api/v1/preflight/analyze', {
+      src_db: form.value.srcDb,
+      tgt_db: form.value.tgtDb,
+      selection: {
+        tables:     form.value.tables || [],
+        procedures: form.value.procedures || [],
+        functions:  form.value.functions || [],
+        triggers:   form.value.triggers || [],
+        views:      form.value.views || [],
+        // v95_p64: 객체 DDL 동봉 → 백엔드 v95_p62 패턴 검출
+        object_ddls: objectDdls,
+      },
+      source_conn: c.host ? {
+        db_type: c.dbType, host: c.host, port: c.port,
+        username: c.username, password: c.password, database: c.database,
+      } : null,
+      parallel_tables: 3,  // 기본값 (job 의 parallel_tables 와 동일)
+    }, { timeout: 15000 })  // v95_p64: 객체 분석 추가로 timeout 약간 늘림
+    
+    if (data.ok) {
+      preflightRisks.value = data.risks || []
+      preflightSummary.value = data.summary || {}
+      // 위험 발견 시 결과 패널 자동 열기
+      if (preflightRisks.value.length > 0) {
+        preflightOpen.value = true
+      }
+      console.log('[v95_p23a-Preflight] 분석 완료:', preflightSummary.value)
+      // v95_p64: object_risk 카테고리 통계 추가 로그
+      const objRisks = preflightRisks.value.filter(r => r.category === 'object_risk')
+      if (objRisks.length > 0) {
+        console.log(`[v95_p64-Preflight] 객체 위험 검출: ${objRisks.length}건`)
+      }
+    } else {
+      console.warn('[v95_p23a-Preflight] 분석 실패:', data.error)
+    }
+  } catch(e) {
+    // 사전 분석 실패해도 위저드 진행 차단 안 함 (안전)
+    console.warn('[v95_p23a-Preflight] 호출 실패 (무시):', e.message || e)
+  } finally {
+    preflightAnalyzing.value = false
+  }
 }
 
 function goStep(i) {
@@ -1763,6 +3167,14 @@ function nextStep(){
     cur.value++; loadAll(); return
   }
   if(cur.value===1){
+    // v95_p23a (2026-05-03 본부장님 본질 처방): 위저드 사전 분석 (Pre-Flight)
+    //   본부장님 호소: "위저드에서 테이블 및 오브젝트 전체 선택하고 다음으로
+    //                넘어가면 그때 전체 분석할때 이렇게 dead lock 걸릴 거
+    //                분석해서 회피해서 순서를 정해야 되는거 아냐?"
+    //   처방: 객체 선택 → 다음 클릭 시 사전 분석 자동 실행 (~3초)
+    //         위험 발견 시 결과 패널 표시, 사용자 확인 후 진행
+    runPreflightAnalysis()  // 비동기, 결과는 preflightRisks ref 에 채움
+    
     if(needsNormStep()){
       cur.value++; analyzeWarnings()
     } else {
@@ -1897,6 +3309,9 @@ async function submit(asSchedule=false){
         convert_objects:form.value.convertObjs,
         ddl_engine:form.value.ddlEngine,
         obj_engine:form.value.objEngine,
+        // v92p11: AI 자동 재이관 토글 (본부장님 명시적 ON 일 때만 작동)
+        ai_auto_retry: form.value.aiAutoRetry,
+        ai_retry_count: form.value.aiAutoRetryCount,
         table_mode:form.value.tableMode,
         view_mode:form.value.viewMode,
         obj_mode:form.value.objMode,
@@ -2456,6 +3871,501 @@ watch(() => cur.value, (v) => {
 .rv-item{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:var(--bg-secondary);border-radius:var(--radius-sm)}
 .rv-l{font-size:11px;color:var(--text-tertiary)}.rv-v{font-size:12px;font-weight:500;color:var(--text-primary)}
 
+/* v95_p37 본질 4 (2026-05-05 본부장님): 검토 화면 블록 분리 */
+.review-section{
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.review-section-head{
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border-bottom: 0.5px solid var(--border-light);
+  font-size: 12.5px;
+  user-select: none;
+}
+.review-section-head-collapsible{
+  cursor: pointer; transition: background .12s;
+}
+.review-section-head-collapsible:hover{
+  background: rgba(0,0,0,0.03);
+}
+.review-section-title{
+  font-weight: 600; color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+.review-section-count{
+  margin-left: auto; font-size: 11px; color: var(--text-tertiary);
+  font-weight: 500;
+}
+.review-section .review-grid{
+  margin: 0; padding: 10px;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p40 (2026-05-05 본부장님): 검토 화면 시각 구분 + 레이아웃    */
+/* ════════════════════════════════════════════════════════════ */
+/* 시각 구분 — 헤더는 약간 더 짙은 배경 + 좌측 색상 띠로 강조 */
+.review-section-head-primary{
+  background: linear-gradient(to right, rgba(37,99,235,0.06), rgba(37,99,235,0.02) 50%, transparent);
+  border-left: 3px solid #2563eb;
+  padding-left: 11px;  /* 3px border 보정 */
+}
+.review-section-head.review-section-head-collapsible{
+  background: linear-gradient(to right, rgba(0,0,0,0.025), transparent 50%);
+  border-left: 3px solid var(--border-mid);
+  padding-left: 11px;
+  transition: border-left-color .15s, background .15s;
+}
+.review-section-head.review-section-head-collapsible:hover{
+  border-left-color: #2563eb;
+  background: linear-gradient(to right, rgba(37,99,235,0.04), rgba(37,99,235,0.01) 50%, transparent);
+}
+
+/* 헤더 우측 Job 이름 표시 */
+.review-section-jobname{
+  margin-left: auto;
+  font-size: 12.5px; font-weight: 600;
+  color: #2563eb;
+  max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  letter-spacing: -0.01em;
+  padding: 2px 8px;
+  background: rgba(37,99,235,0.08);
+  border-radius: 4px;
+}
+
+/* 기본 정보 본문 — 2줄 압축 */
+.review-basic-body{
+  padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+/* 1줄: 소스 → 타겟 좌우 카드 + 가운데 화살표 */
+.review-dbflow-row{
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px; align-items: center;
+}
+.review-db-card{
+  padding: 9px 12px;
+  background: var(--bg-primary);
+  border: 0.5px solid var(--border-light);
+  border-radius: 6px;
+  display: flex; flex-direction: column; gap: 3px;
+  min-width: 0;  /* overflow 보호 */
+}
+.review-db-source{
+  border-left: 3px solid #94a3b8;  /* 회색 — 소스 */
+}
+.review-db-target{
+  border-left: 3px solid #2563eb;  /* 파랑 — 타겟 (강조) */
+}
+.review-db-label{
+  font-size: 10.5px; font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.review-db-value{
+  display: flex; align-items: center; gap: 5px;
+  font-size: 13px; font-weight: 600;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  overflow: hidden;
+}
+.review-db-engine{
+  color: var(--text-secondary); flex-shrink: 0;
+}
+.review-db-sep{ color: var(--text-tertiary); opacity: 0.5; }
+.review-db-name{
+  color: #2563eb;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.review-dbflow-arrow{
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+
+/* 2줄: 이관 모드 / AI DBA / 자동 수정 (3 columns) */
+.review-attr-row{
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+}
+/* v95_p52 (2026-05-05 본부장님): 5칸 한 줄 (DDL/객체 엔진 추가) */
+.review-attr-row-5col{
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+}
+.rv-item-compact{
+  padding: 7px 10px;
+  background: var(--bg-primary);
+  border: 0.5px solid var(--border-light);
+  border-radius: 6px;
+}
+
+/* 좁은 화면 — 세로 스택 */
+@media (max-width: 700px){
+  .review-dbflow-row{ grid-template-columns: 1fr; gap: 6px; }
+  .review-dbflow-arrow{ transform: rotate(90deg); padding: 4px 0; }
+  .review-attr-row{ grid-template-columns: 1fr; }
+  .review-section-jobname{ max-width: 50%; }
+}
+/* v95_p52: 5칸 → 좁은 화면 (1024 이하) 자동 3+2 wrap */
+@media (max-width: 1024px){
+  .review-attr-row-5col{
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
+@media (max-width: 700px){
+  .review-attr-row-5col{
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p48 (2026-05-05 본부장님): 검토 화면 표 형식 + 그룹 분리   */
+/* ════════════════════════════════════════════════════════════ */
+/* 본부장님 호소: "컬럼과 관련 정보 너무 떨어져 있음"                */
+/*               "한 줄에 4개 정보, 블록 구분, 표 형태로 구분"        */
+
+.review-detail-body{
+  padding: 14px;
+  background: #ffffff;
+}
+
+/* 그룹 (이관 객체 / 변환·실행 설정) */
+.review-group{
+  margin-bottom: 12px;
+}
+.review-group:last-child{
+  margin-bottom: 0;
+}
+.review-group-title{
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  letter-spacing: -0.01em;
+}
+.review-group-bullet{
+  display: inline-block;
+  width: 4px; height: 14px;
+  background: #2563eb;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.review-group-bullet-cfg{
+  background: #6d28d9;  /* 보라 — 변환·실행 그룹 */
+}
+
+/* 표 형식 — 4-column 기본, 6-column 변형, 라벨 행 + 값 행 교대 */
+.review-table{
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  background: #fafbfc;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.review-table td{
+  padding: 7px 10px;
+  width: 25%;            /* 4-column 균등 (기본) */
+  /* v95_p54 (2026-05-05 본부장님): 컬럼간 구분선 선명하게 */
+  /*   Before: 1px dashed rgba(0,0,0,0.05) — 거의 안 보임 */
+  /*   After:  1px solid  rgba(0,0,0,0.12) — 명확히 분리 */
+  border-right: 1px solid rgba(0,0,0,0.12);
+  border-bottom: 1px solid rgba(0,0,0,0.12);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* v95_p50: 6-column 변형 (이관 객체 / 변환·실행 한 줄용) */
+.review-table-6col td{
+  width: 16.66%;          /* 6-column 균등 */
+  padding: 7px 8px;       /* 좁은 컬럼 — 패딩 약간 축소 */
+  font-size: 12px;        /* 축소 */
+}
+.review-table td:last-child{
+  border-right: none;
+}
+.review-table tr:last-child td{
+  border-bottom: none;
+}
+
+/* v95_p50: 라벨/값 시각 구분 강화 — 라벨과 값 사이 굵은 구분선 */
+/* v95_p54: 더 선명하게 (0.12 → 0.30) */
+.review-table tr.review-table-labels + tr.review-table-values td{
+  border-top: 2px solid rgba(37, 99, 235, 0.30);  /* 선명한 파란 구분선 */
+}
+
+/* 라벨 행 — 회색 배경 + uppercase + 작게 + 약하게 */
+.review-table-labels td{
+  background: rgba(0,0,0,0.04);
+  font-size: 10px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.review-table-6col .review-table-labels td{
+  font-size: 9.5px;       /* 6-column 더 좁아 — 라벨 폰트 더 축소 */
+}
+
+/* 값 행 — 흰 배경 + 진한 검정 + 굵게 (강조) */
+.review-table-values td{
+  font-size: 13px;
+  font-weight: 700;       /* v95_p50: 600 → 700 더 강조 */
+  color: #0f172a;
+  background: #ffffff;
+}
+.review-table-6col .review-table-values td{
+  font-size: 12.5px;
+}
+
+/* 단위 (개, 건 등) — 약하게 */
+.review-unit{
+  margin-left: 1px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+/* AI 엔진 — 보라색 강조 */
+.review-table-values td.rv-engine-ai{
+  color: #6d28d9;
+}
+
+/* 경고 — 빨강 강조 (이관전 DROP 등) */
+.review-table-values td.rv-warn{
+  color: #dc2626;
+  font-weight: 700;
+}
+
+/* 좁은 화면 — 2-column 으로 */
+@media (max-width: 700px){
+  .review-table td{ width: 50%; }
+  .review-table-labels td:nth-child(3),
+  .review-table-labels td:nth-child(4),
+  .review-table-values td:nth-child(3),
+  .review-table-values td:nth-child(4){
+    border-top: 1px solid rgba(0,0,0,0.05);
+  }
+  /* v95_p50: 6-column 도 좁은 화면에선 3-column */
+  .review-table-6col td{ width: 33.33%; }
+  .review-table-6col .review-table-labels td:nth-child(4),
+  .review-table-6col .review-table-labels td:nth-child(5),
+  .review-table-6col .review-table-labels td:nth-child(6),
+  .review-table-6col .review-table-values td:nth-child(4),
+  .review-table-6col .review-table-values td:nth-child(5),
+  .review-table-6col .review-table-values td:nth-child(6){
+    border-top: 1px solid rgba(0,0,0,0.05);
+  }
+}
+
+/* 다크 모드 호환 */
+.dark .review-detail-body{ background: var(--bg-secondary); }
+.dark .review-group-title{ color: var(--text-primary); border-bottom-color: rgba(255,255,255,0.08); }
+.dark .review-table{ background: var(--bg-primary); border-color: rgba(255,255,255,0.08); }
+.dark .review-table-labels td{ background: rgba(255,255,255,0.03); }
+.dark .review-table-values td{ background: var(--bg-primary); color: var(--text-primary); }
+.dark .review-table td{ border-right-color: rgba(255,255,255,0.15); border-bottom-color: rgba(255,255,255,0.15); }
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p43 (2026-05-05 본부장님): 시각 계층 강화 — "구분이 잘 안돼"   */
+/* ════════════════════════════════════════════════════════════ */
+/* 본부장님 호소: 섹션 헤더와 본문, 라벨과 값 시각 분리 강화          */
+
+/* 섹션 컨테이너 — 흰 배경 + 미세 그림자로 떠있는 카드 인상 */
+.review-section{
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+
+/* 섹션 헤더 — 회색톤 배경으로 본문과 명확히 분리 */
+.review-section-head{
+  background: linear-gradient(to bottom, #f8fafc, #f1f5f9);
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+  padding: 11px 14px;
+  font-size: 13px;
+}
+
+/* 기본 정보 (primary) — 파란 강조 */
+.review-section-head-primary{
+  background: linear-gradient(to bottom, #eff6ff, #dbeafe 130%);
+  border-left: 4px solid #2563eb;
+  padding-left: 12px;
+}
+
+/* 접힘 가능 헤더 — 회색 띠 + 호버 시 파랑 */
+.review-section-head.review-section-head-collapsible{
+  background: linear-gradient(to bottom, #f8fafc, #f1f5f9);
+  border-left: 4px solid #cbd5e1;
+  padding-left: 12px;
+}
+.review-section-head.review-section-head-collapsible:hover{
+  background: linear-gradient(to bottom, #eff6ff, #dbeafe 130%);
+  border-left-color: #2563eb;
+}
+
+/* 섹션 제목 — 굵은 검정 */
+.review-section-title{
+  font-weight: 700;
+  color: #0f172a;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+/* 헤더 우측 카운트/요약 — 약한 회색 + monospace */
+.review-section-count{
+  color: #64748b;
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  letter-spacing: -0.01em;
+}
+
+/* 본문 행 (이관 객체 / 변환·실행 설정) — 카드형 + 미세 테두리 */
+.review-section .review-grid{
+  padding: 12px;
+  background: #ffffff;
+  gap: 8px;
+}
+.review-section .rv-item{
+  background: #fafbfc;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 6px;
+  padding: 9px 12px;
+  transition: border-color .12s, background .12s;
+}
+.review-section .rv-item:hover{
+  background: #ffffff;
+  border-color: rgba(37,99,235,0.2);
+}
+
+/* 라벨 — 약한 회색 + 작은 폰트 + uppercase (덜 부각) */
+.review-section .rv-l{
+  font-size: 10.5px;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* 값 — 진한 검정 + 굵은 폰트 (부각) */
+.review-section .rv-v{
+  font-size: 13px;
+  color: #0f172a;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* 기본 정보 본문 영역 강화 */
+.review-basic-body{
+  padding: 14px;
+  background: #ffffff;
+}
+
+/* DB 카드 — 더 진한 라벨 + 더 굵은 값 */
+.review-db-card{
+  background: #fafbfc;
+  border: 1px solid rgba(0,0,0,0.08);
+  padding: 11px 14px;
+  transition: border-color .12s, background .12s;
+}
+.review-db-card:hover{
+  background: #ffffff;
+  border-color: rgba(37,99,235,0.25);
+}
+.review-db-source{
+  border-left: 4px solid #94a3b8;
+}
+.review-db-target{
+  border-left: 4px solid #2563eb;
+  background: linear-gradient(to right, rgba(37,99,235,0.03), #fafbfc 30%);
+}
+.review-db-label{
+  font-size: 10px;
+  color: #64748b;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.review-db-value{
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.review-db-engine{
+  color: #475569;
+  font-weight: 600;
+}
+.review-db-name{
+  color: #2563eb;
+  font-weight: 700;
+}
+
+/* 2줄 속성 행 (이관 모드 / AI DBA / 자동 수정) — 카드형 강화 */
+.rv-item-compact{
+  background: #fafbfc;
+  border: 1px solid rgba(0,0,0,0.06);
+  padding: 10px 12px;
+  transition: border-color .12s, background .12s;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.rv-item-compact:hover{
+  background: #ffffff;
+  border-color: rgba(37,99,235,0.2);
+}
+.rv-item-compact .rv-l{
+  font-size: 10.5px;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.rv-item-compact .rv-v{
+  font-size: 13px;
+  color: #0f172a;
+  font-weight: 600;
+}
+
+/* 다크 모드 호환 — CSS 변수 우선 (테마 전환 시 자동) */
+.dark .review-section{
+  background: var(--bg-secondary);
+  border-color: rgba(255,255,255,0.08);
+}
+.dark .review-section-head{
+  background: linear-gradient(to bottom, var(--bg-primary), rgba(0,0,0,0.05));
+  border-bottom-color: rgba(255,255,255,0.06);
+}
+.dark .review-section-head-primary{
+  background: linear-gradient(to bottom, rgba(37,99,235,0.12), rgba(37,99,235,0.04));
+}
+.dark .review-section-title{ color: var(--text-primary); }
+.dark .review-section .rv-item,
+.dark .rv-item-compact,
+.dark .review-db-card{
+  background: var(--bg-primary);
+  border-color: rgba(255,255,255,0.08);
+}
+.dark .review-section .rv-v,
+.dark .review-db-value,
+.dark .rv-item-compact .rv-v{ color: var(--text-primary); }
+
 /* 스케줄 */
 .sched-section{background:var(--bg-secondary);border-radius:var(--radius-lg);padding:14px;border:0.5px solid var(--border-mid)}
 .sched-header{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px}
@@ -2500,6 +4410,808 @@ watch(() => cur.value, (v) => {
 .toggle.sm.on::after{transform:translateX(12px)}
 
 .norm-section{background:var(--bg-secondary);border:0.5px solid var(--border-light);border-radius:10px;overflow:hidden;margin-bottom:4px}
+
+/* ════════════════════════════════════════════════════════════════ */
+/* v95_p23a (2026-05-03 본부장님 본질 처방): 사전 분석 (Pre-Flight) */
+/* ════════════════════════════════════════════════════════════════ */
+.preflight-banner{
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
+  font-size: 12.5px; line-height: 1.5;
+  border: 1px solid;
+}
+.preflight-banner.preflight-loading{
+  background: rgba(59,130,246,0.06); border-color: rgba(59,130,246,0.30);
+  color: #1e40af; display: flex; gap: 10px; align-items: center;
+}
+.preflight-banner.preflight-info{
+  background: rgba(59,130,246,0.05); border-color: rgba(59,130,246,0.25);
+}
+.preflight-banner.preflight-warn{
+  background: rgba(245,158,11,0.06); border-color: rgba(245,158,11,0.35);
+}
+.preflight-banner.preflight-critical{
+  background: rgba(220,38,38,0.06); border-color: rgba(220,38,38,0.35);
+}
+
+.preflight-header{ display:flex; align-items:center; gap:8px; }
+.preflight-icon{ font-size:16px; line-height:1; }
+.preflight-title{ flex:1; }
+.preflight-title strong{ font-weight:700; }
+
+.preflight-badge{
+  display: inline-block; font-size: 10.5px; font-weight: 600;
+  padding: 2px 7px; border-radius: 10px; margin-left: 6px;
+  letter-spacing: 0.02em;
+}
+.preflight-badge.crit{ background:#dc2626;  color:white; }
+.preflight-badge.warn{ background:#f59e0b;  color:white; }
+.preflight-badge.info{ background:#3b82f6;  color:white; }
+.preflight-badge.fix { background:#16a34a;  color:white; }
+
+.preflight-list{
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px dashed rgba(0,0,0,0.10);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.preflight-item{
+  background: rgba(255,255,255,0.55); border-radius: 8px; padding: 10px 12px;
+  border-left: 3px solid;
+}
+.preflight-item-info     { border-left-color: #3b82f6; }
+.preflight-item-warn     { border-left-color: #f59e0b; }
+.preflight-item-critical { border-left-color: #dc2626; }
+
+.preflight-item-head{
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.preflight-item-level{
+  font-size: 10px; font-weight: 700; padding: 2px 7px;
+  border-radius: 4px; letter-spacing: 0.04em;
+}
+.preflight-item-level.level-info     { background:#dbeafe; color:#1e40af; }
+.preflight-item-level.level-warn     { background:#fef3c7; color:#92400e; }
+.preflight-item-level.level-critical { background:#fee2e2; color:#991b1b; }
+.preflight-item-cat{
+  font-size: 11.5px; font-weight: 600; color: var(--text-secondary);
+}
+.preflight-item-title{
+  font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+}
+.preflight-item-desc{
+  font-size: 11.5px; color: var(--text-secondary);
+  line-height: 1.55; margin-top: 2px;
+}
+.preflight-item-affected{
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-top: 6px; font-size: 11px;
+}
+.preflight-chip{
+  background: rgba(0,0,0,0.06); padding: 1px 7px; border-radius: 4px;
+  font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--text-secondary);
+}
+.preflight-item-fix{
+  display: flex; gap: 6px; align-items: center; margin-top: 6px;
+  padding: 4px 8px; background: rgba(34,197,94,0.08);
+  border-radius: 5px; font-size: 11px; color: #15803d; font-weight: 500;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p37 본질 1 (2026-05-05 본부장님): 사전 분석 마스터-디테일  */
+/* ════════════════════════════════════════════════════════════ */
+.pf-sort-controls{
+  display: flex; align-items: center; gap: 4px;
+  margin-left: auto; padding-left: 12px;
+}
+.pf-sort-label{
+  font-size: 11px; color: var(--text-tertiary); margin-right: 2px;
+}
+.pf-sort-btn{
+  padding: 3px 9px; font-size: 11px; font-weight: 500;
+  border: 0.5px solid var(--border-mid);
+  background: var(--bg-secondary); color: var(--text-secondary);
+  border-radius: 4px; cursor: pointer; transition: all .12s;
+  font-family: inherit;
+}
+.pf-sort-btn:hover{
+  background: var(--bg-primary); color: var(--text-primary);
+}
+.pf-sort-btn.on{
+  background: #2563eb; color: white; border-color: #2563eb;
+}
+
+.pf-master-detail{
+  /* v95_p75 (2026-05-06 본부장님): 좌측 폭 확대 (320 → 420)  */
+  /*   본부장님 호소: "폭을 조금더 넓히고, 오른쪽 폭은 조금 줄여야"   */
+  /*   효과: 좌측 리스트에 결정 뱃지 + 객체 이름 더 잘 보임           */
+  /* v95_p76: 추가 조정 — 좌측 460 으로 확대 (객체 이름 + 뱃지 더 명확) */
+  display: grid; grid-template-columns: 460px 1fr; gap: 14px;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px dashed rgba(0,0,0,0.10);
+  min-height: 200px;
+}
+.pf-list{
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 460px; overflow-y: auto;
+  padding-right: 4px;
+}
+.pf-list-item{
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px; border-radius: 6px; cursor: pointer;
+  background: rgba(255,255,255,0.55); border-left: 3px solid transparent;
+  transition: all .12s; font-size: 12px;
+}
+.pf-list-item:hover{
+  background: rgba(255,255,255,0.9);
+}
+.pf-list-item.pf-selected{
+  background: rgba(37,99,235,0.08); border-left-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37,99,235,0.15);
+}
+.pf-list-item.pf-level-critical{ border-left-color: #dc2626; }
+.pf-list-item.pf-level-warn    { border-left-color: #f59e0b; }
+.pf-list-item.pf-level-info    { border-left-color: #3b82f6; }
+.pf-list-level{
+  font-size: 10px; font-weight: 700; padding: 2px 6px;
+  border-radius: 3px; letter-spacing: 0.04em; flex-shrink: 0;
+}
+.pf-list-level.level-info     { background:#dbeafe; color:#1e40af; }
+.pf-list-level.level-warn     { background:#fef3c7; color:#92400e; }
+.pf-list-level.level-critical { background:#fee2e2; color:#991b1b; }
+.pf-list-cat-icon{
+  font-size: 14px; flex-shrink: 0;}
+.pf-list-title{
+  flex: 1; font-size: 12px; color: var(--text-primary);
+  font-weight: 500; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.pf-list-count{
+  font-size: 10.5px; font-weight: 600; color: var(--text-tertiary);
+  background: rgba(0,0,0,0.06); padding: 1px 6px; border-radius: 9px;
+  flex-shrink: 0; min-width: 20px; text-align: center;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p75 (2026-05-06 본부장님): 좌측 리스트 결정 뱃지         */
+/*   본부장님 호소: "어떤걸 선택했는지 보여 주자"                */
+/* ════════════════════════════════════════════════════════════ */
+.pf-list-decision-badge{
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  font-size: 12px; font-weight: 700;
+  border: 2px solid;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+  cursor: help;
+}
+.pf-list-decision-auto{
+  background: rgba(34, 197, 94, 0.15);
+  border-color: #16a34a;
+  color: #16a34a;
+}
+.pf-list-decision-manual{
+  background: rgba(168, 85, 247, 0.15);
+  border-color: #7c3aed;
+  color: #7c3aed;
+}
+.pf-list-decision-exclude{
+  background: rgba(220, 38, 38, 0.15);
+  border-color: #dc2626;
+  color: #dc2626;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p84 (2026-05-06 본부장님): 좌측 인라인 결정 버튼 + 일괄 처리  */
+/*   본부장님 호소:                                            */
+/*   "오른쪽 창을 끝까지 드레그 한 후 하나씩 선택하기 너무 번거로워" */
+/*   "여기 목록에서 AI 바로 선택하게 할 수 있을까?"             */
+/* ════════════════════════════════════════════════════════════ */
+
+/* 일괄 처리 헤더 */
+.pf-bulk-actions{
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; margin-bottom: 6px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.06), rgba(34, 197, 94, 0.04));
+  border: 1px solid rgba(37, 99, 235, 0.15);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+.pf-bulk-label{
+  font-size: 11.5px; font-weight: 700;
+  color: var(--text-primary);
+  margin-right: 4px;
+}
+.pf-bulk-btn{
+  padding: 4px 9px;
+  background: white;
+  border: 1.5px solid var(--border-light);
+  border-radius: 5px;
+  font-size: 11px; font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+  user-select: none;
+}
+.pf-bulk-btn:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.08);
+}
+.pf-bulk-auto{ color: #15803d; border-color: #16a34a; }
+.pf-bulk-auto:hover{ background: rgba(34, 197, 94, 0.1); }
+.pf-bulk-exclude{ color: #b91c1c; border-color: #dc2626; }
+.pf-bulk-exclude:hover{ background: rgba(220, 38, 38, 0.08); }
+.pf-bulk-clear{ color: #6b7280; border-color: #d1d5db; }
+.pf-bulk-clear:hover{ background: #f3f4f6; }
+
+/* 좌측 리스트 인라인 결정 버튼 그룹 */
+.pf-list-quick-actions{
+  flex-shrink: 0;
+  display: inline-flex; gap: 3px;
+  margin-left: auto;        /* 우측 끝으로 정렬 */
+}
+.pf-quick-btn{
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: white;
+  border: 1.5px solid var(--border-light);
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all .12s;
+  user-select: none;
+  padding: 0;
+}
+.pf-quick-btn:hover{
+  transform: scale(1.1);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+/* 각 옵션별 hover 색 */
+.pf-quick-auto:hover    { background: rgba(34, 197, 94, 0.12);  border-color: #16a34a; }
+.pf-quick-manual:hover  { background: rgba(168, 85, 247, 0.12); border-color: #7c3aed; }
+.pf-quick-exclude:hover { background: rgba(220, 38, 38, 0.10);  border-color: #dc2626; }
+/* active 상태 (현재 선택된 결정) */
+.pf-quick-btn.active{
+  border-width: 2px;
+  font-weight: 700;
+}
+.pf-quick-auto.active{
+  background: rgba(34, 197, 94, 0.18);  border-color: #16a34a;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+}
+.pf-quick-manual.active{
+  background: rgba(168, 85, 247, 0.18); border-color: #7c3aed;
+  box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.2);
+}
+.pf-quick-exclude.active{
+  background: rgba(220, 38, 38, 0.15);  border-color: #dc2626;
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.15);
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p89_ux (2026-05-07 본부장님 본질 처방):                   */
+/*   풍선 도움말 강화 — title 만으로 부족 → CSS tooltip          */
+/*   본부장님 호소: "로봇/손글씨 무슨 뜻인지 모르겠어"            */
+/*                                                                */
+/*   효과: data-tip 속성 있는 버튼 호버 시 즉시 라벨 표시         */
+/*         (브라우저 title 기본 500ms 지연 → 0ms 즉시)            */
+/* ════════════════════════════════════════════════════════════ */
+.pf-quick-btn[data-tip],
+.pf-bulk-btn[data-tip] {
+  position: relative;
+}
+.pf-quick-btn[data-tip]::after,
+.pf-bulk-btn[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);  /* 버튼 위쪽에 표시 */
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, .95);
+  color: #fff;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease, transform .15s ease;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .25);
+}
+.pf-quick-btn[data-tip]::before,
+.pf-bulk-btn[data-tip]::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 1px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(15, 23, 42, .95);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease;
+  z-index: 1001;
+}
+.pf-quick-btn[data-tip]:hover::after,
+.pf-quick-btn[data-tip]:hover::before,
+.pf-bulk-btn[data-tip]:hover::after,
+.pf-bulk-btn[data-tip]:hover::before {
+  opacity: 1;
+}
+.pf-quick-btn[data-tip]:hover::after {
+  transform: translateX(-50%) translateY(-2px);
+}
+/* 결정 뱃지 (기존 v95_p75) — 인라인 버튼이 추가되었으므로 위치 조정 */
+.pf-list-item .pf-list-decision-badge{
+  margin-left: auto;        /* 인라인 버튼 그룹 직전으로 */
+  margin-right: 4px;
+}
+.pf-list-item .pf-list-quick-actions ~ .pf-list-decision-badge,
+.pf-list-item .pf-list-decision-badge ~ .pf-list-quick-actions{
+  /* 둘 다 있으면 자연스럽게 옆에 배치 — flex 기본 동작 */
+}
+
+.pf-detail{
+  background: rgba(255,255,255,0.65); border-radius: 8px;
+  padding: 14px 16px; min-height: 180px;
+}
+.pf-detail-empty{
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--text-tertiary); font-size: 12px;
+  font-style: italic;
+}
+.pf-detail-head{
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 8px; padding-bottom: 8px;
+  border-bottom: 0.5px solid rgba(0,0,0,0.08);
+}
+.pf-detail-level{
+  font-size: 10.5px; font-weight: 700; padding: 2px 8px;
+  border-radius: 4px; letter-spacing: 0.04em;
+}
+.pf-detail-level.level-info     { background:#dbeafe; color:#1e40af; }
+.pf-detail-level.level-warn     { background:#fef3c7; color:#92400e; }
+.pf-detail-level.level-critical { background:#fee2e2; color:#991b1b; }
+.pf-detail-cat{
+  font-size: 12px; font-weight: 600; color: var(--text-secondary);
+}
+.pf-detail-title{
+  font-size: 13.5px; font-weight: 600; color: var(--text-primary);
+}
+.pf-detail-desc{
+  font-size: 12.5px; color: var(--text-secondary);
+  line-height: 1.6; margin-bottom: 12px;
+}
+.pf-detail-section-label{
+  font-size: 11px; font-weight: 600; color: var(--text-tertiary);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+.pf-detail-section-count{
+  font-size: 11px; font-weight: 500; color: var(--text-tertiary);
+  text-transform: none; letter-spacing: 0;
+}
+.pf-detail-affected{
+  margin-bottom: 12px;
+}
+.pf-detail-chips{
+  display: flex; gap: 5px; flex-wrap: wrap;
+}
+.pf-show-more-btn{
+  font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  background: rgba(37,99,235,0.08); color: #1d4ed8;
+  border: 0.5px solid rgba(37,99,235,0.2);
+  cursor: pointer; font-family: inherit; font-weight: 500;
+  transition: all .12s;
+}
+.pf-show-more-btn:hover{
+  background: rgba(37,99,235,0.15);
+}
+.pf-detail-fix{
+  display: flex; gap: 8px; align-items: center;
+  padding: 8px 12px; background: rgba(34,197,94,0.10);
+  border-radius: 6px; font-size: 12px; color: #15803d; font-weight: 500;
+  margin-top: 4px;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p64 (2026-05-05 본부장님): object_risk 상세 메타 카드     */
+/*   본부장님 결정: "5 Phase 모두 — 엔터프라이즈 솔루션"          */
+/* ════════════════════════════════════════════════════════════ */
+.pf-detail-risk-meta{
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px; margin-top: 6px;
+  background: rgba(220, 38, 38, 0.04);
+  border: 1px solid rgba(220, 38, 38, 0.15);
+  border-radius: 8px;
+}
+/* 신뢰도 게이지 */
+.pf-rm-confidence{ display: flex; flex-direction: column; gap: 6px; }
+.pf-rm-conf-label{
+  font-size: 12px; color: var(--text-secondary);
+  display: flex; gap: 8px; align-items: baseline;
+}
+.pf-rm-conf-label strong{ font-size: 14px; font-weight: 700; }
+.pf-rm-conf-low { color: #dc2626; }
+.pf-rm-conf-mid { color: #f59e0b; }
+.pf-rm-conf-high{ color: #16a34a; }
+.pf-rm-conf-bar{
+  width: 100%; height: 8px;
+  background: rgba(0,0,0,0.06);
+  border-radius: 4px; overflow: hidden;
+}
+.pf-rm-conf-fill{
+  height: 100%;
+  transition: width .3s ease, background .3s ease;
+  border-radius: 4px;
+}
+/* 검출 패턴 카드 */
+.pf-rm-patterns{ display: flex; flex-direction: column; gap: 8px; }
+.pf-rm-pattern-card{
+  padding: 10px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-left: 3px solid #94a3b8;
+  border-radius: 6px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.pf-rm-pat-high   { border-left-color: #dc2626; }
+.pf-rm-pat-medium { border-left-color: #f59e0b; }
+.pf-rm-pat-low    { border-left-color: #16a34a; }
+.pf-rm-pat-head{
+  display: flex; gap: 10px; align-items: center;
+  font-size: 12.5px;
+}
+.pf-rm-pat-level{ font-weight: 700; font-size: 11px; }
+.pf-rm-pat-label{ color: var(--text-primary); font-weight: 600; }
+.pf-rm-pat-desc{
+  font-size: 11.5px; color: var(--text-secondary);
+  line-height: 1.5;
+}
+.pf-rm-pat-alt{
+  font-size: 11.5px; color: var(--text-primary);
+  padding: 6px 10px;
+  background: rgba(34, 197, 94, 0.08);
+  border-radius: 4px;
+}
+.pf-rm-pat-matches{ display: flex; flex-wrap: wrap; gap: 6px; }
+.pf-rm-pat-match{
+  font-family: monospace; font-size: 10.5px;
+  padding: 2px 6px;
+  background: rgba(0,0,0,0.05);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pf-rm-recommendation{
+  padding: 10px 12px;
+  background: rgba(37, 99, 235, 0.08);
+  border-radius: 6px;
+  font-size: 12px; font-weight: 500;
+  color: var(--text-primary);
+}
+/* v95_p73 (2026-05-06 본부장님 5번째 통찰): 사용자 친화 안내 */
+.pf-rm-friendly-note{
+  padding: 12px 14px; margin-top: 8px;
+  background: rgba(34, 197, 94, 0.06);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  border-radius: 8px;
+  font-size: 12.5px; line-height: 1.6;
+  color: var(--text-primary);
+}
+.pf-rm-friendly-list{
+  margin: 8px 0 0 0; padding-left: 20px;
+  font-size: 11.5px; color: var(--text-secondary);
+}
+.pf-rm-friendly-list li{ margin: 3px 0; }
+
+.pf-rm-decision-help{
+  padding: 8px 12px; margin-bottom: 8px;
+  background: rgba(34, 197, 94, 0.08);
+  border-left: 3px solid #16a34a;
+  border-radius: 4px;
+  font-size: 11.5px; color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.pf-rm-d-explain{
+  padding: 10px 12px; margin-top: 6px;
+  border-radius: 6px;
+  font-size: 11.5px; line-height: 1.6;
+}
+.pf-rm-d-explain-auto{
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  color: var(--text-primary);
+}
+.pf-rm-d-explain-manual{
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #92400e;
+}
+.pf-rm-d-explain-exclude{
+  background: rgba(220, 38, 38, 0.06);
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  color: var(--text-primary);
+}
+.pf-rm-d-step{
+  display: inline-block; min-width: 18px;
+  font-weight: 700; color: #16a34a;
+}
+.pf-rm-future-hint{
+  padding: 8px 12px;
+  background: rgba(168, 85, 247, 0.06);
+  border: 1px dashed rgba(168, 85, 247, 0.3);
+  border-radius: 4px;
+  font-size: 11px; color: #7c3aed;
+  font-style: italic;
+}
+/* v95_p65 (2026-05-05 본부장님): 사용자 결정 3-옵션 UI */
+.pf-rm-decision{
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  background: rgba(37, 99, 235, 0.04);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 8px;
+}
+.pf-rm-decision-label{
+  font-size: 12px; font-weight: 600; color: var(--text-primary);
+}
+.pf-rm-decision-buttons{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;  /* v95_p75: 8 → 6 컴팩트 */
+}
+.pf-rm-decision-btn{
+  /* v95_p75 (2026-05-06 본부장님): 결정 버튼 컴팩트화 */
+  /*   본부장님 호소: "3가지 선택 블록은 조금 줄여도 될 것 같아"     */
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 7px 8px;  /* 10/12 → 7/8 */
+  background: var(--bg-primary);
+  border: 1.5px solid var(--border-light);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all .15s;
+  text-align: center;
+  position: relative;
+}
+.pf-rm-decision-btn:hover{
+  background: rgba(37, 99, 235, 0.06);
+  border-color: rgba(37, 99, 235, 0.3);
+}
+.pf-rm-decision-btn.active{
+  background: rgba(37, 99, 235, 0.1);
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+/* v95_p75: active 상태 강화 (선택 결과 명확) */
+.pf-rm-decision-btn.active::after{
+  content: '✓';
+  position: absolute;
+  top: -7px; right: -7px;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: white;
+  background: #2563eb;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p76 (2026-05-06 본부장님 추가): 컴팩트 라디오 리스트     */
+/*   본부장님 호소:                                            */
+/*   "3가지 선택할 수 있는 블록은 조금 줄여도 될 것 같아"        */
+/*   "check box 로 선택할 수 있게 해주는것도 좋겠어"            */
+/* ════════════════════════════════════════════════════════════ */
+.pf-rm-decision-compact{
+  /* 컴팩트 결정 영역 — 가로 카드 3개 → 세로 라디오 3줄 */
+  padding: 10px 12px;  /* 패딩 약간 축소 */
+  gap: 8px;            /* 내부 gap 축소 */
+}
+.pf-rm-decision-compact .pf-rm-decision-label{
+  font-size: 12.5px; font-weight: 700;
+  margin-bottom: 2px;
+}
+.pf-rm-decision-compact .pf-rm-decision-help{
+  padding: 6px 10px;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.pf-rm-radio-list{
+  display: flex; flex-direction: column;
+  gap: 5px;
+}
+.pf-rm-radio-row{
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border: 1.5px solid var(--border-light);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all .15s;
+  user-select: none;
+}
+.pf-rm-radio-row:hover{
+  background: rgba(37, 99, 235, 0.05);
+  border-color: rgba(37, 99, 235, 0.25);
+}
+.pf-rm-radio-row.active{
+  background: rgba(37, 99, 235, 0.08);
+  border-color: #2563eb;
+  border-width: 2px;
+  padding: 7px 11px;  /* border 보정 */
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+.pf-rm-radio-auto.active   { background: rgba(34, 197, 94, 0.10);  border-color: #16a34a; box-shadow: 0 0 0 2px rgba(34,197,94,.15); }
+.pf-rm-radio-manual.active { background: rgba(168, 85, 247, 0.10); border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(168,85,247,.15); }
+.pf-rm-radio-exclude.active{ background: rgba(220, 38, 38, 0.10);  border-color: #dc2626; box-shadow: 0 0 0 2px rgba(220,38,38,.15); }
+.pf-rm-radio-input{
+  flex-shrink: 0;
+  margin: 0;
+  width: 16px; height: 16px;
+  cursor: pointer;
+  accent-color: #2563eb;
+}
+.pf-rm-radio-auto    .pf-rm-radio-input{ accent-color: #16a34a; }
+.pf-rm-radio-manual  .pf-rm-radio-input{ accent-color: #7c3aed; }
+.pf-rm-radio-exclude .pf-rm-radio-input{ accent-color: #dc2626; }
+.pf-rm-radio-icon{
+  flex-shrink: 0;
+  font-size: 18px; line-height: 1;
+  width: 22px; text-align: center;
+}
+.pf-rm-radio-text{
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.pf-rm-radio-text strong{
+  font-size: 12.5px; font-weight: 700;
+  color: var(--text-primary);
+}
+.pf-rm-radio-sub{
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  line-height: 1.3;
+}
+.pf-rm-radio-row.active .pf-rm-radio-text strong{
+  color: #1e40af;
+}
+.pf-rm-radio-auto.active    .pf-rm-radio-text strong{ color: #15803d; }
+.pf-rm-radio-manual.active  .pf-rm-radio-text strong{ color: #6d28d9; }
+.pf-rm-radio-exclude.active .pf-rm-radio-text strong{ color: #b91c1c; }
+
+/* v95_p76: explain 컴팩트화 */
+.pf-rm-d-explain-compact{
+  padding: 6px 10px !important;
+  font-size: 11px !important;
+  margin-top: 4px !important;
+}
+.pf-rm-decision-auto.active::after   { background: #16a34a; }
+.pf-rm-decision-manual.active::after { background: #7c3aed; }
+.pf-rm-decision-exclude.active::after{ background: #dc2626; }
+.pf-rm-decision-auto.active   { background: rgba(34, 197, 94, 0.12); border-color: #16a34a; box-shadow: 0 0 0 2px rgba(34,197,94,.2); }
+.pf-rm-decision-manual.active { background: rgba(168, 85, 247, 0.12); border-color: #7c3aed; box-shadow: 0 0 0 2px rgba(168,85,247,.2); }
+.pf-rm-decision-exclude.active{ background: rgba(220, 38, 38, 0.12); border-color: #dc2626; box-shadow: 0 0 0 2px rgba(220,38,38,.2); }
+.pf-rm-d-icon{ font-size: 15px; line-height: 1; }  /* v95_p75: 18 → 15 컴팩트 */
+.pf-rm-d-title{ font-size: 11.5px; font-weight: 700; color: var(--text-primary); }
+.pf-rm-d-sub{ font-size: 10px; color: var(--text-tertiary); line-height: 1.25; }
+
+/* 현재 결정 상태 표시 */
+.pf-rm-d-status{
+  display: flex; gap: 10px; align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  font-size: 12px;
+  border: 1px solid var(--border-light);
+}
+.pf-rm-d-status strong{ font-weight: 600; }
+.pf-rm-d-status-auto    { color: #16a34a; font-weight: 600; }
+.pf-rm-d-status-manual  { color: #7c3aed; font-weight: 600; }
+.pf-rm-d-status-exclude { color: #dc2626; font-weight: 600; }
+
+/* v95_p75 (2026-05-06 본부장님): 강화된 결정 표시 */
+.pf-rm-d-status-strong{
+  padding: 12px 14px;
+  border-width: 2px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-top: 4px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+}
+.pf-rm-d-status-strong-auto{
+  background: rgba(34, 197, 94, 0.08);
+  border-color: #16a34a;
+}
+.pf-rm-d-status-strong-manual{
+  background: rgba(168, 85, 247, 0.08);
+  border-color: #7c3aed;
+}
+.pf-rm-d-status-strong-exclude{
+  background: rgba(220, 38, 38, 0.08);
+  border-color: #dc2626;
+}
+.pf-rm-d-status-icon{
+  font-size: 24px; line-height: 1;
+  flex-shrink: 0;
+}
+.pf-rm-d-status-text{
+  flex: 1;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.pf-rm-d-status-label{
+  font-size: 10.5px; color: var(--text-tertiary);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.pf-rm-d-status-value{
+  font-size: 13px; font-weight: 700;
+}
+.pf-rm-d-clear{
+  margin-left: auto;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  font-size: 10.5px; color: var(--text-tertiary);
+  cursor: pointer;
+}
+.pf-rm-d-clear:hover{
+  background: rgba(0,0,0,0.04);
+}
+@media (max-width: 700px){
+  .pf-rm-decision-buttons{ grid-template-columns: 1fr; }
+}
+/* 다크 모드 */
+.dark .pf-detail-risk-meta{
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.25);
+}
+.dark .pf-rm-pattern-card{
+  background: rgba(255,255,255,0.03);
+}
+
+/* 모바일/좁은 화면 — 마스터-디테일 세로 스택 */
+@media (max-width: 900px){
+  .pf-master-detail{ grid-template-columns: 1fr; }
+  .pf-list{ max-height: 240px; }
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p37 본질 2 (2026-05-05 본부장님): 타입 정규화 그룹 분리    */
+/* ════════════════════════════════════════════════════════════ */
+.norm-group-label{
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 14px;
+  font-size: 11.5px; font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+.norm-group-applied{
+  background: rgba(34,197,94,0.06);
+  color: #15803d;
+  border-bottom: 0.5px solid rgba(34,197,94,0.15);
+}
+.norm-group-collapsible{
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border-bottom: 0.5px solid var(--border-light);
+  border-top: 0.5px solid var(--border-light);
+}
+.norm-group-collapsible:hover{
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+.norm-group-hint{
+  margin-left: auto; font-size: 10.5px; font-weight: 500;
+  color: var(--text-tertiary); font-style: italic;
+}
+.norm-applied{ border-top: none; }
+.norm-unapplied{ border-top: none; }
+
 .norm-header{display:flex;align-items:center;gap:8px;padding:10px 14px;cursor:pointer;user-select:none}
 .norm-header:hover{background:var(--bg-primary)}
 .norm-title{font-size:.82rem;font-weight:600;color:var(--text-primary)}
@@ -2524,6 +5236,13 @@ watch(() => cur.value, (v) => {
 .wiz-btn-next:hover{background:#1d4ed8;box-shadow:0 2px 8px rgba(37,99,235,.4)}
 .wiz-btn-prev{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius-md);background:var(--bg-secondary);color:var(--text-secondary);border:0.5px solid var(--border-mid);font-size:13px;font-weight:500;cursor:pointer;font-family:var(--font);transition:all .15s}
 .wiz-btn-prev:hover{background:var(--bg-primary);color:var(--text-primary)}
+/* v95_p25 (2026-05-04 본부장님 본질 처방): [새로 시작] 버튼 + 정규화 전체선택/해제 */
+.wiz-btn-restart{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:var(--radius-md);background:transparent;color:var(--text-tertiary);border:0.5px solid var(--border-mid);font-size:12.5px;font-weight:500;cursor:pointer;font-family:var(--font);transition:all .15s}
+.wiz-btn-restart:hover{background:rgba(239,68,68,.06);color:#dc2626;border-color:rgba(239,68,68,.3)}
+.norm-bulk-actions{margin-left:auto;display:inline-flex;gap:6px;align-items:center}
+.norm-bulk-btn{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:5px;background:transparent;color:var(--text-secondary);border:0.5px solid var(--border-mid);font-size:11.5px;font-weight:500;cursor:pointer;font-family:var(--font);transition:all .12s}
+.norm-bulk-btn:hover:not(:disabled){background:var(--bg-primary);color:var(--text-primary);border-color:var(--text-secondary)}
+.norm-bulk-btn:disabled{opacity:.4;cursor:not-allowed}
 input.err{border-color:var(--text-danger)!important}
 .opt-tag { display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:.65rem;font-weight:700;margin-right:5px; }
 .opt-tag.danger { background:rgba(239,68,68,.12);color:#dc2626;border:0.5px solid rgba(239,68,68,.3); }
@@ -3407,6 +6126,148 @@ input.err{border-color:var(--text-danger)!important}
 }
 .obj-row-table .obj-meta-size {
   width: 60px !important; text-align: right; flex-shrink: 0;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p66 (2026-05-05 본부장님): 수동 SQL 입력 모달 (Phase 5-1) */
+/* ════════════════════════════════════════════════════════════ */
+.msql-modal-overlay{
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+  padding: 30px;
+}
+.msql-modal{
+  background: var(--bg-primary);
+  border-radius: 12px;
+  width: 100%; max-width: 1200px;
+  max-height: 90vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  overflow: hidden;
+}
+.msql-modal-head{
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-light);
+  background: rgba(168, 85, 247, 0.04);
+}
+.msql-modal-head h3{
+  margin: 0; font-size: 15px; font-weight: 700; color: var(--text-primary);
+}
+.msql-modal-close{
+  background: transparent; border: none; cursor: pointer;
+  padding: 6px 10px; border-radius: 6px;
+  font-size: 16px; color: var(--text-tertiary);
+}
+.msql-modal-close:hover{ background: rgba(0,0,0,0.05); }
+.msql-modal-body{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 16px 20px;
+  flex: 1;
+  min-height: 360px;
+  overflow: auto;
+}
+.msql-modal-pane{
+  display: flex; flex-direction: column; gap: 6px;
+  min-width: 0;
+}
+.msql-pane-label{
+  font-size: 12px; font-weight: 600; color: var(--text-secondary);
+  display: flex; gap: 6px; align-items: center;
+}
+.msql-pane-icon{ font-size: 14px; }
+.msql-textarea{
+  flex: 1; min-height: 280px;
+  padding: 10px 12px;
+  font-family: monospace; font-size: 12px; line-height: 1.5;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  resize: vertical;
+  color: var(--text-primary);
+}
+.msql-textarea-readonly{ background: rgba(0,0,0,0.03); }
+.msql-textarea-editable:focus{
+  outline: none; border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15);
+}
+.msql-validation{
+  margin-top: 6px; padding: 8px 12px;
+  border-radius: 6px; font-size: 11.5px;
+}
+.msql-validation.ok{
+  background: rgba(34, 197, 94, 0.1);
+  color: #15803d;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.msql-validation.fail{
+  background: rgba(220, 38, 38, 0.08);
+  color: #b91c1c;
+  border: 1px solid rgba(220, 38, 38, 0.3);
+}
+.msql-validation ul{ margin: 6px 0 0 18px; padding: 0; }
+
+/* 검출 패턴 가이드 */
+.msql-pattern-guide{
+  padding: 12px 20px;
+  background: rgba(168, 85, 247, 0.04);
+  border-top: 1px solid var(--border-light);
+}
+.msql-pg-label{
+  font-size: 12px; font-weight: 600;
+  color: var(--text-primary); margin-bottom: 6px;
+}
+.msql-pg-item{
+  display: flex; gap: 10px; flex-wrap: wrap;
+  font-size: 11.5px; padding: 4px 0;
+}
+.msql-pg-level{ font-weight: 700; }
+.msql-pg-high   { color: #dc2626; }
+.msql-pg-medium { color: #f59e0b; }
+.msql-pg-low    { color: #16a34a; }
+.msql-pg-alt    { color: var(--text-secondary); }
+
+/* 버튼 영역 */
+.msql-modal-foot{
+  display: flex; gap: 10px; justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-secondary);
+}
+.msql-btn{
+  padding: 8px 16px; border-radius: 6px; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; display: inline-flex; gap: 6px;
+  align-items: center; border: 1px solid;
+  transition: all .15s;
+}
+.msql-btn:disabled{ opacity: .5; cursor: not-allowed; }
+.msql-btn-validate{
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.4);
+  color: #2563eb;
+}
+.msql-btn-validate:hover:not(:disabled){
+  background: rgba(37, 99, 235, 0.15);
+}
+.msql-btn-cancel{
+  background: transparent;
+  border-color: var(--border-light);
+  color: var(--text-secondary);
+}
+.msql-btn-cancel:hover{ background: rgba(0,0,0,0.04); }
+.msql-btn-save{
+  background: #7c3aed;
+  border-color: #7c3aed;
+  color: white;
+}
+.msql-btn-save:hover:not(:disabled){ background: #6d28d9; }
+
+@media (max-width: 900px){
+  .msql-modal-body{ grid-template-columns: 1fr; }
 }
 
 </style>

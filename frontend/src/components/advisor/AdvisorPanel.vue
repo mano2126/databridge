@@ -17,7 +17,21 @@
     <div class="adv-header">
       <div class="adv-header-icon">🧠</div>
       <div class="adv-header-body">
-        <div class="adv-header-title">AI DBA Consultant</div>
+        <div class="adv-header-title">
+          AI DBA Consultant
+          <!-- ════════════════════════════════════════════════════════ -->
+          <!-- v95_p89_ux (2026-05-07 본부장님): 현재 AI Provider 배지     -->
+          <!-- 본부장님 호소: "젬마를 선택하면 AI DBA들도 변경되어야 됨"    -->
+          <!-- 처방: 헤더에 현재 Provider/Model 명시 + 비용 자동 0원 표시  -->
+          <!-- ════════════════════════════════════════════════════════ -->
+          <span v-if="aiProvider" class="adv-provider-badge"
+                :class="`adv-provider-${aiProvider}`"
+                :title="`현재 AI 엔진: ${aiProviderLabel}`">
+            <span v-if="aiProvider === 'ollama'">🦙</span>
+            <span v-else>☁</span>
+            {{ aiProviderLabel }}
+          </span>
+        </div>
         <div class="adv-header-subtitle">
           선택된 이관 대상을 종합 분석하여 최적화 권고를 제시합니다 —
           <b>이관 = 최적화의 유일한 기회</b>
@@ -93,7 +107,14 @@
               <span class="adv-cm-divider"></span>
               <span class="adv-cm-item">
                 <span class="adv-cm-ico">💰</span>
-                <span class="adv-cm-val" :class="{ 'is-free': (costEstimates[mode.v].cost_usd || 0) === 0,
+                <!-- v95_p89_ux (2026-05-07 본부장님): Ollama 면 비용 0원 자동 -->
+                <span v-if="isOllamaProvider"
+                      class="adv-cm-val is-free"
+                      title="Ollama 자체 호스팅 — 외부 API 비용 없음">
+                  무료 🦙
+                </span>
+                <span v-else
+                      class="adv-cm-val" :class="{ 'is-free': (costEstimates[mode.v].cost_usd || 0) === 0,
                                                     'is-expensive': (costEstimates[mode.v].cost_usd || 0) >= 5 }">
                   <template v-if="(costEstimates[mode.v].cost_usd || 0) === 0">무료</template>
                   <template v-else>${{ costEstimates[mode.v].cost_usd.toFixed(2) }}</template>
@@ -151,18 +172,85 @@
 
           <!-- 오른쪽: 비용/시간 내역 표 -->
           <div class="adv-md-cost">
+            <!-- v95_p21 (2026-05-03 본부장님 본질 처방): 캐시 사전 표시 -->
+            <!--   본부장님 호소: "비용절감 관련은 언제 화면에 나오는거야?" -->
+            <!--   처방: 분석 시작 전에 캐시 적중 여부 명확히 표시 -->
+            <div v-if="preCheckCache === true" class="adv-md-cache-hit">
+              <div class="adv-md-cache-hit-icon">⚡</div>
+              <div class="adv-md-cache-hit-body">
+                <div class="adv-md-cache-hit-title">캐시 적중 — 무료 분석</div>
+                <div class="adv-md-cache-hit-desc">
+                  {{ preCheckCacheAtFmt }} 분석 결과가 있습니다 ·
+                  <strong>AI 호출 0회, 약 1초</strong>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="preCheckCache === false" class="adv-md-cache-miss">
+              <div class="adv-md-cache-miss-icon">🆕</div>
+              <div class="adv-md-cache-miss-body">
+                <div class="adv-md-cache-miss-title">첫 분석 — 캐시 자동 저장</div>
+                <div class="adv-md-cache-miss-desc">
+                  분석 후 자동 캐시 → <strong>다음번부터 무료</strong>
+                </div>
+              </div>
+            </div>
+
             <div class="adv-md-cost-label">예상 분석 비용</div>
             <template v-if="selectedModeCost">
-              <div class="adv-md-cost-main">
-                <template v-if="(selectedModeCost.cost_usd || 0) === 0">
-                  <span class="adv-md-cost-free">무료</span>
-                  <span class="adv-md-cost-free-sub">규칙 기반 · AI 호출 없음</span>
-                </template>
-                <template v-else>
-                  <span class="adv-md-cost-usd">${{ selectedModeCost.cost_usd.toFixed(2) }}</span>
-                  <span class="adv-md-cost-krw">₩{{ selectedModeCost.cost_krw.toLocaleString() }}</span>
-                </template>
+              <!-- ════════════════════════════════════════════════════════════════ -->
+              <!-- v95_p89_ux_fix2 (2026-05-07 본부장님 본질 정정):                    -->
+              <!-- "현재는 자체AI: 무료, Claude AI: 얼마. 이렇게 보여주는 건           -->
+              <!--  참고삼아 괜찮을 것 같아"                                           -->
+              <!--                                                                    -->
+              <!-- 처방: 항상 양쪽 비교 표시, 현재 선택된 provider 강조                -->
+              <!--   - 자체 AI (Ollama): 무료 🦙 + 규칙 기반 · AI 호출 없음             -->
+              <!--   - Claude AI:        $X.XX + ₩XXX                                  -->
+              <!--   - 캐시 적중 시: 양쪽 모두 캐시 안내                                -->
+              <!-- ════════════════════════════════════════════════════════════════ -->
+              <div class="adv-md-cost-compare">
+                <!-- 자체 AI (Ollama) 비용 카드 -->
+                <div class="adv-md-cost-card"
+                     :class="{ 'adv-md-cost-active': isOllamaProvider }">
+                  <div class="adv-md-cost-card-head">
+                    <span class="adv-md-cost-card-icon">🦙</span>
+                    <span class="adv-md-cost-card-label">자체 AI</span>
+                    <span v-if="isOllamaProvider" class="adv-md-cost-card-badge">현재 사용</span>
+                  </div>
+                  <div class="adv-md-cost-card-main">
+                    <span class="adv-md-cost-free">무료</span>
+                  </div>
+                  <div class="adv-md-cost-card-sub">
+                    {{ isOllamaProvider && aiProviderModel ? aiProviderModel : '규칙 기반 + Gemma' }}
+                  </div>
+                </div>
+                
+                <!-- Claude AI 비용 카드 -->
+                <div class="adv-md-cost-card"
+                     :class="{ 'adv-md-cost-active': !isOllamaProvider }">
+                  <div class="adv-md-cost-card-head">
+                    <span class="adv-md-cost-card-icon">☁</span>
+                    <span class="adv-md-cost-card-label">Claude AI</span>
+                    <span v-if="!isOllamaProvider" class="adv-md-cost-card-badge">현재 사용</span>
+                  </div>
+                  <div class="adv-md-cost-card-main">
+                    <template v-if="(selectedModeCost.cost_usd || 0) === 0">
+                      <span class="adv-md-cost-free">무료</span>
+                    </template>
+                    <template v-else-if="preCheckCache === true && !isOllamaProvider">
+                      <span class="adv-md-cost-free">$0</span>
+                      <span class="adv-md-cost-cache-tag">캐시</span>
+                    </template>
+                    <template v-else>
+                      <span class="adv-md-cost-usd">${{ selectedModeCost.cost_usd.toFixed(2) }}</span>
+                      <span class="adv-md-cost-krw">₩{{ selectedModeCost.cost_krw.toLocaleString() }}</span>
+                    </template>
+                  </div>
+                  <div class="adv-md-cost-card-sub">
+                    Anthropic Sonnet 4
+                  </div>
+                </div>
               </div>
+              
               <div class="adv-md-cost-table">
                 <div class="adv-md-cost-row">
                   <span class="adv-md-cost-key">토큰</span>
@@ -170,7 +258,10 @@
                 </div>
                 <div class="adv-md-cost-row">
                   <span class="adv-md-cost-key">시간</span>
-                  <span class="adv-md-cost-val">~{{ fmtTime(selectedModeCost.time_sec) }}</span>
+                  <span class="adv-md-cost-val">
+                    <template v-if="preCheckCache === true">~1초 (캐시)</template>
+                    <template v-else>~{{ fmtTime(selectedModeCost.time_sec) }}</template>
+                  </span>
                 </div>
                 <div class="adv-md-cost-row">
                   <span class="adv-md-cost-key">입력 토큰</span>
@@ -181,7 +272,14 @@
                   <span class="adv-md-cost-val">{{ fmtTokens(selectedModeCost.tokens_out) }}</span>
                 </div>
               </div>
-              <div class="adv-md-cost-note">Claude Sonnet 4 공식 요금 기준 추정. 실제 ±20%.</div>
+              <div class="adv-md-cost-note">
+                <template v-if="isOllamaProvider">
+                  자체 호스팅 — 외부 API 비용 없음. Claude AI 비용은 참고용 (Sonnet 4 공식 요금 기준 ±20%).
+                </template>
+                <template v-else>
+                  Claude Sonnet 4 공식 요금 기준 추정. 실제 ±20%.
+                </template>
+              </div>
             </template>
             <div v-else class="adv-md-cost-loading">
               <span class="spinner" style="width:14px;height:14px"></span>
@@ -201,7 +299,7 @@
         </button>
         <div style="flex:1"></div>
         <button class="adv-btn-analyze"
-                :class="{ 'deep-warn': selectedMode === 'deep' }"
+                :class="{ 'deep-warn': selectedMode === 'deep', 'cache-hit': preCheckCache === true }"
                 @click="handleStartAnalysis"
                 :disabled="analyzing">
           <span v-if="analyzing" class="spinner" style="width:12px;height:12px;border-top-color:#fff"></span>
@@ -209,7 +307,9 @@
             <circle cx="7" cy="7" r="5.5"/>
             <polygon points="5.5,4.5 10,7 5.5,9.5" fill="currentColor" stroke="none"/>
           </svg>
-          {{ selectedMode === 'deep' ? '전수 분석 시작 (고비용)' : (selectedModeDetail.name + ' 분석 시작') }}
+          <template v-if="preCheckCache === true">⚡ 캐시 사용 (무료, 1초)</template>
+          <template v-else-if="selectedMode === 'deep'">전수 분석 시작 (고비용)</template>
+          <template v-else>{{ selectedModeDetail.name + ' 분석 시작' }}</template>
         </button>
       </div>
     </div>
@@ -246,6 +346,22 @@
           <span class="adv-sb-impact-label">예상 개선</span>
           <span class="adv-sb-impact-value">+{{ summary.estimated_improvement_pct }}% (전체 적용 시)</span>
         </div>
+        <!-- v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 입증 표시 -->
+        <div v-if="fromCache" class="adv-sb-cache-badge" :title="`캐시 사용 — ${cacheAtFmt} (AI 호출 0회)`">
+          <span class="adv-sb-cache-icon">⚡</span>
+          <span class="adv-sb-cache-text">
+            <span class="adv-sb-cache-title">캐시 사용 중</span>
+            <span class="adv-sb-cache-time">{{ cacheAtFmt }} 분석</span>
+          </span>
+        </div>
+        <button v-if="fromCache" class="adv-sb-fresh" @click="runFreshAnalysis"
+                title="캐시 무시하고 AI 새로 분석 (비용 발생)">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" style="width:12px;height:12px">
+            <path d="M2,7 A5,5 0 1 1 7,12" fill="none"/>
+            <polyline points="2,4 2,7 5,7"/>
+          </svg>
+          새로 분석
+        </button>
         <button class="adv-sb-reanalyze" @click="resetAnalysis" title="다른 모드로 재분석">
           <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" style="width:12px;height:12px">
             <path d="M2,7 A5,5 0 1 1 7,12" fill="none"/>
@@ -328,6 +444,21 @@
           <span class="adv-sc-skipped">× 건너뜀 {{ decisionCounts.skipped }}</span>
           <span v-if="decisionCounts.edited > 0" class="adv-sc-edited">✎ 수정 {{ decisionCounts.edited }}</span>
           <span v-if="decisionCounts.pending > 0" class="adv-sc-pending">? 미결정 {{ decisionCounts.pending }}</span>
+
+          <!-- v94_p1: 백엔드 저장 상태 — 본부장님 호소 처방 -->
+          <span class="adv-sc-separator">·</span>
+          <span v-if="applyState.saving" class="adv-save-state saving">
+            <span class="adv-save-dot"></span> 저장 중...
+          </span>
+          <span v-else-if="applyState.error" class="adv-save-state error" :title="applyState.error">
+            ✗ 저장 실패 (재시도 필요)
+          </span>
+          <span v-else-if="applyState.lastSaved" class="adv-save-state saved"
+                :title="`마지막 저장: ${applyState.lastSaved.toLocaleTimeString('ko-KR')}`">
+            ✓ 자동 저장됨
+            <span class="adv-save-time">{{ savedTimeText }}</span>
+          </span>
+          <span v-else class="adv-save-state idle">아직 결정된 권고 없음</span>
         </div>
 
         <!-- ══ 3분할 메인 영역 ══ -->
@@ -561,7 +692,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import axios from 'axios'
 import RecommendationCard from './RecommendationCard.vue'
 import { useConnectorStore } from '@/store/connectorStore.js'  // hotfix 2026-04-23: 연결 정보 직접 전달
@@ -590,6 +721,43 @@ const showDeepConfirm = ref(false)
 const recommendations = ref([])        // Recommendation[]
 const summary         = ref({ total: 0, high: 0, med: 0, low: 0, estimated_improvement_pct: 0 })
 const advisorStatus   = ref({})        // { server: 'ok', table: 'pending', ... }
+
+// ════════════════════════════════════════════════════════════════
+// v95_p89_ux (2026-05-07 본부장님 본질 처방): AI Provider 인지
+// ════════════════════════════════════════════════════════════════
+// 본부장님 호소: "젬마를 선택하면 AI DBA들도 그에 맞게 변경되어야 됨.
+//                 지금은 그냥 클로드 AI 갔다 올때만 나오는 거 같아."
+//
+// 처방:
+//   1) Settings 의 ai_provider 를 advisor 패널이 자체 인지
+//   2) 헤더 배지에 현재 Provider/Model 명시 (Anthropic vs Ollama+Gemma)
+//   3) 비용 표시 — Ollama 는 자체 호스팅이므로 비용 0원 자동
+//   4) 분석 모드 detail 의 비용/시간도 provider 별 동적 조정
+// ════════════════════════════════════════════════════════════════
+const aiProvider      = ref('anthropic')   // 'anthropic' | 'ollama'
+const aiProviderModel = ref('')            // 'gemma4:26b' 등
+
+const aiProviderLabel = computed(() => {
+  if (aiProvider.value === 'ollama') {
+    return aiProviderModel.value
+      ? `Ollama · ${aiProviderModel.value}`
+      : 'Ollama (자체 호스팅)'
+  }
+  return 'Anthropic Claude'
+})
+
+const isOllamaProvider = computed(() => aiProvider.value === 'ollama')
+
+// v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 입증 정보
+const fromCache       = ref(false)     // 이번 결과가 캐시에서 왔는지
+const cachedAt        = ref('')        // 캐시 저장 시각 (ISO 문자열)
+
+// v95_p21 (2026-05-03 본부장님 본질 처방): 분석 시작 전 캐시 사전 확인
+//   본부장님 호소: "AI DBA 에서 비용절감 관련은 언제 화면에 나오는거야?"
+//   처방: 모드 선택 / 비용 화면에서 캐시 적중 여부 미리 표시
+//        → 분석 시작 버튼 누르기 전에 비용 발생 여부 명확
+const preCheckCache   = ref(null)      // null=미확인, true=캐시있음, false=캐시없음
+const preCheckCachedAt = ref('')       // 캐시 저장 시각
 
 // 사용자 결정
 const decisionMap  = ref({})           // { rec_id: 'applied'|'skipped'|'edited' }
@@ -903,6 +1071,20 @@ const decisionCounts = computed(() => {
   return c
 })
 
+// v94_p1: 마지막 저장 시각 표시 ("방금" / "5초 전" / "1분 전")
+//   tick ref 를 1초마다 증가시켜 computed 가 자동 재평가되게 함
+const _tick = ref(0)
+let _tickTimer = null
+const savedTimeText = computed(() => {
+  _tick.value  // dependency
+  if (!applyState.value.lastSaved) return ''
+  const sec = Math.floor((Date.now() - applyState.value.lastSaved.getTime()) / 1000)
+  if (sec < 3) return '(방금)'
+  if (sec < 60) return `(${sec}초 전)`
+  if (sec < 3600) return `(${Math.floor(sec/60)}분 전)`
+  return `(${Math.floor(sec/3600)}시간 전)`
+})
+
 // 적용 방법 안내 - 기존 RecommendationCard 로직을 여기에 인라인
 function howtoNeedsDba(rec) {
   if (!rec) return false
@@ -1017,7 +1199,7 @@ function confirmDeepAnalysis() {
   runAnalysis()
 }
 
-async function runAnalysis() {
+async function runAnalysis(forceFresh = false) {
   analyzing.value = true
   try {
     // hotfix 2026-04-23: connectorStore 의 연결 정보를 body 에 포함
@@ -1052,11 +1234,19 @@ async function runAnalysis() {
       //   프로파일 로드 시 connectorStore 에 저장되는 ID.
       //   없으면(직접 입력 모드) null — password 가 이미 평문이므로 복원 불필요.
       profile_id: connector.loadedProfileId || null,
+      // v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 사용 여부
+      //   forceFresh=true → 강제 새 분석 (사용자가 "🔄 새로 분석" 클릭)
+      //   기본 false → 같은 입력이면 캐시에서 반환 (비용 0, 즉시)
+      use_cache: !forceFresh,
     })
 
     recommendations.value = data.recommendations || []
     summary.value         = data.summary || {}
     advisorStatus.value   = data.advisor_status || {}
+
+    // v95_p18_cache: 캐시 메타 정보 저장 (UI 입증 표시용)
+    fromCache.value = !!data.from_cache
+    cachedAt.value  = data.cached_at || ''
 
     // 초기 결정: 각 권고의 default_action 을 초기값으로
     const initialDecisions = {}
@@ -1103,12 +1293,111 @@ function handleSkip() {
   emit('skip')
 }
 
+// v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 무시 강제 새 분석
+//   사용자가 "🔄 새로 분석" 버튼 클릭 → use_cache=false 로 호출
+//   AI 가 새로 분석 → 캐시 갱신 → from_cache=false 로 응답
+async function runFreshAnalysis() {
+  // 분석 중이면 중복 클릭 방지
+  if (analyzing.value) return
+  // 강제 새 분석 (forceFresh=true)
+  await runAnalysis(true)
+}
+
+// v95_p18_cache: 캐시 시각 포맷 (예: "2026-05-03 14:30")
+const cacheAtFmt = computed(() => {
+  if (!cachedAt.value) return ''
+  try {
+    const dt = new Date(cachedAt.value)
+    if (isNaN(dt.getTime())) return cachedAt.value
+    const yyyy = dt.getFullYear()
+    const mm = String(dt.getMonth() + 1).padStart(2, '0')
+    const dd = String(dt.getDate()).padStart(2, '0')
+    const hh = String(dt.getHours()).padStart(2, '0')
+    const mi = String(dt.getMinutes()).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
+  } catch {
+    return cachedAt.value
+  }
+})
+
+// v95_p21 (2026-05-03 본부장님 본질 처방): 사전 캐시 시각 포맷
+const preCheckCacheAtFmt = computed(() => {
+  if (!preCheckCachedAt.value) return ''
+  try {
+    const dt = new Date(preCheckCachedAt.value)
+    if (isNaN(dt.getTime())) return preCheckCachedAt.value
+    const yyyy = dt.getFullYear()
+    const mm = String(dt.getMonth() + 1).padStart(2, '0')
+    const dd = String(dt.getDate()).padStart(2, '0')
+    const hh = String(dt.getHours()).padStart(2, '0')
+    const mi = String(dt.getMinutes()).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
+  } catch {
+    return preCheckCachedAt.value
+  }
+})
+
+// v95_p21: 분석 시작 전 캐시 사전 확인 (AI 호출 없음, ~10ms)
+//   모드 변경 / 컴포넌트 마운트 시 호출 → 비용 화면에 캐시 상태 표시
+async function checkCachePrecheck() {
+  // 선택된 객체 없으면 스킵
+  const totalSel = (props.selection.tables?.length || 0)
+                 + (props.selection.procedures?.length || 0)
+                 + (props.selection.functions?.length || 0)
+                 + (props.selection.triggers?.length || 0)
+                 + (props.selection.views?.length || 0)
+  if (totalSel === 0) {
+    preCheckCache.value = null
+    preCheckCachedAt.value = ''
+    return
+  }
+
+  const src = connector.source || {}
+  const toConnInfo = (c) => ({
+    host:     c.host,
+    port:     c.port,
+    username: c.username,
+    password: c.password,
+    database: c.database,
+    db_type:  c.dbType,
+  })
+
+  try {
+    const { data } = await axios.post('/api/v1/advisor/check-cache', {
+      src_db:  props.srcDb,
+      tgt_db:  props.tgtDb,
+      selection: {
+        tables:     props.selection.tables     || [],
+        procedures: props.selection.procedures || [],
+        functions:  props.selection.functions  || [],
+        triggers:   props.selection.triggers   || [],
+        views:      props.selection.views      || [],
+      },
+      mode: selectedMode.value,
+      source_conn: src.host ? toConnInfo(src) : null,
+    }, { timeout: 5000 })
+
+    preCheckCache.value = !!data.cached
+    preCheckCachedAt.value = data.cached_at || ''
+  } catch (e) {
+    // 캐시 확인 실패해도 분석에는 영향 없음 (안전)
+    console.warn('[v95_p21] check-cache failed:', e.message || e)
+    preCheckCache.value = null
+    preCheckCachedAt.value = ''
+  }
+}
+
 function resetAnalysis() {
   analyzed.value = false
   recommendations.value = []
   decisionMap.value = {}
   editedSqlMap.value = {}
   summary.value = { total: 0, high: 0, med: 0, low: 0, estimated_improvement_pct: 0 }
+  // v95_p18_cache: 캐시 메타 리셋 (다른 모드 선택 시 새로 분석)
+  fromCache.value = false
+  cachedAt.value  = ''
+  // v95_p21: 사전 캐시 상태도 다시 확인 (모드/선택 변경 시)
+  checkCachePrecheck()
 }
 
 // ── 결정 관리 ──
@@ -1249,11 +1538,75 @@ function emitDecisions() {
     description: rec.description || '',
   }))
   emit('update:decisions', list)
+
+  // ─────────────────────────────────────────────────────────────
+  // v94_p1 (2026-05-01): 본부장님 호소 — "토글이 동작 안 하는 것 같다"
+  //
+  // 기존: emit 만 했고 백엔드 호출은 submit() 시점에만 발생
+  //  → 사용자가 클릭해도 실제 백엔드에 즉시 안 가서 UI 가 동작 안 하는 것처럼 보임
+  //
+  // 처방: 결정 변경 시 백엔드 /advisor/apply-decision 즉시 호출 (debounce 800ms)
+  //       응답 받아서 lastApplyResult 에 저장 → UI 에 ✓ 적용 N개 표시
+  // ─────────────────────────────────────────────────────────────
+  scheduleApplyDecisions(list)
+}
+
+// v94_p1: debounce 한 백엔드 호출
+let _applyDecisionsTimer = null
+function scheduleApplyDecisions(list) {
+  if (_applyDecisionsTimer) clearTimeout(_applyDecisionsTimer)
+  _applyDecisionsTimer = setTimeout(() => {
+    callApplyDecisions(list)
+  }, 800)
+}
+
+// v94_p1: 백엔드 즉시 호출 + 시각 피드백
+const applyState = ref({ saving: false, lastSaved: null, error: null, stats: null })
+async function callApplyDecisions(list) {
+  // pending 빼고 실제 결정한 것만 전송 (적용/거부/편집 중 하나)
+  const decided = list.filter(d => d.decision && d.decision !== 'pending')
+  if (decided.length === 0) {
+    // 모두 pending — 저장할 게 없음. lastSaved 표시 초기화.
+    applyState.value = { saving: false, lastSaved: null, error: null, stats: null }
+    return
+  }
+  applyState.value = { ...applyState.value, saving: true, error: null }
+  try {
+    const { data } = await axios.post('/api/v1/advisor/apply-decision', {
+      src_db: props.srcDb,
+      tgt_db: props.tgtDb,
+      mode: selectedMode.value,
+      job_id: '',  // wizard 단계라 아직 jobId 없음 — 백엔드는 빈 문자열 허용
+      decisions: decided,
+    }, { timeout: 8000 })
+    applyState.value = {
+      saving: false,
+      lastSaved: new Date(),
+      error: null,
+      stats: data?.stats || null,
+    }
+    console.log('[advisor.apply-decision] saved:', data)
+  } catch (e) {
+    applyState.value = {
+      ...applyState.value,
+      saving: false,
+      error: e?.message || '저장 실패',
+    }
+    console.error('[advisor.apply-decision] failed:', e)
+  }
 }
 
 // ── 생명주기 ──
 onMounted(() => {
+  // v95_p89_ux (2026-05-07 본부장님): AI Provider 먼저 로드 → 비용 표시 정확히
+  loadAiProvider()
+  
   estimateCosts()
+  
+  // v95_p21 (2026-05-03 본부장님 본질 처방): 캐시 사전 확인
+  //   본부장님 호소: "비용절감 관련은 언제 화면에 나오는거야?"
+  //   처방: 화면 진입 시 즉시 캐시 확인 → 비용 화면에 결과 표시
+  checkCachePrecheck()
   
   // v90.20: 부모에서 전달된 분석 결과 복원 (sessionStorage 에서 살아남은 상태)
   if (props.initialAnalysis && props.initialAnalysis.analyzed) {
@@ -1269,6 +1622,33 @@ onMounted(() => {
     analyzed.value         = true
     console.log('[AdvisorPanel] 분석 결과 복원:', recommendations.value.length, '개 권고')
   }
+
+  // v94_p1: "N초 전" 표시 매초 갱신
+  _tickTimer = setInterval(() => { _tick.value++ }, 1000)
+})
+
+// ════════════════════════════════════════════════════════════════
+// v95_p89_ux (2026-05-07 본부장님): AI Provider 로딩
+// ════════════════════════════════════════════════════════════════
+async function loadAiProvider() {
+  try {
+    const r = await fetch('/api/v1/settings/', { credentials: 'include' })
+    if (r.ok) {
+      const cfg = await r.json()
+      aiProvider.value = (cfg.ai_provider || 'anthropic').toLowerCase()
+      aiProviderModel.value = cfg.ollama_model || ''
+      console.log('[AdvisorPanel v95_p89_ux] AI Provider 인지:', 
+                   aiProvider.value, aiProviderModel.value)
+    }
+  } catch (e) {
+    console.warn('[AdvisorPanel] AI Provider 로드 실패 (anthropic 기본 사용):', e.message)
+  }
+}
+
+// v94_p1: 컴포넌트 종료 시 ticker / debounce 타이머 정리
+onUnmounted(() => {
+  if (_tickTimer) clearInterval(_tickTimer)
+  if (_applyDecisionsTimer) clearTimeout(_applyDecisionsTimer)
 })
 
 watch(
@@ -1279,8 +1659,17 @@ watch(
     props.selection.views?.length,
     props.selection.triggers?.length,
   ],
-  () => estimateCosts()
+  () => {
+    estimateCosts()
+    // v95_p21: 선택 객체 변경 시 캐시 상태 다시 확인
+    checkCachePrecheck()
+  }
 )
+
+// v95_p21: 모드 변경 시 캐시 상태 다시 확인 (smart/hybrid/deep 별 다른 캐시 키)
+watch(selectedMode, () => {
+  checkCachePrecheck()
+})
 
 // 2026-04-23 UX 개편: 카테고리 탭이나 검색 결과가 바뀌면 첫 권고 자동 선택
 watch(filteredRecs, (list) => {
@@ -1638,6 +2027,60 @@ watch(analyzed, (v) => {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
+/* v95_p21 (2026-05-03 본부장님 본질 처방): 캐시 사전 표시 */
+.adv-md-cache-hit {
+  display: flex; gap: 10px; align-items: center;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(34,197,94,0.10), rgba(22,163,74,0.05));
+  border: 1px solid rgba(34,197,94,0.40);
+  margin-bottom: 4px;
+}
+.adv-md-cache-hit-icon { font-size: 22px; line-height: 1; flex-shrink: 0; }
+.adv-md-cache-hit-body { display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
+.adv-md-cache-hit-title {
+  font-size: 12.5px; font-weight: 700; color: #15803d;
+  letter-spacing: 0.01em;
+}
+.adv-md-cache-hit-desc {
+  font-size: 11px; color: #16a34a;
+}
+.adv-md-cache-hit-desc strong { color: #14532d; font-weight: 700; }
+
+.adv-md-cache-miss {
+  display: flex; gap: 10px; align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(254, 243, 199, 0.4);
+  border: 1px solid rgba(245, 158, 11, 0.30);
+  margin-bottom: 4px;
+}
+.adv-md-cache-miss-icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+.adv-md-cache-miss-body { display: flex; flex-direction: column; gap: 2px; line-height: 1.3; }
+.adv-md-cache-miss-title {
+  font-size: 11.5px; font-weight: 600; color: #92400e;
+}
+.adv-md-cache-miss-desc {
+  font-size: 10.5px; color: #b45309;
+}
+.adv-md-cache-miss-desc strong { color: #78350f; font-weight: 700; }
+
+.adv-md-cost-strikethrough {
+  text-decoration: line-through;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+/* v95_p21: 분석 버튼 — 캐시 적중 시 녹색 배경 (무료 명시) */
+.adv-btn-analyze.cache-hit {
+  background: linear-gradient(135deg, #16a34a, #15803d) !important;
+  border-color: #15803d !important;
+  box-shadow: 0 2px 8px rgba(22,163,74,0.30);
+}
+.adv-btn-analyze.cache-hit:hover {
+  background: linear-gradient(135deg, #15803d, #166534) !important;
+}
 .adv-md-cost-main {
   display: flex;
   flex-direction: column;
@@ -1702,6 +2145,92 @@ watch(analyzed, (v) => {
   padding: 10px 0;
   font-size: 11.5px;
   color: var(--text-tertiary);
+}
+
+/* ════════════════════════════════════════════════════════════════ */
+/* v95_p89_ux_fix2 (2026-05-07 본부장님 본질 정정):                   */
+/*   카드 펼침 detail 의 비용 영역 — 자체AI vs Claude AI 양쪽 비교    */
+/*   현재 사용 중인 provider 강조 (테두리 + 배지)                     */
+/* ════════════════════════════════════════════════════════════════ */
+.adv-md-cost-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.adv-md-cost-card {
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, .6);
+  border: 2px solid var(--border-light, #e2e8f0);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all .2s;
+  position: relative;
+}
+.adv-md-cost-card.adv-md-cost-active {
+  background: rgba(20, 184, 166, .08);
+  border-color: #14b8a6;
+  box-shadow: 0 2px 8px rgba(20, 184, 166, .15);
+}
+.adv-md-cost-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.adv-md-cost-card-icon {
+  font-size: 14px;
+}
+.adv-md-cost-card-label {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.adv-md-cost-card-badge {
+  margin-left: auto;
+  background: #14b8a6;
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.adv-md-cost-card-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+}
+.adv-md-cost-card-main .adv-md-cost-free {
+  font-size: 22px;
+  font-weight: 700;
+  color: #16a34a;
+}
+.adv-md-cost-card-main .adv-md-cost-usd {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.adv-md-cost-card-main .adv-md-cost-krw {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.adv-md-cost-cache-tag {
+  background: #fbbf24;
+  color: #78350f;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.adv-md-cost-card-sub {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-style: italic;
 }
 
 /* ── 하단 액션 버튼 ── */
@@ -1787,6 +2316,41 @@ watch(analyzed, (v) => {
   cursor: pointer; transition: all 0.12s;
 }
 .adv-sb-reanalyze:hover { border-color: #6d28d9; color: #6d28d9; }
+
+/* v95_p18_cache (2026-05-03 본부장님 본질 처방): 캐시 입증 UI */
+.adv-sb-cache-badge {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.10), rgba(22, 163, 74, 0.05));
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  margin-left: 10px;
+}
+.adv-sb-cache-icon { font-size: 14px; color: #15803d; }
+.adv-sb-cache-text { display: flex; flex-direction: column; line-height: 1.2; }
+.adv-sb-cache-title {
+  font-size: 11px; font-weight: 700; color: #15803d;
+  letter-spacing: 0.02em;
+}
+.adv-sb-cache-time {
+  font-size: 10px; color: #16a34a;
+  font-variant-numeric: tabular-nums;
+}
+.adv-sb-fresh {
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(254, 243, 199, 0.4);
+  color: #b45309;
+  font-size: 11.5px; font-weight: 600;
+  cursor: pointer; transition: all 0.12s;
+  margin-left: 6px;
+}
+.adv-sb-fresh:hover {
+  border-color: #d97706; color: #92400e;
+  background: rgba(254, 215, 170, 0.5);
+}
 
 /* ── 빈 결과 (Hero) ── */
 .adv-empty {
@@ -1960,6 +2524,32 @@ watch(analyzed, (v) => {
 .adv-sc-skipped { color: #475569; font-weight: 500; }
 .adv-sc-edited  { color: #6d28d9; font-weight: 500; }
 .adv-sc-pending { color: #b45309; font-weight: 500; }
+
+/* v94_p1: 저장 상태 인디케이터 */
+.adv-save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.adv-save-state.idle    { color: #94a3b8; background: #f1f5f9; }
+.adv-save-state.saving  { color: #1e40af; background: #dbeafe; }
+.adv-save-state.saved   { color: #15803d; background: #dcfce7; }
+.adv-save-state.error   { color: #991b1b; background: #fee2e2; cursor: help; }
+.adv-save-time          { color: #16a34a; font-size: 10.5px; margin-left: 2px; opacity: 0.8; }
+.adv-save-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #1e40af;
+  animation: adv-save-pulse 1s ease-in-out infinite;
+}
+@keyframes adv-save-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.2); }
+}
 
 /* ══════════════════════════════════════════════════════════════
    3분할 메인 — 2026-04-23 스크롤 수정

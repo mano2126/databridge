@@ -1,0 +1,195 @@
+【FUNCTION 전용 추가 규칙】
+
+1. 헤더 형식
+   DROP FUNCTION IF EXISTS `{obj_name}`;
+   CREATE FUNCTION `{obj_name}`
+   (p_param1 TYPE1, p_param2 TYPE2)   ← 파라미터 수/순서 동일
+   RETURNS return_type
+   DETERMINISTIC                        ← 또는 NOT DETERMINISTIC
+   BEGIN
+     ...
+   END
+
+2. DETERMINISTIC 명시 필수
+   - 같은 입력에 같은 결과 → DETERMINISTIC
+   - 랜덤/시간/외부 의존 → NOT DETERMINISTIC
+   - 단순 조회 함수는 대부분 DETERMINISTIC
+
+3. 파라미터 선언
+   - MSSQL: (@p1 VARCHAR(20), @p2 INT)
+   - MySQL:  (p_p1 VARCHAR(20), p_p2 INT)   ← IN 키워드 생략 가능
+
+4. 지역변수 선언
+   - DECLARE v_result VARCHAR(40);   ← 세미콜론 필수
+   - SET v_result = '';              ← 세미콜론 필수
+   - RETURN v_result;               ← 세미콜론 필수
+
+5. SELECT INTO 패턴
+   SELECT col INTO v_result
+   FROM `tbl`
+   WHERE condition
+   LIMIT 1;    ← 세미콜론 필수, 별도 줄
+
+6. 자주 발생하는 오류 패턴 (누적)
+   - 오류: "Undeclared variable: 1RETURN"
+     원인: LIMIT 1 바로 뒤에 RETURN이 붙음 (LIMIT 1RETURN)
+     해결: LIMIT 1;\n  RETURN v_var; 로 분리
+
+   - 오류: "You have an error in your SQL syntax near 'SET'"
+     원인: DECLARE 또는 이전 문장 끝에 세미콜론 누락
+     해결: 모든 DECLARE, SET 끝에 ; 추가
+
+   - 오류: "near '(('"
+     원인: CREATE FUNCTION name\n( 패턴으로 이중 괄호
+     해결: CREATE FUNCTION `name` 만 쓰고, 소스의 ( 그대로 사용
+
+7. 【v63】 서브쿼리 alias + 세미콜론 위치 규칙 (1064 오류 최대 원인)
+
+   ❌ 잘못된 패턴 (자주 발생):
+      SET v_result = (
+        SELECT JSON_ARRAYAGG(...)
+        FROM (
+          SELECT ...
+          FROM tbl
+          WHERE ...
+          ORDER BY c
+        ) sub;       ← 서브쿼리 alias 뒤에 세미콜론! 치명적 오류
+      );              ← 진짜 문장 끝 세미콜론
+      RETURN v_result;
+
+   ✅ 올바른 패턴:
+      SET v_result = (
+        SELECT JSON_ARRAYAGG(...)
+        FROM (
+          SELECT ...
+          FROM tbl
+          WHERE ...
+          ORDER BY c
+        ) sub        ← 서브쿼리 alias, 세미콜론 없음
+      );              ← SET 문장의 유일한 세미콜론
+      RETURN v_result;
+
+   핵심 규칙:
+   - 세미콜론(;) 은 **최상위 SQL 문장 끝**에만 찍는다.
+   - 서브쿼리, CTE, JSON 집계 함수 내부엔 절대 세미콜론 금지.
+   - 닫는 괄호 `)` 뒤 alias `sub`, `t`, `a` 등 뒤에도 세미콜론 금지.
+   - 문장 끝이 어디인지 헷갈릴 때: SET / SELECT / RETURN / IF / WHILE 같은 키워드 단위로 판단.
+
+8. 【v63】 JSON 집계 반환 패턴 (TVF → Function 변환 시)
+
+   MSSQL TVF 를 JSON_ARRAYAGG 반환 함수로 바꾸는 경우 많음. 올바른 틀:
+
+   CREATE FUNCTION `fn_name`(p_arg TYPE)
+   RETURNS JSON DETERMINISTIC
+   BEGIN
+     DECLARE v_result JSON;
+     SET v_result = (
+       SELECT JSON_ARRAYAGG(
+         JSON_OBJECT(
+           'col1', col1,
+           'col2', col2
+         )
+       )
+       FROM (
+         SELECT col1, col2
+         FROM tbl
+         WHERE condition = p_arg
+         ORDER BY col1
+         LIMIT 100
+       ) sub
+     );
+     RETURN IFNULL(v_result, JSON_ARRAY());
+   END
+
+# ════════════════════════════════════════════════════════════════
+# v92p17 (2026-04-30): WHILE 루프 + 인라인 TVF 변환 예시
+# ════════════════════════════════════════════════════════════════
+
+# 예시 A: WHILE 루프 정확한 변환
+# 출처: ref.fn_next_business_day (capital_midsize 환경)
+
+# T-SQL 원본:
+#   CREATE FUNCTION ref.fn_next_business_day(@dt DATE)
+#   RETURNS DATE AS
+#   BEGIN
+#       DECLARE @d DATE = DATEADD(day, 1, @dt);
+#       WHILE DATEPART(weekday, @d) IN (1, 7)
+#             OR EXISTS (SELECT 1 FROM ref.holiday WHERE holiday_date = @d)
+#       BEGIN
+#           SET @d = DATEADD(day, 1, @d);
+#       END
+#       RETURN @d;
+#   END
+
+# MySQL 정확한 변환:
+DELIMITER //
+CREATE FUNCTION ref_fn_next_business_day(p_dt DATE)
+RETURNS DATE
+DETERMINISTIC
+READS SQL DATA
+BEGIN
+    DECLARE v_d DATE DEFAULT DATE_ADD(p_dt, INTERVAL 1 DAY);
+    WHILE DAYOFWEEK(v_d) IN (1, 7)
+          OR EXISTS (SELECT 1 FROM ref_holiday WHERE holiday_date = v_d)
+    DO
+        SET v_d = DATE_ADD(v_d, INTERVAL 1 DAY);
+    END WHILE;
+    RETURN v_d;
+END //
+DELIMITER ;
+
+# 핵심 변환 규칙:
+#   T-SQL                      MySQL
+#   WHILE cond BEGIN ... END   WHILE cond DO ... END WHILE;
+#   DATEPART(weekday, x)       DAYOFWEEK(x)
+#   DATEADD(day, n, x)         DATE_ADD(x, INTERVAL n DAY)
+#   schema.table               schema_table (underscore 정책)
+#   DECLARE @x DATE = expr     DECLARE v_x DATE DEFAULT expr
+# 
+# 절대 금지:
+#   ❌ WHILE 안에 IF/END IF 추가 (1064 오류)
+#   ❌ END WHILE 누락 또는 END 만 작성
+
+
+# 예시 B: 인라인 TVF — VIEW 또는 PROCEDURE 로 재설계
+# 출처: settlement.tvf_daily_trx (capital_midsize 환경)
+
+# T-SQL 원본:
+#   CREATE FUNCTION settlement.tvf_daily_trx(@d DATE)
+#   RETURNS TABLE AS
+#   RETURN (
+#       SELECT trx_type, COUNT(*) AS cnt, SUM(amount) AS total
+#       FROM settlement.trx_history
+#       WHERE CAST(trx_date AS DATE) = @d
+#       GROUP BY trx_type
+#   );
+
+# MySQL — 옵션 A (VIEW, 권장):
+CREATE OR REPLACE VIEW settlement_v_daily_trx AS
+SELECT DATE(trx_date) AS d, trx_type,
+       COUNT(*) AS cnt, SUM(amount) AS total
+FROM settlement_trx_history
+GROUP BY DATE(trx_date), trx_type;
+
+# 호출 변경:
+#   T-SQL: SELECT * FROM settlement.tvf_daily_trx('2024-01-01');
+#   MySQL: SELECT * FROM settlement_v_daily_trx WHERE d = '2024-01-01';
+
+# MySQL — 옵션 B (PROCEDURE, 파라미터 유지):
+DELIMITER //
+CREATE PROCEDURE settlement_tvf_daily_trx(IN p_d DATE)
+BEGIN
+    SELECT trx_type, COUNT(*) AS cnt, SUM(amount) AS total
+    FROM settlement_trx_history
+    WHERE DATE(trx_date) = p_d
+    GROUP BY trx_type;
+END //
+DELIMITER ;
+
+# 호출:
+#   CALL settlement_tvf_daily_trx('2024-01-01');
+
+# 결정 가이드:
+#   - 호출 패턴이 SELECT FROM tvf(...)  → 옵션 A (VIEW)
+#   - 호출 패턴이 EXEC / 단독 호출      → 옵션 B (PROCEDURE)
+#   - 모르면 기본 옵션 A

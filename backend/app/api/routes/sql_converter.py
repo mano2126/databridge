@@ -13,6 +13,161 @@ import re, io, zipfile, time
 router = APIRouter()
 
 
+# ════════════════════════════════════════════════════════════════════
+# v95_p89_tune (2026-05-07 본부장님 비전 — 파트너 처방):
+# 쿼리 튜닝 기능에 Gemma 자체 호스팅 통합
+# ════════════════════════════════════════════════════════════════════
+# 본부장님 비전:
+#   - 쿼리 튜닝 (convert-tuned, tune-batch) 도 Gemma 활용
+#   - 4곳 중복된 Anthropic 직접 호출 → 단일 헬퍼로 통합
+#   - provider 분기 + KB 사전 주입 자동 적용
+#
+# 본부장님 모토:
+#   - 본질에 충실: 4곳 중복 코드를 1개 헬퍼로 통합
+#   - 한방에: provider 분기 + KB hint + 응답 어댑터 모두 자동
+#   - 부작용 0: 기존 호출 시그니처 그대로 받음 (api_key 인자 무시 가능)
+# ════════════════════════════════════════════════════════════════════
+def _call_ai_unified(
+    prompt: str,
+    *,
+    max_tokens: int = 8000,
+    timeout_anthropic: int = 60,
+    timeout_ollama: int = 180,
+    obj_type: str = "QUERY",   # KB hint 매칭 시 사용 (튜닝은 보통 QUERY)
+    src_sql: str = "",         # KB hint 사전 분석용
+    inject_kb_hint: bool = True,
+    purpose: str = "",         # 로깅용 (예: "convert-tuned", "tune-batch")
+):
+    """Anthropic 또는 Ollama 통합 AI 호출 헬퍼.
+    
+    본부장님 settings 의 ai_provider 따라 자동 분기.
+    응답 형식은 항상 Anthropic 형식으로 통일 → 호출자 코드 변경 최소.
+    
+    Returns:
+        {
+            "ok": bool,
+            "text": str,                    # 응답 텍스트 (코드블록 자동 제거)
+            "tokens_used": int,             # input + output 토큰
+            "provider": str,                # 'anthropic' | 'ollama'
+            "elapsed_ms": int,              # API 호출 소요 시간
+            "error": str | None,            # 에러 메시지 (ok=False 시)
+        }
+    """
+    import urllib.request as _ur, urllib.error as _ue, json as _j
+    import time as _time, logging as _logging
+    import re as _re
+    _lg = _logging.getLogger("databridge.ai_unified")
+    
+    # ── 1. settings 에서 provider 결정 ──
+    try:
+        from app.api.routes.settings import _cfg as _gcfg
+        cfg = _gcfg()
+    except Exception as _e:
+        return {"ok": False, "text": "", "tokens_used": 0,
+                "provider": "?", "elapsed_ms": 0,
+                "error": f"settings 로드 실패: {_e}"}
+    
+    provider = (cfg.get("ai_provider", "anthropic") or "anthropic").strip().lower()
+    
+    # ── 2. KB 사전 처방 주입 (선택적) ──
+    final_prompt = prompt
+    if inject_kb_hint and src_sql:
+        try:
+            from app.engine.error_kb import assemble_preflight_hint
+            kb_hint = assemble_preflight_hint(
+                obj_type=obj_type,
+                src_ddl=src_sql,
+                max_hints=3,  # 튜닝은 짧게 (성능 고려)
+            )
+            if kb_hint:
+                final_prompt = prompt + "\n\n" + kb_hint
+                _lg.info(f"[v95_p89_tune] {purpose} KB hint 주입: {len(kb_hint)} chars")
+        except Exception as _kbe:
+            _lg.warning(f"[v95_p89_tune] KB hint 주입 실패 (무시): {_kbe}")
+    
+    # ── 3. provider 분기 호출 ──
+    t0 = _time.monotonic()
+    
+    if provider == "ollama":
+        # ── Ollama (Gemma 자체 호스팅) ──
+        ollama_url = (cfg.get("ollama_url", "http://localhost:11434") or "http://localhost:11434").rstrip("/")
+        ollama_model = (cfg.get("ollama_model", "gemma4:26b") or "gemma4:26b").strip()
+        try:
+            payload = _j.dumps({
+                "model": ollama_model,
+                "messages": [{"role": "user", "content": final_prompt}],
+                "stream": False,
+                "options": {
+                    "num_predict": max_tokens,
+                    "temperature": 0.1,    # 정확성 우선
+                    "num_ctx": 8192,
+                },
+                "format": "json",          # 튜닝은 JSON 응답이 핵심
+            }).encode()
+            req = _ur.Request(f"{ollama_url}/api/chat", data=payload,
+                              headers={"Content-Type": "application/json"})
+            with _ur.urlopen(req, timeout=timeout_ollama) as resp:
+                data = _j.loads(resp.read())
+            text = (data.get("message") or {}).get("content", "") or ""
+            tk = data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            _lg.info(f"[v95_p89_tune] {purpose} Ollama 응답 — text_len={len(text)} tokens={tk} elapsed={elapsed}ms")
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            _lg.error(f"[v95_p89_tune] {purpose} Ollama 실패: {e}")
+            return {"ok": False, "text": "", "tokens_used": 0,
+                    "provider": "ollama", "elapsed_ms": elapsed,
+                    "error": f"Ollama 호출 실패: {type(e).__name__}: {str(e)[:200]}"}
+    else:
+        # ── Anthropic (기존 동작) ──
+        api_key = cfg.get("anthropic_api_key", "").strip()
+        if not api_key:
+            return {"ok": False, "text": "", "tokens_used": 0,
+                    "provider": "anthropic", "elapsed_ms": 0,
+                    "error": "Anthropic API 키 미설정 — Settings 에서 설정 필요"}
+        try:
+            payload = _j.dumps({
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": final_prompt}]
+            }).encode()
+            req = _ur.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=payload,
+                headers={"Content-Type": "application/json",
+                         "x-api-key": api_key,
+                         "anthropic-version": "2023-06-01"}
+            )
+            with _ur.urlopen(req, timeout=timeout_anthropic) as resp:
+                data = _j.loads(resp.read())
+            text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+            usage = data.get("usage", {})
+            tk = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            _lg.info(f"[v95_p89_tune] {purpose} Anthropic 응답 — text_len={len(text)} tokens={tk} elapsed={elapsed}ms")
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            _lg.error(f"[v95_p89_tune] {purpose} Anthropic 실패: {e}")
+            return {"ok": False, "text": "", "tokens_used": 0,
+                    "provider": "anthropic", "elapsed_ms": elapsed,
+                    "error": f"Anthropic 호출 실패: {type(e).__name__}: {str(e)[:200]}"}
+    
+    # ── 4. 코드블록 자동 제거 (```json ... ``` 패턴) ──
+    text = (text or "").strip()
+    if "```" in text:
+        text = _re.sub(r"^```[a-z]*\n?", "", text, flags=_re.IGNORECASE)
+        text = _re.sub(r"\n?```$", "", text).strip()
+    
+    return {
+        "ok": True,
+        "text": text,
+        "tokens_used": tk,
+        "provider": provider,
+        "elapsed_ms": elapsed,
+        "error": None,
+    }
+
+
 # ── 변환 규칙 테이블 ──────────────────────────────────────
 # (패턴, 치환, 설명)
 # 순서 중요: 구체적인 규칙을 먼저 처리
@@ -2414,18 +2569,9 @@ def convert_tuned(body: dict, _=Depends(require_operator)):
     
     base_sql = _apply_strategy(base_sql)
     
-    # ── 2. Claude API 로 5개 variant 생성 ──────────────────────
-    # v91p6 fix: _get_cfg2 가 다른 함수 스코프에서만 정의되어 있어 NameError 발생
-    #   본부장님 호소: "튜닝 실패: name '_get_cfg2' is not defined"
-    from app.api.routes.settings import _cfg as _get_cfg2_local
-    api_key = _get_cfg2_local().get("anthropic_api_key", "").strip()
-    if not api_key:
-        return {
-            "error": "Anthropic API 키 미설정 — Settings 에서 설정 필요",
-            "base": {"sql": base_sql, "source": "rules"},
-            "variants": [],
-        }
-    
+    # ── 2. AI 로 5개 variant 생성 (Anthropic 또는 Ollama) ─────
+    # v95_p89_tune (2026-05-07 본부장님 비전):
+    #   _call_ai_unified 헬퍼 사용 → provider 자동 분기 + KB 사전 주입
     NL = "\n"
     prompt = (
         f"You are a {tgt_db.upper()} performance tuning expert.{NL}"
@@ -2444,39 +2590,35 @@ def convert_tuned(body: dict, _=Depends(require_operator)):
     
     tokens_used = 0
     variants = []
-    try:
-        payload = _j91.dumps({
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 8000,
-            "messages": [{"role": "user", "content": prompt}]
-        }).encode()
-        req = _u91.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": api_key,
-                     "anthropic-version": "2023-06-01"}
-        )
-        with _u91.urlopen(req, timeout=120) as resp:
-            data = _j91.loads(resp.read())
-        
-        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        text = text.strip()
-        if "```" in text:
-            import re as _re91
-            text = _re91.sub(r"^```[a-z]*\n?", "", text, flags=_re91.IGNORECASE)
-            text = _re91.sub(r"\n?```$", "", text).strip()
-        
-        parsed = _j91.loads(text)
-        variants = parsed.get("variants", [])[:5]
-        
-        usage = data.get("usage", {})
-        tokens_used = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-    except Exception as e:
+    
+    # v95_p89_tune: 통합 헬퍼 호출 (Anthropic ↔ Ollama 자동 분기 + KB hint)
+    ai_result = _call_ai_unified(
+        prompt=prompt,
+        max_tokens=8000,
+        timeout_anthropic=120,
+        timeout_ollama=180,
+        obj_type="QUERY",
+        src_sql=base_sql,
+        inject_kb_hint=True,
+        purpose="convert-tuned",
+    )
+    if not ai_result["ok"]:
         return {
-            "error": f"Variant 생성 실패: {str(e)[:200]}",
+            "error": ai_result.get("error", "AI 호출 실패"),
             "base": {"sql": base_sql, "source": "rules"},
             "variants": [],
+        }
+    
+    try:
+        parsed = _j91.loads(ai_result["text"])
+        variants = parsed.get("variants", [])[:5]
+        tokens_used = ai_result["tokens_used"]
+    except Exception as e:
+        return {
+            "error": f"Variant JSON 파싱 실패 ({ai_result.get('provider')}): {str(e)[:200]}",
+            "base": {"sql": base_sql, "source": "rules"},
+            "variants": [],
+            "ai_response": ai_result.get("text", "")[:500],  # 디버깅용
         }
     
     # ── 3. EXPLAIN + 실측 (target_conn 있을 때) ────────────────
@@ -2649,3 +2791,492 @@ def convert_tuned(body: dict, _=Depends(require_operator)):
         "tokens_used": tokens_used,
         "total_ms": round((_t91.time() - t_start) * 1000, 1),
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# v92 (2026-04-30): 일괄 변환 후 plan 분석 + 튜닝 권장 (AI 미사용)
+# ════════════════════════════════════════════════════════════════════
+# 본부장님 비전: "파일/폴더 변환 후 쿼리 수행해보고 속도가 잘 안 나오거나
+#                 plan을 ai 없이 분석후 AI로 튜닝이 필요한 건을 아래 창에 보여줘"
+# ════════════════════════════════════════════════════════════════════
+
+@router.post("/analyze-batch")
+def analyze_batch(body: dict, _=Depends(require_operator)):
+    """
+    일괄 변환된 SQL 파일들에 대해 EXPLAIN + 실측을 수행하고
+    AI 튜닝이 필요한 후보를 룰 기반으로 분류한다.
+
+    body: {
+      items: [ {filename, sql} ],         # 변환된 SQL 목록 (SELECT 문 위주)
+      target_conn: { host, port, ... },   # MySQL 타겟 (필수: EXPLAIN 용)
+      threshold_ms: 500,                  # 실측 임계 (기본 500ms)
+      measure: 'explain'|'execute'|'both' # 기본 'explain' (빠름, 비파괴)
+    }
+
+    반환: {
+      items: [
+        {
+          filename, sql,
+          rank: 'red'|'yellow'|'green',   # 🔴 즉시 튜닝 / 🟡 검토 / ⚪ 양호
+          reasons: [ '..', '..' ],        # 사유 태그
+          metrics: {
+            avg_ms, rows_examined, rows_returned, ratio,
+            full_scan, filesort, temporary, join_count, subquery_count,
+            cost
+          },
+          score: int                      # 0~100, 높을수록 튜닝 필요
+        }
+      ],
+      summary: { total, red, yellow, green, threshold_ms }
+    }
+    """
+    import time as _ta, json as _ja, hashlib as _ha, re as _ra
+
+    items_in = body.get("items") or []
+    target_conn = body.get("target_conn") or {}
+    threshold_ms = float(body.get("threshold_ms") or 500)
+    measure = (body.get("measure") or "explain").lower()
+
+    if not items_in:
+        return {"items": [], "summary": {"total": 0, "red": 0, "yellow": 0, "green": 0, "threshold_ms": threshold_ms}}
+
+    # SELECT 문만 분석 대상 (DDL / INSERT / UPDATE 는 EXPLAIN 의미 적음)
+    def _is_select(sql: str) -> bool:
+        s = (sql or "").strip()
+        if not s:
+            return False
+        # 주석 / WITH 까지 고려한 첫 키워드
+        s = _ra.sub(r"^\s*(--[^\n]*\n|/\*[^*]*\*/)+", "", s, flags=_ra.S).strip()
+        head = s[:60].upper()
+        return head.startswith("SELECT") or head.startswith("WITH")
+
+    # 실측용 conn 준비 (재사용)
+    _conn = None
+    _cur = None
+    if target_conn.get("host"):
+        try:
+            import pymysql
+            from app.core.password_resolver import resolve_password as _rpw
+            raw_pw = target_conn.get("password") or ""
+            try:
+                pw = _rpw(raw_pw,
+                         host=target_conn.get("host"),
+                         username=target_conn.get("username"),
+                         database=target_conn.get("database"),
+                         side="target")
+            except Exception:
+                pw = raw_pw
+            try:
+                pw.encode("latin-1")
+                pw_for_connect = pw
+            except UnicodeEncodeError:
+                pw_for_connect = pw.encode("utf-8")
+            _conn = pymysql.connect(
+                host=target_conn.get("host"),
+                port=int(target_conn.get("port") or 3306),
+                user=target_conn.get("username"),
+                password=pw_for_connect,
+                database=target_conn.get("database"),
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=10,
+            )
+            _cur = _conn.cursor()
+        except Exception as e:
+            logger.warning("analyze-batch DB 연결 실패: %s", e)
+            _conn = None
+            _cur = None
+
+    def _analyze_one(sql: str) -> dict:
+        m = {
+            "avg_ms": None, "rows_examined": None, "rows_returned": None,
+            "ratio": None, "full_scan": False, "filesort": False, "temporary": False,
+            "join_count": 0, "subquery_count": 0, "cost": None, "explain_error": None,
+            "execute_error": None,
+        }
+        # 정적 분석 (DB 없어도 가능)
+        upper = sql.upper()
+        m["join_count"] = len(_ra.findall(r"\bJOIN\b", upper))
+        # SELECT 가 여러 개 = 서브쿼리 의심
+        m["subquery_count"] = max(0, len(_ra.findall(r"\bSELECT\b", upper)) - 1)
+
+        if _cur and _is_select(sql):
+            # EXPLAIN FORMAT=JSON
+            try:
+                _cur.execute(f"EXPLAIN FORMAT=JSON {sql}")
+                row = _cur.fetchone()
+                if row:
+                    ej = list(row.values())[0]
+                    if isinstance(ej, str):
+                        ej = _ja.loads(ej)
+                    qb = ej.get("query_block", {})
+                    cost = qb.get("cost_info", {}).get("query_cost")
+                    if cost:
+                        try:
+                            m["cost"] = float(cost)
+                        except Exception:
+                            pass
+                    raw = _ja.dumps(ej)
+                    if "ALL" in raw and '"access_type": "ALL"' in raw:
+                        m["full_scan"] = True
+                    if '"using_filesort": true' in raw or '"using_filesort":true' in raw:
+                        m["filesort"] = True
+                    if '"using_temporary_table": true' in raw or '"using_temporary_table":true' in raw:
+                        m["temporary"] = True
+            except Exception as e:
+                m["explain_error"] = str(e)[:200]
+
+            # 실측 (1회만, 빠르게)
+            if measure in ("execute", "both"):
+                try:
+                    t0 = _ta.time()
+                    _cur.execute(sql)
+                    rows = _cur.fetchall()
+                    elapsed = (_ta.time() - t0) * 1000
+                    m["avg_ms"] = round(elapsed, 1)
+                    m["rows_returned"] = len(rows)
+                except Exception as e:
+                    m["execute_error"] = str(e)[:200]
+
+            # rows_examined (EXPLAIN 에서 합산 추정)
+            try:
+                _cur.execute(f"EXPLAIN {sql}")
+                rows = _cur.fetchall()
+                examined = sum(int(r.get("rows") or 0) for r in rows if isinstance(r, dict))
+                if examined > 0:
+                    m["rows_examined"] = examined
+                    if m["rows_returned"] is not None and m["rows_returned"] > 0:
+                        m["ratio"] = round(examined / m["rows_returned"], 1)
+            except Exception:
+                pass
+
+        return m
+
+    def _rank(sql: str, metrics: dict) -> tuple:
+        """등급 + 사유 + 점수 산정 (룰 기반, AI 미사용)"""
+        reasons = []
+        score = 0
+
+        avg = metrics.get("avg_ms")
+        ratio = metrics.get("ratio")
+        join_n = metrics.get("join_count") or 0
+        sub_n = metrics.get("subquery_count") or 0
+        cost = metrics.get("cost")
+
+        if avg is not None and avg >= threshold_ms * 2:
+            reasons.append(f"실행시간 {avg}ms (임계 {int(threshold_ms*2)}ms↑)")
+            score += 40
+        elif avg is not None and avg >= threshold_ms:
+            reasons.append(f"실행시간 {avg}ms (임계 {int(threshold_ms)}ms↑)")
+            score += 20
+
+        if metrics.get("full_scan"):
+            reasons.append("Full Scan (access=ALL)")
+            score += 30
+        if metrics.get("filesort"):
+            reasons.append("Using filesort")
+            score += 15
+        if metrics.get("temporary"):
+            reasons.append("Using temporary")
+            score += 15
+
+        if ratio is not None and ratio >= 100:
+            reasons.append(f"검사/반환 비율 {ratio}배")
+            score += 20
+        elif ratio is not None and ratio >= 30:
+            reasons.append(f"검사/반환 비율 {ratio}배")
+            score += 10
+
+        if join_n >= 5:
+            reasons.append(f"JOIN {join_n}차")
+            score += 10
+        elif join_n >= 4:
+            reasons.append(f"JOIN {join_n}차")
+            score += 5
+
+        if sub_n >= 3:
+            reasons.append(f"서브쿼리 {sub_n}개")
+            score += 8
+
+        if cost is not None and cost > 10000:
+            reasons.append(f"EXPLAIN cost {int(cost)}")
+            score += 10
+
+        if metrics.get("explain_error"):
+            reasons.append(f"EXPLAIN 오류: {metrics['explain_error'][:60]}")
+        if metrics.get("execute_error"):
+            reasons.append(f"실행 오류: {metrics['execute_error'][:60]}")
+
+        if score >= 50:
+            rank = "red"
+        elif score >= 20:
+            rank = "yellow"
+        else:
+            rank = "green"
+            if not reasons:
+                reasons.append("이상 없음")
+
+        return rank, reasons, min(100, score)
+
+    out_items = []
+    counts = {"red": 0, "yellow": 0, "green": 0}
+    try:
+        for it in items_in:
+            sql = (it.get("sql") or "").strip()
+            fn = it.get("filename") or "(unnamed)"
+            if not sql:
+                continue
+            metrics = _analyze_one(sql)
+            rank, reasons, score = _rank(sql, metrics)
+            counts[rank] += 1
+            out_items.append({
+                "filename": fn,
+                "sql": sql,
+                "rank": rank,
+                "reasons": reasons,
+                "metrics": metrics,
+                "score": score,
+            })
+    finally:
+        try:
+            if _cur: _cur.close()
+            if _conn: _conn.close()
+        except Exception:
+            pass
+
+    # 정렬: red → yellow → green, 점수 높은 순
+    rank_order = {"red": 0, "yellow": 1, "green": 2}
+    out_items.sort(key=lambda x: (rank_order[x["rank"]], -x["score"]))
+
+    return {
+        "items": out_items,
+        "summary": {
+            "total": len(out_items),
+            "red": counts["red"],
+            "yellow": counts["yellow"],
+            "green": counts["green"],
+            "threshold_ms": threshold_ms,
+            "measure": measure,
+            "db_connected": bool(_conn is not None or _cur is not None) or False,
+        },
+    }
+
+
+@router.post("/tune-batch")
+def tune_batch(body: dict, _=Depends(require_operator)):
+    """
+    선택된 SQL 들을 한 번에 AI 튜닝 — convert-tuned 를 N회 호출하는 대신
+    각 항목당 3개 variant 만 만들어 응답 시간/토큰 절약.
+
+    body: {
+      items: [ {filename, sql} ],
+      tgt_db: 'mysql',
+      target_conn: {...} | null,
+      measure: 'explain'|'execute'|'both'  # 기본 explain
+    }
+
+    반환: {
+      items: [
+        {
+          filename,
+          original_sql,
+          variants: [   # 최대 3개, 추천 순 정렬
+            { id, label, strategy, sql, explain, execute, data_match, speed_delta,
+              recommended, reason }
+          ],
+          tokens_used, error
+        }
+      ],
+      total_tokens
+    }
+    """
+    import time as _tb, json as _jb, urllib.request as _ub, hashlib as _hb, re as _rb
+
+    items_in = body.get("items") or []
+    tgt_db = (body.get("tgt_db") or "mysql").lower()
+    target_conn = body.get("target_conn") or {}
+    measure = (body.get("measure") or "explain").lower()
+
+    if not items_in:
+        return {"items": [], "total_tokens": 0}
+
+    from app.api.routes.settings import _cfg as _get_cfg_b
+    api_key = _get_cfg_b().get("anthropic_api_key", "").strip()
+    if not api_key:
+        return {"error": "Anthropic API 키 미설정", "items": [], "total_tokens": 0}
+
+    # 실측용 conn (재사용)
+    _conn = None
+    _cur = None
+    if target_conn.get("host"):
+        try:
+            import pymysql
+            from app.core.password_resolver import resolve_password as _rpw_b
+            raw_pw = target_conn.get("password") or ""
+            try:
+                pw = _rpw_b(raw_pw,
+                            host=target_conn.get("host"),
+                            username=target_conn.get("username"),
+                            database=target_conn.get("database"),
+                            side="target")
+            except Exception:
+                pw = raw_pw
+            try:
+                pw.encode("latin-1")
+                pwc = pw
+            except UnicodeEncodeError:
+                pwc = pw.encode("utf-8")
+            _conn = pymysql.connect(
+                host=target_conn.get("host"),
+                port=int(target_conn.get("port") or 3306),
+                user=target_conn.get("username"),
+                password=pwc,
+                database=target_conn.get("database"),
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=10,
+            )
+            _cur = _conn.cursor()
+        except Exception as e:
+            logger.warning("tune-batch DB 연결 실패: %s", e)
+
+    def _measure(sql: str) -> dict:
+        out = {"explain": None, "execute": None, "error": None}
+        if not _cur:
+            return out
+        try:
+            if measure in ("explain", "both"):
+                _cur.execute(f"EXPLAIN FORMAT=JSON {sql}")
+                row = _cur.fetchone()
+                if row:
+                    ej = list(row.values())[0]
+                    if isinstance(ej, str):
+                        ej = _jb.loads(ej)
+                    qb = ej.get("query_block", {})
+                    cost = qb.get("cost_info", {}).get("query_cost")
+                    out["explain"] = {"cost": float(cost) if cost else None}
+            if measure in ("execute", "both"):
+                runs = []
+                rows_n = 0
+                hash_v = None
+                for i in range(2):
+                    t0 = _tb.time()
+                    _cur.execute(sql)
+                    rows = _cur.fetchall()
+                    runs.append(round((_tb.time() - t0) * 1000, 2))
+                    if i == 0:
+                        rows_n = len(rows)
+                        try:
+                            sample = {"n": rows_n, "first": rows[:5], "last": rows[-5:] if rows_n > 5 else []}
+                            hash_v = _hb.md5(_jb.dumps(sample, default=str, sort_keys=True).encode()).hexdigest()[:16]
+                        except Exception:
+                            hash_v = None
+                out["execute"] = {
+                    "runs": runs,
+                    "avg_ms": round(sum(runs) / len(runs), 2),
+                    "rows_returned": rows_n,
+                    "hash": hash_v,
+                }
+        except Exception as e:
+            out["error"] = str(e)[:200]
+        return out
+
+    def _gen_variants(orig_sql: str) -> tuple:
+        """3개 variant 생성 — v95_p89_tune: _call_ai_unified 사용 (Anthropic ↔ Ollama)"""
+        prompt = (
+            f"You are a {tgt_db.upper()} performance tuning expert.\n"
+            f"Generate exactly 3 optimization variants for this {tgt_db.upper()} SQL.\n"
+            f"Each variant MUST return identical data.\n\n"
+            f"Original SQL:\n{orig_sql[:3500]}\n\n"
+            f"Output STRICT JSON only:\n"
+            f'{{"variants":[{{"id":1,"label":"≤5자","strategy":"한 문장","sql":"변형 SQL"}}, ...3개]}}'
+        )
+        ai_result = _call_ai_unified(
+            prompt=prompt,
+            max_tokens=5000,
+            timeout_anthropic=90,
+            timeout_ollama=180,
+            obj_type="QUERY",
+            src_sql=orig_sql,
+            inject_kb_hint=True,
+            purpose="tune-batch",
+        )
+        if not ai_result["ok"]:
+            return [], 0, ai_result.get("error", "AI 호출 실패")[:200]
+        try:
+            parsed = _jb.loads(ai_result["text"])
+            variants = parsed.get("variants", [])[:3]
+            return variants, ai_result["tokens_used"], None
+        except Exception as e:
+            return [], ai_result["tokens_used"], f"JSON 파싱 실패 ({ai_result.get('provider')}): {str(e)[:150]}"
+
+    out_items = []
+    total_tk = 0
+    try:
+        for it in items_in:
+            sql = (it.get("sql") or "").strip()
+            fn = it.get("filename") or "(unnamed)"
+            if not sql:
+                continue
+
+            base_m = _measure(sql)
+            base_avg = (base_m.get("execute") or {}).get("avg_ms")
+            base_hash = (base_m.get("execute") or {}).get("hash")
+
+            variants, tk, err = _gen_variants(sql)
+            total_tk += tk
+
+            for v in variants:
+                vsql = v.get("sql", "")
+                if not vsql:
+                    continue
+                vm = _measure(vsql)
+                v["explain"] = vm.get("explain")
+                v["execute"] = vm.get("execute")
+                v["error"] = vm.get("error")
+                v_avg = (vm.get("execute") or {}).get("avg_ms")
+                v_hash = (vm.get("execute") or {}).get("hash")
+                if base_hash and v_hash:
+                    v["data_match"] = (base_hash == v_hash)
+                else:
+                    v["data_match"] = None
+                if v_avg and base_avg:
+                    v["speed_delta"] = round(((v_avg - base_avg) / base_avg) * 100, 1)
+                else:
+                    v["speed_delta"] = None
+                speed_ok = v.get("speed_delta") is not None and v["speed_delta"] < -5.0
+                data_ok = v.get("data_match") is True
+                v["recommended"] = bool(speed_ok and data_ok)
+                if v["recommended"]:
+                    v["reason"] = f"✓ 데이터 일치 + {abs(v['speed_delta'])}% 빠름"
+                elif data_ok:
+                    v["reason"] = "데이터 일치 (속도 차 미미)"
+                elif v["data_match"] is False:
+                    v["reason"] = "데이터 불일치"
+                else:
+                    v["reason"] = "측정 불가"
+
+            # variants 추천 순 정렬
+            def _sort_key(v):
+                r = 1 if v.get("recommended") else 0
+                d = 2 if v.get("data_match") is True else (1 if v.get("data_match") is None else 0)
+                s = v.get("speed_delta") if v.get("speed_delta") is not None else 9999
+                return (-r, -d, s)
+            variants.sort(key=_sort_key)
+
+            out_items.append({
+                "filename": fn,
+                "original_sql": sql,
+                "base_metrics": base_m,
+                "variants": variants,
+                "tokens_used": tk,
+                "error": err,
+            })
+    finally:
+        try:
+            if _cur: _cur.close()
+            if _conn: _conn.close()
+        except Exception:
+            pass
+
+    return {"items": out_items, "total_tokens": total_tk}

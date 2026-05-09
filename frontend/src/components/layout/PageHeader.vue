@@ -168,10 +168,28 @@ const tgtLogoUrl = computed(() => props.tgtDb?.dbType ? _logoUrl(props.tgtDb.dbT
 .ph-db-label { font-size: .55rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
 .ph-db-label.src { color: #2563eb; }
 .ph-db-label.tgt { color: #059669; }
-.ph-db-nm  { font-size: .76rem; font-weight: 700; color: var(--text-primary); line-height: 1.3; }
-.ph-db-tp  { font-size: .62rem; color: var(--text-tertiary); line-height: 1.2; }
+/* v92p8 (2026-04-30): 본부장님 호소 — DB명은 원래 색, IP+DB 종류만 빨강
+   배경: 잘못된 IP/DB 엔진에 접속한 채 작업하는 사고 방지. */
+.ph-db-nm  {
+  font-size: .76rem; font-weight: 700;
+  color: var(--text-primary);     /* 원래 색 복원 */
+  line-height: 1.3;
+}
 .ph-db-detail { display:flex; align-items:center; gap:4px; flex-wrap:nowrap; }
-.ph-db-host { font-size:.62rem; color:var(--text-tertiary); font-family:'Consolas','SF Mono',monospace; }
+.ph-db-host {
+  font-size: .68rem;
+  color: #dc2626;                  /* red-600 — IP+포트 강조 */
+  font-family: 'Consolas','SF Mono',monospace;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ph-db-tp  {
+  font-size: .65rem;
+  color: #b91c1c;                  /* red-700 — DB 종류 강조 */
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+}
 .ph-conn-ok { font-size:.65rem; color:#16a34a; font-weight:700; }
 .ph-conn-no { font-size:.65rem; color:#dc2626; font-weight:700; }
 .ph-ctrl-lbl { font-size:.7rem; font-weight:600; color:var(--text-tertiary); white-space:nowrap; }

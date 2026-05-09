@@ -206,6 +206,28 @@
                 </span>
               </transition>
             </router-link>
+
+            <!-- ════════════════════════════════════════════════════ -->
+            <!-- v95_p89_admin: handler 항목 (새창 열기 등 액션 버튼) -->
+            <!-- 본부장님 본질: 관리자 콘솔 새창 진입점                -->
+            <!-- ════════════════════════════════════════════════════ -->
+            <button v-else-if="item.handler" type="button"
+              class="ni ni-main"
+              :class="{ 'ni-icon': app.sidebarCollapsed }"
+              :title="app.sidebarCollapsed ? item.label : (item.title || '')"
+              style="background:transparent;border:none;width:100%;text-align:left;cursor:pointer"
+              @click="!editMode && item.handler($event)">
+              <span class="ni-ico-wrap">
+                <svg v-if="item.icon" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                     stroke-width="1.3" v-html="item.icon"
+                     style="width:13px;height:13px;flex-shrink:0;display:block"/>
+              </span>
+              <transition name="fade">
+                <span v-if="!app.sidebarCollapsed" class="ni-label ni-label-main">
+                  {{ item.label }}
+                </span>
+              </transition>
+            </button>
           </template>
         </template>
 
@@ -249,6 +271,7 @@ const scheduleCount = computed(() => jobs.pendingSchedules || null)
 // ── 작업 중인 라우트 집합 ─────────────────────────────────────
 // 이관 실행 중이면 모니터 2개 + Job 목록 활성
 // 스케줄 대기 중이면 스케줄 관리 활성
+// v95_p7 (2026-05-02) 본부장님 명령 — 검증 실행 중에도 좌측 수레바퀴
 const busyRoutes = computed(() => {
   const set = new Set()
   if (jobs.runningJobs?.length > 0) {
@@ -262,6 +285,11 @@ const busyRoutes = computed(() => {
   }
   if (jobs.pendingSchedules > 0) {
     set.add('/schedules')
+  }
+  // v95_p7: 검증 작업 (테이블·오브젝트)
+  if (app.validateRunning === 'table' || app.validateRunning === 'object') {
+    set.add('/validate')
+    set.add('/validate/tables')
   }
   return set
 })
@@ -417,6 +445,25 @@ onMounted(() => {
 })
 onUnmounted(() => clearInterval(_schedTimer))
 
+// ════════════════════════════════════════════════════════════════
+// v95_p89_admin (2026-05-07 본부장님 본질 처방): 관리자 콘솔 새창
+// ════════════════════════════════════════════════════════════════
+// 클릭 시 window.open 으로 별도 새창에서 AdminConsole.vue 표시.
+// router 의 /admin/console 은 standalone:true → App.vue 가 사이드바/탑바 없이 전체화면.
+// 새창 사이즈는 일반 브라우저 창 (1280x800) 권장 — 사용자가 자유롭게 리사이즈.
+function openAdminConsole(e) {
+  if (e) e.preventDefault()
+  const url = '/admin/console'
+  const features = 'width=1280,height=800,scrollbars=yes,resizable=yes,location=no,menubar=no,toolbar=no'
+  const win = window.open(url, 'databridge_admin_console', features)
+  // 팝업 차단된 경우 — 같은 창에서 열기
+  if (!win || win.closed) {
+    window.location.href = url
+  } else {
+    win.focus()
+  }
+}
+
 const BASE_MENU = computed(() => [
 
   // ① 연결·스키마 — 이관 전 준비
@@ -457,14 +504,20 @@ const BASE_MENU = computed(() => [
     { to: '/sql-verify',       label: '쿼리 검증',             sub: true },
   ]},
 
+  // ════════════════════════════════════════════════════════════════
   // ⑤ 관리자 — admin 역할만 표시 (hasRole('admin') 이면 true)
+  // v95_p89_admin (2026-05-07 본부장님 본질 처방):
+  //   기존엔 사이드바에 7개 admin 메뉴 나열 → 사이드바 복잡도 ↑
+  //   본부장님 짚으심: "관리자 화면이 별도로 필요" → 새창 단일 진입점으로
+  //   클릭 시 window.open 으로 새창에서 AdminConsole.vue 표시
+  // ════════════════════════════════════════════════════════════════
   ...(authStore.hasRole && authStore.hasRole('admin') ? [
     { label: '관리자', items: [
-      { to: '/admin/users',   label: '사용자 관리',  icon: ICONS.connector },
-      { to: '/admin/audit',   label: '감사 로그',    sub: true },
-      { to: '/admin/license', label: '라이선스 관리', sub: true },
-      // v59: 변환 KB 대시보드 — 페이지는 이미 있었으나 메뉴/라우터 누락이었음
-      { to: '/admin/kb/conversion', label: '변환 KB 대시보드', sub: true },
+      // v95_p89_admin: 단일 새창 진입점 (handler 로 window.open 처리)
+      { handler: openAdminConsole,
+        label: '🔧 관리자 콘솔 (새창)',
+        icon: ICONS.connector,
+        title: '사용자/감사/라이선스/KB/AI통계/시스템설정 통합 관리 (새창)' },
     ]},
   ] : []),
 

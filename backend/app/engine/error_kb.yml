@@ -297,6 +297,1368 @@ patterns:
         MSSQL: BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH
         MySQL: DECLARE EXIT HANDLER FOR SQLEXCEPTION ... (블록 시작에 선언)
 
+  # ════════════════════════════════════════════════════════════════
+  # v94_p5 (2026-05-01) 본부장님 호소 처방 — 정식 패턴 등록
+  # 두 패턴 반복 발생 → KB 자산 정식화 → preflight 사전 적용
+  # ════════════════════════════════════════════════════════════════
+
+  # ─── 1064 LEAVE 세미콜론 누락 (FUNCTION 내 LOOP) ───
+  1064_LEAVE_MISSING_SEMI:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [FUNCTION, PROCEDURE]
+    regex: "1064.*near.*'?(LEAVE|ITERATE).*END\\s+(IF|LOOP)"
+    cause: |
+      MySQL 의 LEAVE/ITERATE 문은 ; 로 종료해야 하는데
+      AI 변환 시 종종 ; 빠뜨림 → END IF / END LOOP 직전이라 파서가 혼란
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — LEAVE/ITERATE 세미콜론]
+      MySQL stored function/procedure 의 LEAVE/ITERATE 문은 *반드시* 세미콜론(;) 으로 종료.
+      특히 IF/ELSE 분기 안에서 LEAVE 하는 경우 자주 빠뜨림.
+
+      [잘못된 예시 — 절대 출력 금지]
+        ELSE
+            LEAVE loop_label    ← ; 누락
+        END IF;
+
+      [올바른 예시]
+        ELSE
+            LEAVE loop_label;   ← ; 필수
+        END IF;
+
+      [점검 체크리스트]
+      - LEAVE/ITERATE/RETURN 문 끝에 모두 ; 있는가?
+      - 각 SET 문 끝에 ; 있는가?
+      - END IF / END LOOP / END 직전 라인은 ; 로 끝나는가?
+      ===END===
+
+  # ─── 1064 DELIMITER 명령 (pymysql 환경) ───
+  1064_DELIMITER_NOT_SUPPORTED:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [FUNCTION, PROCEDURE, TRIGGER]
+    regex: "1064.*near.*'?(//|\\$\\$|DELIMITER)"
+    cause: |
+      DELIMITER 는 mysql CLI 클라이언트의 명령이고
+      pymysql 같은 드라이버는 단일 statement 를 직접 실행하므로 DELIMITER 인식 못 함
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — DELIMITER 절대 금지]
+      DataBridge 는 pymysql/MySQL Connector 환경에서 직접 statement 를 실행합니다.
+      DELIMITER //, DELIMITER ;, DELIMITER $$ 등의 명령은 *절대 출력 금지*.
+      종료 마커 //, $$ 도 출력 금지.
+
+      [잘못된 예시 — 절대 출력 금지]
+        DELIMITER //
+        CREATE PROCEDURE foo()
+        BEGIN ... END//
+        DELIMITER ;
+
+      [올바른 예시 — DELIMITER 없이 단일 statement]
+        CREATE PROCEDURE foo()
+        BEGIN ... END;
+
+      [출력 형식]
+      - 각 statement 는 표준 ; 로 종료
+      - DELIMITER 명령 전혀 사용하지 않음
+      - JSON 응답의 statements 배열에 각 statement 를 별도 항목으로
+      ===END===
+
+  # ════════════════════════════════════════════════════════════════
+  # v94_p7 (2026-05-01) 본부장님 호소 처방 — 정식 패턴 등록
+  # 오브젝트 검증 9개 ✗ 분석 결과 추가 패턴 발견
+  # ════════════════════════════════════════════════════════════════
+
+  # ─── 1318 TVF 변환 시 파라미터 손실 ───
+  1318_TVF_PARAM_LOST:
+    error_code: "1318"
+    category: SIGNATURE
+    applies_to: [FUNCTION]
+    regex: "1318.*expected 0.*got"
+    cause: |
+      MSSQL TVF (table-valued function) 를 MySQL 로 변환할 때
+      AI 가 파라미터 시그니처를 잃고 0 인자 함수로 만든 케이스.
+      tvf_daily_trx(@d date) → CALL tvf_daily_trx() 처럼 변환되면 발생.
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — TVF 파라미터 보존]
+      MSSQL TVF 를 MySQL PROCEDURE 로 변환할 때 *원본 파라미터 시그니처를 그대로 유지*.
+
+      [원본 MSSQL TVF 예]
+        CREATE FUNCTION tvf_daily_trx(@d date)
+        RETURNS TABLE AS RETURN
+        (SELECT * FROM trx WHERE trx_date = @d)
+
+      [올바른 MySQL 변환]
+        CREATE PROCEDURE tvf_daily_trx(IN p_d DATE)   ← @d → p_d 로 IN 파라미터
+        BEGIN
+          SELECT * FROM trx WHERE trx_date = p_d;
+        END
+
+      [잘못된 예 — 절대 금지]
+        CREATE PROCEDURE tvf_daily_trx()              ← 파라미터 잃음!
+        ...
+
+      [점검]
+      - 원본 파라미터 개수와 변환 후 파라미터 개수 일치하는가?
+      - 각 @ 변수가 p_ 접두사 IN 파라미터로 매핑됐는가?
+      ===END===
+
+  # ─── 1305 타겟에 함수/프로시저 없음 (이름 매핑 실패) ───
+  1305_OBJECT_NAME_MISMATCH:
+    error_code: "1305"
+    category: NAMING
+    applies_to: [FUNCTION, PROCEDURE]
+    regex: "1305.*does not exist"
+    cause: |
+      MSSQL 의 schema.object 패턴이 MySQL 변환 시 일관되지 않게 적용됨.
+      schema_object (underscore) 또는 그냥 object (drop) 정책 차이.
+      DataBridge 의 schema_strategy 설정과 AI 변환 결과가 일치해야 함.
+    fix_type: prompt_injection
+    fix_prompt: |
+      ===INSTRUCTION===
+      [반드시 지킬 규칙 — 객체 이름 정책 일관성]
+      DataBridge 의 schema_strategy 설정이 'underscore' 면
+      모든 객체 이름은 schema_object 형식으로 변환:
+
+      [올바른 변환]
+        MSSQL: collection.tvf_delinq_ranking
+        MySQL: collection_tvf_delinq_ranking  (underscore 정책)
+
+      [점검]
+      - 원본의 점(.) 표기를 underscore(_) 로 일관되게 치환
+      - 다른 객체 (테이블, 함수) 와 동일한 정책 적용
+      ===END===
+
+  # ════════════════════════════════════════════════════════════════
+  # v95_p89_kb (2026-05-07 본부장님 비전): 51건 1064/1049 시드 패턴
+  # ════════════════════════════════════════════════════════════════
+  # 출처: AdventureWorks 2022 macOS 변환 결과 (51건 실패)
+  # 분류: 11개 카테고리 / 20개 패턴
+  # 본부장님 비전: 자체 호스팅 Gemma 가 깨어나는 순간 이 패턴들이
+  # 미리 사전 처방으로 주입되어 같은 에러 두 번 다시 발생하지 않게.
+  # ════════════════════════════════════════════════════════════════
+
+  # ─── 카테고리 1: 타입 백틱 (MOST COMMON — 27건) ─────────────
+  TYPE_BACKTICK_BASIC_001:
+    error_code: 1064
+    category: TYPE
+    applies_to: [PROCEDURE, FUNCTION, TRIGGER]
+    regex: "near\\s*'`(int|bigint|smallint|tinyint|datetime|timestamp|date|bit|decimal|float|double|text|money)`"
+    cause: "AI 가 MySQL 타입에 백틱 잘못 붙임"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [핵심 룰] MySQL 타입에는 백틱(`) 절대 붙이지 마세요.
+
+      ❌ 잘못된 예 (1064):
+        CREATE PROCEDURE foo (IN p_id `int`, IN p_dt `datetime`) BEGIN ... END
+
+      ✅ 올바른 예:
+        CREATE PROCEDURE foo (IN p_id INT, IN p_dt DATETIME) BEGIN ... END
+
+      백틱은 식별자(테이블명/컬럼명/객체명)에만 사용:
+        ✅ `customer_table`.`customer_id`
+        ❌ `INT`, `DATETIME`, `VARCHAR(100)`
+    seed_source: "AdventureWorks 2026-05-07 — uspGetEmployeeManagers, ufnGetAccountingEndDate 등 16건"
+
+  TYPE_BACKTICK_LENGTH_002:
+    error_code: 1064
+    category: TYPE
+    applies_to: [PROCEDURE, FUNCTION, TRIGGER]
+    regex: "near\\s*'`(varchar|nvarchar|char|nchar|decimal|numeric)\\([0-9,\\s]+\\)`"
+    cause: "AI 가 길이 지정 타입에 백틱 잘못 + 이중 길이"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [핵심 룰] 길이 지정 타입에도 백틱 금지.
+
+      ❌ 잘못된 예 (1064):
+        (p_name `VARCHAR(255)`(50))   ← 백틱 + 이중 길이
+
+      ✅ 올바른 예:
+        (p_name VARCHAR(50))
+    seed_source: "AdventureWorks — uspSearchCandidateResumes, ufnGetDocumentStatusText"
+
+  FUNC_RETURNS_BACKTICK_003:
+    error_code: 1064
+    category: FUNCTION
+    applies_to: [FUNCTION]
+    regex: "RETURNS\\s+`(int|bigint|datetime|money|varchar|decimal|tinyint)"
+    cause: "FUNCTION RETURNS 다음 타입에 백틱"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [FUNCTION 전용] RETURNS 다음 타입에 백틱 금지.
+
+      ❌ 잘못된 예 (1064):
+        CREATE FUNCTION fn_calc(...) RETURNS `money` AS BEGIN ... END
+
+      ✅ 올바른 예:
+        CREATE FUNCTION fn_calc(...) RETURNS DECIMAL(19,4) DETERMINISTIC BEGIN ... END
+    seed_source: "AdventureWorks — ufnGetProductDealerPrice/ListPrice/StandardCost 11건"
+
+  # ─── 카테고리 2: MSSQL 전용 타입 매핑 ────────────────────────
+  MSSQL_MONEY_TYPE_004:
+    error_code: 1064
+    category: TYPE
+    applies_to: [FUNCTION, PROCEDURE, TRIGGER]
+    regex: "(?i)\\b(money|smallmoney)\\b"
+    cause: "MSSQL MONEY/SMALLMONEY 는 MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [핵심 룰] MSSQL MONEY/SMALLMONEY → MySQL DECIMAL 변환 필수.
+
+      변환 규칙:
+        MSSQL MONEY       → MySQL DECIMAL(19,4)
+        MSSQL SMALLMONEY  → MySQL DECIMAL(10,4)
+
+      ❌ 잘못된 예 (1064):
+        RETURNS `money`
+        DECLARE v_amount MONEY
+
+      ✅ 올바른 예:
+        RETURNS DECIMAL(19,4)
+        DECLARE v_amount DECIMAL(19,4)
+    seed_source: "AdventureWorks — ufnGetProductDealerPrice 등 3건"
+
+  # ─── 카테고리 3: FUNCTION AS BEGIN ───────────────────────────
+  FUNC_AS_BEGIN_005:
+    error_code: 1064
+    category: FUNCTION
+    applies_to: [FUNCTION]
+    regex: "RETURNS\\s+\\w+(\\([^)]*\\))?\\s*\\n?\\s*AS\\s*\\n?\\s*BEGIN"
+    cause: "MSSQL 의 AS BEGIN 패턴 — MySQL 은 DETERMINISTIC BEGIN"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [FUNCTION 전용] AS BEGIN 패턴 금지 (MSSQL 잔재).
+
+      ❌ 잘못된 예 (1064 또는 1418):
+        CREATE FUNCTION fn(...) RETURNS INT
+        AS                       ← AS 는 MSSQL 잔재
+        BEGIN ... END
+
+      ✅ 올바른 예:
+        CREATE FUNCTION fn(...) RETURNS INT
+        DETERMINISTIC            ← MySQL 필수 (또는 NOT DETERMINISTIC)
+        BEGIN ... END
+
+      DETERMINISTIC 결정 기준:
+        - 같은 입력 → 같은 결과 → DETERMINISTIC
+        - 랜덤/시간/외부 조회 → NOT DETERMINISTIC
+        - 단순 계산/조회 함수는 대부분 DETERMINISTIC
+    seed_source: "AdventureWorks — ufnGetDocumentStatusText 등 11건"
+
+  # ─── 카테고리 4: PROCEDURE OUTPUT 키워드 ──────────────────────
+  PROC_OUTPUT_KEYWORD_006:
+    error_code: 1064
+    category: PROCEDURE
+    applies_to: [PROCEDURE]
+    regex: "p_\\w+\\s+\\w+(?:\\s*=\\s*\\S+)?\\s+OUTPUT"
+    cause: "MSSQL OUTPUT 키워드 잔재 (MySQL 은 OUT)"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [PROCEDURE 전용] MSSQL OUTPUT 키워드 → MySQL OUT.
+
+      ❌ 잘못된 예 (1064):
+        CREATE PROCEDURE usp_log (p_id INT = 0 OUTPUT)
+        AS BEGIN ... END
+
+      ✅ 올바른 예:
+        CREATE PROCEDURE usp_log (OUT p_id INT)
+        BEGIN
+          SET p_id = 0;       ← 기본값은 SET 으로
+          ...
+        END
+    seed_source: "AdventureWorks — uspLogError"
+
+  # ─── 카테고리 5: TRIGGER ON Schema.Table ──────────────────────
+  TRIG_SCHEMA_TABLE_007:
+    error_code: 1064
+    category: TRIGGER
+    applies_to: [TRIGGER]
+    regex: "near\\s*'ON\\s+(Sales|Person|HumanResources|Production|Purchasing)\\."
+    cause: "TRIGGER ON Schema.Table 형식 — MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TRIGGER 전용] ON Schema.Table 형식 금지.
+
+      ❌ 잘못된 예 (1064):
+        CREATE TRIGGER `tr_x` ON Sales.SalesOrderDetail
+        AFTER INSERT BEGIN ... END
+
+      ✅ 올바른 예 (스키마 정규화 underscore):
+        CREATE TRIGGER `tr_x` AFTER INSERT ON `Sales_SalesOrderDetail`
+        FOR EACH ROW BEGIN ... END
+
+      변환 규칙:
+        MSSQL: ON Sales.SalesOrderDetail
+        MySQL: ON `Sales_SalesOrderDetail`     ← 백틱 + underscore 정규화
+
+      또한 TRIGGER 구문 차이:
+        MSSQL: AFTER INSERT BEGIN ... END
+        MySQL: AFTER INSERT ON `tbl` FOR EACH ROW BEGIN ... END
+    seed_source: "AdventureWorks — iduSalesOrderDetail 등 7건"
+
+  # ─── 카테고리 6: TRIGGER MSSQL 전용 키워드 ────────────────────
+  TRIG_NOT_FOR_REPL_008:
+    error_code: 1064
+    category: TRIGGER
+    applies_to: [TRIGGER]
+    regex: "NOT\\s+FOR\\s+REPLICATION"
+    cause: "MSSQL NOT FOR REPLICATION 잔재"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TRIGGER 전용] MSSQL NOT FOR REPLICATION → MySQL 미지원, 제거.
+
+      ❌ 잘못된 예 (1064):
+        CREATE TRIGGER `tr_x` ON Sales.X
+        AFTER UPDATE NOT FOR REPLICATION BEGIN ... END
+
+      ✅ 올바른 예:
+        CREATE TRIGGER `tr_x` AFTER UPDATE ON `Sales_X`
+        FOR EACH ROW BEGIN ... END
+    seed_source: "AdventureWorks — dEmployee, iuPerson, uSalesOrderHeader 등 5건"
+
+  TRIG_INSTEAD_OF_009:
+    error_code: 1064
+    category: TRIGGER
+    applies_to: [TRIGGER]
+    regex: "INSTEAD\\s+OF\\s+(INSERT|UPDATE|DELETE)"
+    cause: "MSSQL INSTEAD OF 트리거 — MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TRIGGER 전용] MSSQL INSTEAD OF → MySQL AFTER/BEFORE.
+
+      ⚠️ 의미적 차이 주의:
+        MSSQL INSTEAD OF DELETE = "DELETE 대신 이걸 실행"
+        MySQL: AFTER 또는 BEFORE 로 변환 — 의미 다름
+
+      변환 규칙 (실용적):
+        MSSQL: INSTEAD OF DELETE  →  MySQL: AFTER DELETE
+        MSSQL: INSTEAD OF UPDATE  →  MySQL: AFTER UPDATE
+        MSSQL: INSTEAD OF INSERT  →  MySQL: BEFORE INSERT
+
+      ⚠️ 변환 후 비즈니스 로직 검증 필수.
+    seed_source: "AdventureWorks — dEmployee"
+
+  TRIG_DDL_TRUNCATED_010:
+    error_code: 1064
+    category: TRIGGER
+    applies_to: [TRIGGER]
+    regex: "near\\s*'END'\\s+at\\s+line\\s+1"
+    cause: "TRIGGER DDL 잘림 또는 헤더 손상"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TRIGGER 전용] DDL 본문 누락 — 항상 완전한 BEGIN ... END 보장.
+
+      증상: near 'END' at line 1
+
+      가능한 원인:
+        1. AI 응답 중간에 끊김
+        2. CREATE TRIGGER 헤더 손상
+        3. DELIMITER 누락
+
+      처방:
+        - 트리거 본문이 짧으면 한 줄로 압축 시도
+        - DELIMITER // 와 // 마무리 명시
+        - 응답 max_tokens 충분히 지정
+    seed_source: "AdventureWorks — dVendor, iWorkOrder 등 4건"
+
+  # ─── 카테고리 7: VIEW Unknown database ────────────────────────
+  VIEW_UNKNOWN_DB_011:
+    error_code: 1049
+    category: VIEW
+    applies_to: [VIEW]
+    regex: "Unknown\\s+database\\s+'(HumanResources|Person|Sales|Production|Purchasing)'"
+    cause: "Schema.Table 참조 → MySQL 이 스키마를 데이터베이스로 인식"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [VIEW 전용] Schema.Table 참조를 underscore 정규화 필수.
+
+      ❌ 잘못된 예 (1049):
+        CREATE VIEW `vEmployee` AS
+        SELECT * FROM HumanResources.Employee e
+        JOIN Person.Person p ON p.id = e.id
+
+      ✅ 올바른 예 (underscore 정규화):
+        CREATE VIEW `vEmployee` AS
+        SELECT * FROM `HumanResources_Employee` e
+        JOIN `Person_Person` p ON p.id = e.id
+
+      변환 규칙:
+        MSSQL Sales.SalesOrderHeader  →  MySQL `Sales_SalesOrderHeader`
+
+      AdventureWorks 5개 스키마: HumanResources, Person, Sales, Production, Purchasing
+    seed_source: "AdventureWorks — vEmployee, vIndividualCustomer 등 9건"
+
+  # ─── 카테고리 8: VIEW MSSQL 전용 구문 ─────────────────────────
+  VIEW_XML_FUNC_012:
+    error_code: 1064
+    category: VIEW
+    applies_to: [VIEW]
+    regex: "ref\\.value\\(N'declare|\\.value\\(N'declare|namespace\\s+ci="
+    cause: "MSSQL XML 함수 — MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [VIEW 전용] MSSQL XML 함수 — MySQL 미지원.
+
+      ⚠️ 변환 불가 — 선택지:
+        1. MSSQL 에 이관용 임시 컬럼 추가 (XML 미리 파싱 결과 저장)
+        2. MySQL 5.7+ JSON 함수로 데이터 형식 변경
+        3. View 변환 안 하고 별도 ETL
+        4. View 의 XML 부분 NULL 또는 placeholder
+
+      추천 출력 (스켈레톤):
+        -- WARNING: 원본 MSSQL XML 함수 사용 → MySQL 미지원
+        -- TODO: 비즈니스 로직 검토 후 재설계
+        CREATE VIEW `view_name` AS
+        SELECT base_columns,
+               NULL AS xml_extracted_field
+        FROM source_table;
+    seed_source: "AdventureWorks — vJobCandidate*, vPersonDemographics 7건"
+
+  VIEW_SCHEMABINDING_013:
+    error_code: 1064
+    category: VIEW
+    applies_to: [VIEW]
+    regex: "WITH\\s+SCHEMABINDING"
+    cause: "MSSQL WITH SCHEMABINDING — MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [VIEW 전용] WITH SCHEMABINDING 절 제거.
+
+      ❌ 잘못된 예 (1064):
+        CREATE VIEW vState
+        WITH SCHEMABINDING
+        AS SELECT ...
+
+      ✅ 올바른 예:
+        CREATE VIEW vState AS
+        SELECT ...
+    seed_source: "AdventureWorks — vStateProvinceCountryRegion, vProductAndDescription"
+
+  VIEW_PIVOT_014:
+    error_code: 1064
+    category: VIEW
+    applies_to: [VIEW]
+    regex: "\\bPIVOT\\s*\\("
+    cause: "MSSQL PIVOT — MySQL 미지원, CASE WHEN 으로"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [VIEW 전용] MSSQL PIVOT → CASE WHEN 변환.
+
+      ❌ 잘못된 예 (1064):
+        SELECT * FROM (...)
+        PIVOT (SUM(SubTotal) FOR FiscalYear IN ([2011],[2012])) pvt
+
+      ✅ 올바른 예 (CASE WHEN):
+        SELECT
+          col,
+          SUM(CASE WHEN FiscalYear=2011 THEN SubTotal ELSE 0 END) AS Y2011,
+          SUM(CASE WHEN FiscalYear=2012 THEN SubTotal ELSE 0 END) AS Y2012
+        FROM ...
+        GROUP BY col
+    seed_source: "AdventureWorks — vSalesPersonSalesByFiscalYears"
+
+  # ─── 카테고리 9: PROCEDURE 시스템 함수 ────────────────────────
+  PROC_ERROR_FUNCTIONS_015:
+    error_code: 1064
+    category: PROCEDURE
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "ERROR_(MESSAGE|SEVERITY|STATE|NUMBER|LINE)\\("
+    cause: "MSSQL ERROR_*() 함수 — MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [PROCEDURE 전용] MSSQL 시스템 함수 → MySQL DIAGNOSTICS.
+
+      MSSQL → MySQL 매핑:
+        ERROR_MESSAGE()  → GET DIAGNOSTICS CONDITION 1 v_msg = MESSAGE_TEXT;
+        ERROR_NUMBER()   → GET DIAGNOSTICS CONDITION 1 v_no = MYSQL_ERRNO;
+        ERROR_SEVERITY() → MySQL 동등 없음 (별도 변수 추적)
+
+      MySQL 에러 처리 패턴:
+        DECLARE v_msg VARCHAR(255);
+        DECLARE EXIT HANDLER FOR SQLEXCEPTION
+        BEGIN
+          GET DIAGNOSTICS CONDITION 1 v_msg = MESSAGE_TEXT;
+          ...
+        END;
+    seed_source: "AdventureWorks — uspPrintError"
+
+  # ─── 카테고리 10: FUNCTION TVF (Table-Valued Function) ───────
+  FUNC_TVF_016:
+    error_code: 1064
+    category: FUNCTION
+    applies_to: [FUNCTION]
+    regex: "RETURNS\\s+`?\\w+`?\\s+TABLE"
+    cause: "MSSQL TVF — MySQL 미지원, PROCEDURE 또는 VIEW 로"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [FUNCTION 전용] MSSQL TVF (RETURNS @ret TABLE) — MySQL 에 없음.
+
+      변환 옵션:
+        1. STORED PROCEDURE 로 (cursor 결과 반환)
+        2. VIEW 로 (파라미터 없는 경우)
+
+      추천: PROCEDURE 변환 + 호출자가 결과 cursor 받기.
+
+      ❌ MSSQL 원본:
+        CREATE FUNCTION ufnGetContact(@personId INT)
+        RETURNS @ret TABLE (...)
+        AS BEGIN ... END
+
+      ✅ MySQL 변환 (PROCEDURE):
+        CREATE PROCEDURE usp_get_contact(IN p_person_id INT)
+        BEGIN
+          SELECT ... FROM ... WHERE PersonID = p_person_id;
+        END
+    seed_source: "AdventureWorks — ufnGetContactInformation, uspGetBillOfMaterials"
+
+  # ─── 카테고리 11: 파라미터 백틱 환각 ──────────────────────────
+  AI_HALLUC_PARAM_QUOTE_017:
+    error_code: 1064
+    category: VIEW
+    applies_to: [VIEW, PROCEDURE]
+    regex: "p_\\w+`[0-9]"
+    cause: "AI 환각 — 파라미터에 백틱+숫자 임의 추가"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [환각 회피] 원본 식별자에 임의의 백틱/숫자 추가 절대 금지.
+
+      ❌ AI 환각 예:
+        WHERE locid = ('p_LocationID`1`', 'int')   ← 의미 불명
+
+      ✅ 처방: 원본 MSSQL DDL 식별자 그대로 유지.
+    seed_source: "AdventureWorks — vProductModelInstructions"
+
+  # ─── 카테고리 12: TRIGGER 자기 참조 ──────────────────────────
+  TRIG_SELF_REF_CASE_018:
+    error_code: 1064
+    category: TRIGGER
+    applies_to: [TRIGGER]
+    regex: ""
+    cause: "트리거 자기 참조 mixed-case 충돌 (lower_case_table_names)"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TRIGGER 전용] 자기 참조 mixed-case 식별자 — 백틱 + 정확한 케이스.
+
+      MySQL lower_case_table_names 설정에 따라:
+        - lower_case_table_names=0: 케이스 정확히 일치
+        - lower_case_table_names=1: 모두 소문자
+
+      트리거 본문 내 테이블/컬럼 참조도 동일 규칙 적용.
+      안전: 항상 백틱 + 정확한 케이스 유지.
+    seed_source: "v95_p7 mixed-case 자기 참조 트리거 사고"
+
+  # ════════════════════════════════════════════════════════════════
+  # v95_p89_tune (2026-05-07 본부장님 비전 — 파트너 처방):
+  # 쿼리 튜닝 전용 KB 패턴 — Gemma 가 슬로우 쿼리 발견 시 적용할 처방
+  # ════════════════════════════════════════════════════════════════
+  # 본부장님 비전: 튜닝 시에도 KB 사전 주입 → Gemma 가 패턴별 최적화 전략 자동 적용
+  # convert-tuned, tune-batch 호출 시 _call_ai_unified 가 자동 주입
+  # ════════════════════════════════════════════════════════════════
+  
+  TUNE_SELECT_STAR_019:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)SELECT\\s+\\*\\s+FROM"
+    cause: "SELECT * — 불필요 컬럼 fetch 로 IO/네트워크 낭비"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — SELECT *] 명시적 컬럼 선택 권장.
+      
+      ❌ 비효율:
+        SELECT * FROM customer WHERE id = 100;
+      
+      ✅ 튜닝 variant:
+        SELECT id, name, email FROM customer WHERE id = 100;
+      
+      효과:
+        - 불필요한 BLOB/TEXT 컬럼 제외 → IO ↓
+        - 인덱스 커버링 가능 → row lookup 회피
+        - 네트워크 전송량 ↓
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_SUBQUERY_TO_JOIN_020:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)WHERE\\s+\\w+\\s+IN\\s*\\(\\s*SELECT"
+    cause: "IN (SELECT ...) — 큰 데이터셋 시 N+1 위험"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — Subquery → JOIN/EXISTS] 변환 검토.
+      
+      ❌ 비효율 (큰 IN 서브쿼리):
+        SELECT * FROM orders 
+        WHERE customer_id IN (SELECT id FROM customer WHERE region = 'KR');
+      
+      ✅ 튜닝 variant 1 (JOIN):
+        SELECT o.* FROM orders o
+        JOIN customer c ON c.id = o.customer_id
+        WHERE c.region = 'KR';
+      
+      ✅ 튜닝 variant 2 (EXISTS — 큰 데이터셋):
+        SELECT * FROM orders o
+        WHERE EXISTS (SELECT 1 FROM customer c 
+                      WHERE c.id = o.customer_id AND c.region = 'KR');
+      
+      효과:
+        - JOIN: optimizer 가 더 좋은 plan 생성 가능
+        - EXISTS: short-circuit 평가 (첫 행 발견 시 종료)
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_FUNCTION_ON_COLUMN_021:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW, PROCEDURE]
+    regex: "(?i)WHERE\\s+(UPPER|LOWER|TRIM|SUBSTRING|DATE|YEAR|MONTH)\\s*\\("
+    cause: "WHERE 절의 컬럼 함수 — 인덱스 무효화"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — 인덱스 무효화 회피] WHERE 절 컬럼에 함수 적용 금지.
+      
+      ❌ 비효율 (인덱스 못 쓰는 패턴):
+        WHERE UPPER(email) = 'USER@EXAMPLE.COM'      ← email 인덱스 무효
+        WHERE YEAR(created_at) = 2024                ← created_at 인덱스 무효
+        WHERE DATE(timestamp_col) = '2024-01-15'     ← timestamp_col 인덱스 무효
+      
+      ✅ 튜닝 variant:
+        WHERE email = 'user@example.com'             ← 데이터 정규화 (소문자 저장 권장)
+        WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01'
+        WHERE timestamp_col >= '2024-01-15 00:00:00' AND timestamp_col < '2024-01-16'
+      
+      효과: 인덱스 사용 가능 → seek/range scan
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_LIKE_LEADING_WILDCARD_022:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)LIKE\\s+'%"
+    cause: "LIKE '%xxx' — leading wildcard 인덱스 무효"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — Leading Wildcard] 인덱스 무효화 회피.
+      
+      ❌ 비효율 (full table scan 강제):
+        WHERE name LIKE '%kim'             ← 인덱스 무효, 전체 스캔
+        WHERE email LIKE '%@gmail.com'     ← 인덱스 무효
+      
+      ✅ 튜닝 variant 옵션:
+        1. Trailing wildcard (B-Tree 인덱스 활용 가능):
+           WHERE name LIKE 'kim%'
+        
+        2. FULLTEXT 인덱스 + MATCH AGAINST (대용량 텍스트):
+           WHERE MATCH(name) AGAINST('kim*' IN BOOLEAN MODE)
+        
+        3. 데이터 역순 저장 (suffix 검색이 핵심이면):
+           reverse_name 컬럼 추가 + 인덱스 → WHERE reverse_name LIKE 'mik%'
+      
+      효과: full table scan 회피
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_OR_CONDITIONS_023:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)WHERE\\s+\\w+\\s*=\\s*\\S+\\s+OR\\s+\\w+\\s*="
+    cause: "WHERE col1 = X OR col2 = Y — 인덱스 사용 불가능 위험"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — OR 조건] UNION ALL 변환 검토.
+      
+      ❌ 비효율 (각 컬럼에 인덱스 있어도 못 씀):
+        WHERE customer_id = 100 OR phone = '010-1234'
+      
+      ✅ 튜닝 variant (UNION ALL):
+        SELECT * FROM orders WHERE customer_id = 100
+        UNION ALL
+        SELECT * FROM orders WHERE phone = '010-1234' AND customer_id <> 100
+      
+      ⚠️ UNION ALL 사용 — 중복 제거 (UNION) 보다 빠름.
+      ⚠️ 두 번째 SELECT 에 첫 번째 조건 negate 추가 (중복 행 회피).
+      
+      효과:
+        - 각 SELECT 가 자체 인덱스 사용
+        - optimizer 가 각각 최적 plan 생성
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_ORDER_BY_NO_LIMIT_024:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)ORDER\\s+BY\\s+\\w+(\\s+(ASC|DESC))?\\s*$"
+    cause: "ORDER BY without LIMIT — 전체 정렬"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — ORDER BY] LIMIT 없는 정렬은 의도 확인.
+      
+      ❌ 비효율 (전체 결과 정렬):
+        SELECT * FROM logs WHERE date = '2024-01-01' ORDER BY timestamp;
+        ← 결과 100만 건이면 100만 건 정렬
+      
+      ✅ 튜닝 variant (필요한 만큼만):
+        SELECT * FROM logs WHERE date = '2024-01-01' ORDER BY timestamp LIMIT 100;
+        ← Top-N + 인덱스 활용 가능
+      
+      ⚠️ 의도 확인:
+        - 전체 결과 필요? → 페이지네이션 (LIMIT + OFFSET)
+        - 일부만? → LIMIT 명시
+        - 분석용 export? → 사용자에게 알림 (의도된 전체 정렬)
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_COUNT_STAR_LARGE_025:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)SELECT\\s+COUNT\\(\\*\\)\\s+FROM"
+    cause: "COUNT(*) on large table — full scan 가능"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — COUNT(*)] 큰 테이블 시 대안 검토.
+      
+      ❌ 비효율 (큰 테이블):
+        SELECT COUNT(*) FROM orders WHERE created_at > '2024-01-01';
+        ← 인덱스 없으면 full scan
+      
+      ✅ 튜닝 variant 옵션:
+        1. 커버링 인덱스 활용 (created_at 인덱스):
+           SELECT COUNT(*) FROM orders 
+           WHERE created_at > '2024-01-01';   ← 인덱스만으로 답
+        
+        2. EXISTS 로 충분한 경우 (존재 여부만):
+           SELECT 1 FROM orders 
+           WHERE created_at > '2024-01-01' LIMIT 1;
+        
+        3. 대략 카운트 가능 시 (information_schema):
+           SELECT TABLE_ROWS FROM information_schema.TABLES
+           WHERE table_schema = 'mydb' AND table_name = 'orders';
+        
+        4. 별도 카운터 테이블 (실시간 정확도 필요 시):
+           UPDATE counter_table SET cnt = cnt + 1 WHERE name = 'orders';
+      
+      효과: full scan 회피
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_DISTINCT_LARGE_026:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)SELECT\\s+DISTINCT"
+    cause: "DISTINCT — 결과 정렬 + 중복 제거 비용"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — DISTINCT] GROUP BY 또는 EXISTS 대체 검토.
+      
+      ❌ 비효율 (DISTINCT 가 본질이 아닌 경우):
+        SELECT DISTINCT customer_id FROM orders;
+      
+      ✅ 튜닝 variant:
+        1. GROUP BY (optimizer 차이):
+           SELECT customer_id FROM orders GROUP BY customer_id;
+        
+        2. EXISTS (존재 여부만 필요):
+           SELECT id FROM customer c
+           WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+      
+      ⚠️ DISTINCT 가 정말 필요한지 검증:
+        - JOIN 결과 중복? → JOIN 조건 재검토
+        - 중복 데이터? → 데이터 무결성 확인
+    seed_source: "튜닝 일반 룰"
+
+  TUNE_NOT_IN_NULL_027:
+    error_code: "*"
+    category: QUERY
+    applies_to: [QUERY, VIEW]
+    regex: "(?i)NOT\\s+IN\\s*\\(\\s*SELECT"
+    cause: "NOT IN with NULL — 결과 누락 가능 + 성능 ↓"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [튜닝 룰 — NOT IN] NOT EXISTS 또는 LEFT JOIN 변환.
+      
+      ❌ 비효율 + 함정 (NULL 처리):
+        SELECT * FROM customer 
+        WHERE id NOT IN (SELECT customer_id FROM orders);
+        ← 만약 orders 의 customer_id 에 NULL 하나라도 있으면
+           전체 결과가 빈 셋이 됨 (NULL 비교 함정!)
+      
+      ✅ 튜닝 variant 1 (NOT EXISTS — NULL safe):
+        SELECT * FROM customer c
+        WHERE NOT EXISTS (SELECT 1 FROM orders o 
+                          WHERE o.customer_id = c.id);
+      
+      ✅ 튜닝 variant 2 (LEFT JOIN + IS NULL):
+        SELECT c.* FROM customer c
+        LEFT JOIN orders o ON o.customer_id = c.id
+        WHERE o.customer_id IS NULL;
+      
+      효과: NULL 함정 회피 + 성능 ↑
+    seed_source: "튜닝 일반 룰"
+
+  # ════════════════════════════════════════════════════════════════════
+  # v95_p95_kb (2026-05-08 본부장님 비전): 17건 사례 KB 등재
+  # ════════════════════════════════════════════════════════════════════
+  # 본부장님 모토:
+  #   "하드코딩 안 돼... KB(RAG) 풍성하게"
+  # → v94 의 post_process 룰을 KB 자산으로 누적 + RAG 활용
+  # → DataBridgeGemma 의 fine-tune 학습 데이터 자산
+  # ════════════════════════════════════════════════════════════════════
+
+  # ─── 1064 XML CAST(NULL AS TYPE) 잔재 (그룹 1 — 5건) ───
+  1064_XML_CAST_RESIDUE:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [VIEW]
+    # 잔재 패턴: ", TEXT) AS xxx" 또는 ", VARCHAR(50)) AS xxx" 또는 ", CHAR(N)) AS xxx"
+    regex: "1064.*near\\s*'(?:TEXT|N?(?:VAR)?CHAR(?:\\s*\\(\\s*\\d+\\s*\\))?)\\)\\s+AS\\s+`?\\w+`?"
+    cause: "Gemma 가 MSSQL XML 함수 (Education.value, ref.value 등) → CAST(NULL AS TYPE) 평탄화 시 시작 부분 잘림"
+    fix_type: engine_rule
+    fix_engine_rule: "post_processor R-029a 자동 정정 ('TYPE) AS alias' → 'NULL AS alias')"
+    seed_source: "본부장님 환경 2026-05-08 — vJobCandidate, vAdditionalContactInfo, vProductModelCatalogDescription, vStoreWithDemographics, vJobCandidateEducation"
+    seed_count: 5
+
+  # ─── 1064 DATE_ADD 후 잔재 ');' END (그룹 2 — 1건) ───
+  1064_DATE_ADD_TAIL_RESIDUE:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [FUNCTION]
+    regex: "1064.*near.*(?:MILLISECOND|MICROSECOND|SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|QUARTER|YEAR)\\)\\s*;\\s*END"
+    cause: "MSSQL DATEADD(...) → MySQL DATE_ADD(...) 변환 시 닫는 괄호 잔재"
+    fix_type: engine_rule
+    fix_engine_rule: "post_processor R-032 자동 정정 ('INTERVAL <unit>);' 잔재 정리)"
+    seed_source: "본부장님 환경 2026-05-08 — ufnGetAccountingEndDate (millisecond)"
+    seed_count: 1
+
+  # ─── 1415 TVF (Table-Valued Function) 차단 (그룹 4 — 2건) ───
+  1415_TVF_NOT_SUPPORTED:
+    error_code: "1415"
+    category: NOT_SUPPORTED
+    applies_to: [FUNCTION]
+    regex: "1415.*Not allowed to return a result set from a function"
+    cause: "MSSQL 의 RETURNS TABLE / 결과 SELECT 함수는 MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TVF (Table-Valued Function) 변환 안내 — MySQL 미지원 1415]
+      
+      ❌ MSSQL 의 RETURNS TABLE 함수:
+        CREATE FUNCTION ufnGetProductDealerPrice(@ProductID INT)
+        RETURNS TABLE
+        AS RETURN (SELECT ... FROM ...);
+      
+      ⚠️ MySQL FUNCTION 은 결과 집합 반환 불가:
+        - RETURNS TABLE 미지원
+        - 본문에 SELECT (INTO 없는) 미지원
+      
+      ✅ 변환 옵션 (사용자 결정 필요):
+        1. STORED PROCEDURE 로 변환:
+           CREATE PROCEDURE ufnGetProductDealerPrice(IN p_ProductID INT)
+           BEGIN SELECT ... FROM ... WHERE ProductID = p_ProductID; END
+        
+        2. VIEW 로 변환 (파라미터 불필요한 경우):
+           CREATE VIEW v_ProductDealerPrice AS SELECT ... FROM ...
+        
+        3. SCALAR FUNCTION 으로 단순화 (단일 값만 반환):
+           CREATE FUNCTION (...) RETURNS DECIMAL(10,2)
+           BEGIN DECLARE result DECIMAL(10,2);
+                 SELECT col INTO result FROM ... WHERE ...;
+                 RETURN result; END
+    seed_source: "본부장님 환경 2026-05-08 — ufnGetProductDealerPrice, ufnGetProductListPrice"
+    seed_count: 2
+
+  # ─── 1064 짧은 응답 검출 (그룹 8 — 3건) ───
+  # 이건 에러 패턴이 아니라 사전 검증 영역 (validate_ddl_complete)
+  # KB 에 등재 이유: 발생 빈도 + Gemma 재시도 시 max_tokens 증가 힌트
+  1064_GEMMA_TRUNCATED_RESPONSE:
+    error_code: "1064"
+    category: AI_RESPONSE
+    applies_to: [FUNCTION, PROCEDURE, TRIGGER, VIEW]
+    regex: "1064.*near\\s*'(?:\\)\\s*END|''|\\bBEGIN\\s+INSERT\\b)"
+    cause: "Gemma 응답이 잘리거나 너무 짧음 (max_tokens 한계 / 모델 한계)"
+    fix_type: engine_rule
+    fix_engine_rule: "validate_ddl_complete 사전 차단 + max_tokens 증가 재시도 (PROC/TRIG 80자 미만, FUNC/VIEW 60자 미만)"
+    seed_source: "본부장님 환경 2026-05-08 — uspGetWhereUsedProductID, uspSearchCandidateResumes, uPurchaseOrderDetail"
+    seed_count: 3
+
+  # ─── 1054 NEW.가짜컬럼 환각 (그룹 6 — 1건) ───
+  1054_TRIGGER_NEW_HALLUCINATION:
+    error_code: "1054"
+    category: HALLUCINATION
+    applies_to: [TRIGGER]
+    regex: "1054.*Unknown column.*'NEW'"
+    cause: "Gemma 가 schema_ctx 받았지만 NEW.컬럼명을 학습 데이터의 가짜 컬럼으로 추측"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [트리거 NEW/OLD 컬럼 안내 — 환각 방지]
+      
+      ❌ 학습 데이터의 옛 컬럼명 추측 금지:
+        예: NEW.PurchaseOrderClause (← 실제 테이블에 없는 컬럼)
+      
+      ✅ NEW/OLD 사용 규칙:
+        - NEW.컬럼명, OLD.컬럼명 = 트리거 대상 테이블 (ON 절의 테이블) 의 컬럼
+        - 반드시 [참조 테이블 실제 스키마] 컨텍스트의 해당 테이블 컬럼만 사용
+        - 컨텍스트에 없는 컬럼명 추측 절대 금지
+    seed_source: "본부장님 환경 2026-05-08 — uSalesOrderHeader (PurchaseOrderClause)"
+    seed_count: 1
+
+  # ─── 1064 자기조인 (alias 충돌) (그룹 1 부분 — 1건) ───
+  1064_SELF_JOIN_ALIAS_COLLISION:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [VIEW]
+    regex: "1064.*near.*\\b(\\w+)\\.\\w+\\s*=\\s*\\1\\.\\w+\\s+(?:INNER|LEFT|RIGHT|FULL)\\s+JOIN"
+    cause: "JOIN 의 ON 절에서 같은 테이블 alias 양쪽 사용 (자기조인 무의미)"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [JOIN alias 안내 — 자기조인 방지]
+      
+      ❌ 같은 alias 양쪽 사용:
+        FROM Person p INNER JOIN Address a 
+          ON p.BusinessEntityID = p.BusinessEntityID  -- ← alias 양쪽 모두 'p'
+      
+      ✅ 각 테이블에 고유 alias:
+        FROM Person p INNER JOIN BusinessEntityAddress bea 
+          ON p.BusinessEntityID = bea.BusinessEntityID
+    seed_source: "본부장님 환경 2026-05-08 — vIndividualCustomer"
+    seed_count: 1
+
+  # ─── 1064 재귀 CTE (그룹 3 — 2건) ───
+  1064_RECURSIVE_CTE:
+    error_code: "1064"
+    category: SYNTAX
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "1064.*near.*UNION\\s+ALL\\s+SELECT.*\\."
+    cause: "MSSQL 의 ;WITH cte AS (...UNION ALL...) → MySQL 의 WITH RECURSIVE 변환 누락"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [재귀 CTE 변환 안내 — MSSQL → MySQL]
+      
+      ❌ MSSQL 형식 (MySQL 에서 1064):
+        ;WITH cte AS (
+            SELECT root_id, name FROM products WHERE parent_id IS NULL
+            UNION ALL
+            SELECT b.id, b.name FROM products b INNER JOIN cte ON b.parent_id = cte.root_id
+        )
+        SELECT * FROM cte;
+      
+      ✅ MySQL 형식 (WITH RECURSIVE 명시 필수):
+        WITH RECURSIVE cte AS (
+            SELECT root_id, name FROM products WHERE parent_id IS NULL
+            UNION ALL
+            SELECT b.id, b.name FROM products b INNER JOIN cte ON b.parent_id = cte.root_id
+        )
+        SELECT * FROM cte;
+      
+      핵심: 'WITH' → 'WITH RECURSIVE' (UNION ALL 자기 참조 시 필수)
+    seed_source: "본부장님 환경 2026-05-08 — uspGetBillOfMaterials, uspGetWhereUsedProductID"
+    seed_count: 2
+
+  # ─── 1363 INSERT 트리거 OLD 참조 (그룹 5 — 2건) ───
+  1363_INSERT_TRIGGER_OLD:
+    error_code: "1363"
+    category: SEMANTIC
+    applies_to: [TRIGGER]
+    regex: "1363.*no OLD row in on INSERT trigger"
+    cause: "MSSQL 의 i+d+u 통합 트리거 (AFTER INSERT, DELETE, UPDATE) → MySQL 은 단일 이벤트만 지원, INSERT 시 OLD 미존재"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [INSERT 트리거 OLD 안내 — i+d+u 분리]
+      
+      ❌ MSSQL 의 통합 트리거:
+        CREATE TRIGGER iduSalesOrderDetail ON SalesOrderDetail
+        AFTER INSERT, DELETE, UPDATE AS BEGIN
+            -- inserted/deleted 가상 테이블로 분기
+            IF EXISTS (SELECT 1 FROM inserted) ...
+            IF EXISTS (SELECT 1 FROM deleted) ...
+        END
+      
+      ⚠️ MySQL 트리거: 단일 이벤트만, OLD/NEW 직접 참조
+        - INSERT 트리거: NEW 만 존재 (OLD 없음 → 1363 에러)
+        - DELETE 트리거: OLD 만 존재 (NEW 없음)
+        - UPDATE 트리거: OLD + NEW 모두 존재
+      
+      ✅ MySQL 변환: 이벤트별로 트리거 분리
+        CREATE TRIGGER iSalesOrderDetail AFTER INSERT ON SalesOrderDetail
+        FOR EACH ROW BEGIN
+            UPDATE SalesOrderHeader SET TotalDue = TotalDue + NEW.LineTotal
+            WHERE SalesOrderID = NEW.SalesOrderID;
+        END;
+        
+        CREATE TRIGGER dSalesOrderDetail AFTER DELETE ON SalesOrderDetail
+        FOR EACH ROW BEGIN
+            UPDATE SalesOrderHeader SET TotalDue = TotalDue - OLD.LineTotal
+            WHERE SalesOrderID = OLD.SalesOrderID;
+        END;
+        
+        CREATE TRIGGER uSalesOrderDetail AFTER UPDATE ON SalesOrderDetail
+        FOR EACH ROW BEGIN
+            UPDATE SalesOrderHeader SET TotalDue = TotalDue + NEW.LineTotal - OLD.LineTotal
+            WHERE SalesOrderID = NEW.SalesOrderID;
+        END;
+    seed_source: "본부장님 환경 2026-05-08 — iduSalesOrderDetail, iuPerson"
+    seed_count: 2
+
+  # ════════════════════════════════════════════════════════════════════
+  # v95_p97_kb (2026-05-08 16:30 본부장님 비전: KB 자산 누적 Step 2)
+  # ════════════════════════════════════════════════════════════════════
+  # 본부장님 운영 메모리 그대로:
+  #   "Step 1: 운영 중 새 에러 → error_cases.txt 자동 누적" ✅ 완료
+  #   "Step 2: 본부장님 검증 후 → 이 yml 정식 패턴 등록" ← 지금 진행
+  #   "Step 3: AI 호출 시 자동 적용"
+  #   "Step 4: 충분 누적 후 → LoRA fine-tune 학습 데이터로 활용"
+  #
+  # 본부장님 환경 (2026-05-08 15:00~15:15):
+  #   AI 재이관 _UNMATCHED_ 등재 7건 → 정식 KB 패턴 등재
+  # ════════════════════════════════════════════════════════════════════
+
+  # ─── 1054 파라미터를 컬럼명으로 환각 (uspGetBillOfMaterials) ───
+  1054_PARAM_AS_COLUMN:
+    error_code: "1054"
+    category: HALLUCINATION
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "Unknown column.*'p_\\w+'"
+    cause: "Gemma 가 MSSQL @ParamName → MySQL p_paramname 변환 후, 본문에서 컬럼명으로 잘못 사용"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [파라미터 vs 컬럼 안내 — 1054 환각 방지]
+      
+      ❌ 흔한 실수:
+        CREATE PROCEDURE name(IN p_Check_Date DATETIME)
+        BEGIN
+          SELECT * FROM table WHERE check_date >= p_Check_Date  -- 변수 사용 OK
+            AND p_Check_Date IS NOT NULL                          -- 변수 사용 OK
+            ...
+          INSERT INTO log (p_Check_Date, ...)                     -- ❌ 컬럼이 아님!
+        END
+      
+      ✅ 올바른 사용:
+        - p_xxx 는 프로시저 IN/OUT 파라미터 (변수)
+        - SELECT/WHERE/SET 절에서 변수로 사용 OK
+        - 컬럼 위치 (INSERT 컬럼 목록 등) 에는 사용 불가
+        - 컬럼 참조는 반드시 [참조 테이블 실제 스키마] 의 컬럼 사용
+    seed_source: "본부장님 환경 2026-05-08 — uspGetBillOfMaterials (p_Check_Date)"
+    seed_count: 1
+
+  # ─── 1146 dbo_ prefix 환각 (uspGetEmployeeManagers) ───
+  1146_DBO_PREFIX_HALLUCINATION:
+    error_code: "1146"
+    category: HALLUCINATION
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "Table\\s+'\\w+\\.dbo_\\w+'\\s+doesn't exist"
+    cause: "Gemma 가 MSSQL [dbo] schema 를 MySQL dbo_ prefix 로 잘못 변환"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [dbo schema 안내 — 1146 환각 방지]
+      
+      ❌ 흔한 실수:
+        MSSQL: SELECT * FROM [dbo].[uspGetEmp]
+        MySQL: SELECT * FROM dbo_uspGetEmp        -- ❌ dbo_ prefix 없음!
+      
+      ✅ 올바른 변환:
+        - MSSQL [dbo].[name] → MySQL `name` (prefix 없음)
+        - dbo 는 MSSQL 의 기본 schema 일 뿐, MySQL 에서 prefix 안 붙임
+        - 다른 schema (예: HumanResources, Sales) 만 underscore 결합
+        - HumanResources.[Department] → HumanResources_Department
+        - dbo.[uspGetEmp] → uspGetEmp (그대로)
+    seed_source: "본부장님 환경 2026-05-08 — uspGetEmployeeManagers (dbo_uspGetEmp)"
+    seed_count: 1
+
+  # ─── 1054 CTE 재귀 변수를 컬럼으로 환각 (uspGetManagerEmployees) ───
+  1054_CTE_VAR_HALLUCINATION:
+    error_code: "1054"
+    category: HALLUCINATION
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "Unknown column.*'\\w*[Cc]te[\\W_]*[Rr]ecursi"
+    cause: "MSSQL CTE 재귀 안의 변수/anchor 컬럼을 외부 SELECT 에서 잘못 참조"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [재귀 CTE 변수 안내 — 1054 환각 방지]
+      
+      ❌ 흔한 실수:
+        WITH RECURSIVE EMP_cte AS (
+            SELECT BusinessEntityID FROM HumanResources_Employee
+            UNION ALL
+            SELECT EMP_cte_RecursionLevel FROM EMP_cte  -- ❌ 추측 변수
+        )
+        SELECT * FROM EMP_cte;
+      
+      ✅ 올바른 변환:
+        - CTE 재귀 anchor 의 컬럼만 외부 SELECT 에서 사용 가능
+        - 재귀 step 의 컬럼은 anchor 와 같은 컬럼명으로 정의
+        - MySQL 8.0+ : WITH RECURSIVE 명시 필수 (UNION ALL 자기참조 시)
+        
+        WITH RECURSIVE EMP_cte (BusinessEntityID, RecursionLevel) AS (
+            SELECT BusinessEntityID, 0 FROM HumanResources_Employee 
+              WHERE ManagerID IS NULL
+            UNION ALL
+            SELECT e.BusinessEntityID, c.RecursionLevel + 1 
+              FROM HumanResources_Employee e 
+              INNER JOIN EMP_cte c ON e.ManagerID = c.BusinessEntityID
+        )
+        SELECT BusinessEntityID, RecursionLevel FROM EMP_cte;
+    seed_source: "본부장님 환경 2026-05-08 — uspGetManagerEmployees, uspGetBillOfMaterials"
+    seed_count: 2
+
+  # ─── 1054 SIGNAL/RESIGNAL 변수 환각 (uspLogError) ───
+  1054_SIGNAL_VAR_RESIDUE:
+    error_code: "1054"
+    category: HALLUCINATION
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "Unknown column.*'(?:SIGNAL_|@@ERROR|ERROR_NUM|ERROR_MSG|ERROR_LINE)"
+    cause: "MSSQL @@ERROR / ERROR_NUMBER() 변환 시 MySQL SIGNAL 의 변수명을 컬럼처럼 사용"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [TRY/CATCH → MySQL HANDLER 안내 — 에러 처리]
+      
+      ❌ 흔한 실수 (MSSQL 직역):
+        BEGIN TRY ... END TRY
+        BEGIN CATCH
+            INSERT INTO ErrorLog (ErrorNumber) VALUES (ERROR_NUMBER())  -- ❌
+            SET @msg = SIGNAL_ERROR_NUM_MSG  -- ❌ 환각 변수
+        END CATCH
+      
+      ✅ MySQL 등가 변환:
+        DECLARE EXIT HANDLER FOR SQLEXCEPTION
+        BEGIN
+            GET DIAGNOSTICS CONDITION 1 
+                @errno = MYSQL_ERRNO,
+                @errmsg = MESSAGE_TEXT;
+            INSERT INTO ErrorLog (ErrorNumber, ErrorMessage) 
+                VALUES (@errno, @errmsg);
+            RESIGNAL;
+        END;
+      
+      핵심:
+        - GET DIAGNOSTICS 로 에러 정보 추출 (MSSQL ERROR_NUMBER() 등가)
+        - DECLARE HANDLER 로 catch 블록 구현
+        - SIGNAL/RESIGNAL 로 에러 재발생
+    seed_source: "본부장님 환경 2026-05-08 — uspLogError"
+    seed_count: 1
+
+  # ─── 1305 MSSQL 시스템 함수 (uspPrintError) ───
+  1305_MSSQL_SYSTEM_FUNC_NOT_FOUND:
+    error_code: "1305"
+    category: NOT_SUPPORTED
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "FUNCTION.*(?:ERROR_NUMBER|ERROR_MESSAGE|ERROR_SEVERITY|ERROR_STATE|ERROR_LINE|ERROR_PROCEDURE).*(?:doesn't exist|does not exist)"
+    cause: "MSSQL ERROR_xxx() 시스템 함수는 MySQL 미지원"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [MSSQL 시스템 함수 → MySQL 등가 매핑]
+      
+      ❌ MSSQL 시스템 함수 (MySQL 미지원):
+        ERROR_NUMBER()    — 1305 에러 발생
+        ERROR_MESSAGE()
+        ERROR_SEVERITY()
+        ERROR_STATE()
+        ERROR_LINE()
+        ERROR_PROCEDURE()
+      
+      ✅ MySQL 등가 (GET DIAGNOSTICS):
+        DECLARE @errno INT;
+        DECLARE @errmsg VARCHAR(255);
+        DECLARE @sqlstate VARCHAR(5);
+        DECLARE EXIT HANDLER FOR SQLEXCEPTION
+        BEGIN
+            GET DIAGNOSTICS CONDITION 1
+                @errno    = MYSQL_ERRNO,        -- ERROR_NUMBER() 등가
+                @errmsg   = MESSAGE_TEXT,       -- ERROR_MESSAGE() 등가
+                @sqlstate = RETURNED_SQLSTATE;  -- ERROR_STATE() 등가
+            -- 사용
+            INSERT INTO log VALUES (@errno, @errmsg);
+            RESIGNAL;
+        END;
+      
+      매핑 표:
+        ERROR_NUMBER()    → @errno (MYSQL_ERRNO)
+        ERROR_MESSAGE()   → @errmsg (MESSAGE_TEXT)
+        ERROR_STATE()     → @sqlstate (RETURNED_SQLSTATE)
+        ERROR_SEVERITY()  → MySQL 미지원 (생략 또는 상수)
+        ERROR_LINE()      → MySQL 미지원 (생략)
+        ERROR_PROCEDURE() → 직접 정의 (변수에 프로시저명 저장)
+    seed_source: "본부장님 환경 2026-05-08 — uspPrintError"
+    seed_count: 1
+
+  # ─── 1318 인자 개수 불일치 (uspUpdateEmployeeHireInfo) ───
+  1318_ARG_COUNT_MISMATCH:
+    error_code: "1318"
+    category: SEMANTIC
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "Incorrect number of arguments"
+    cause: "프로시저/함수 호출 시 파라미터 개수 불일치 (MSSQL → MySQL 시그니처 변환 누락)"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [파라미터 시그니처 1:1 매핑 안내]
+      
+      ❌ 흔한 실수:
+        MSSQL: EXEC uspUpdate @id, @date     -- 2개 인자
+        MySQL: CALL uspUpdate(p_id)           -- ❌ 1개만!
+      
+      ✅ 올바른 변환 (1:1 시그니처):
+        - MSSQL @ParamName → MySQL p_paramname (소문자 + p_ prefix)
+        - 모든 IN/OUT/INOUT 파라미터 1:1 보존
+        - 호출 시 인자 개수 일치 필수
+        
+      MSSQL:
+        CREATE PROCEDURE uspUpdate
+            @BusinessEntityID INT,
+            @JobTitle NVARCHAR(50),
+            @HireDate DATE
+        AS BEGIN ... END
+      
+      MySQL:
+        CREATE PROCEDURE uspUpdate(
+            IN p_BusinessEntityID INT,
+            IN p_JobTitle VARCHAR(50),
+            IN p_HireDate DATE
+        ) BEGIN ... END
+      
+      호출:
+        MSSQL: EXEC uspUpdate 1, 'Manager', '2026-01-01'
+        MySQL: CALL uspUpdate(1, 'Manager', '2026-01-01')
+    seed_source: "본부장님 환경 2026-05-08 — uspUpdateEmployeeHireInfo"
+    seed_count: 1
+
+  # ─── 1366 타입 불일치 (uspUpdateEmployeeLogin) ───
+  1366_TYPE_CLASH:
+    error_code: "1366"
+    category: TYPE_CONVERSION
+    applies_to: [PROCEDURE, FUNCTION]
+    regex: "[Oo]perand type clash.*int.*incompat"
+    cause: "MSSQL 전용 타입 (HIERARCHYID, GEOMETRY 등) → MySQL 호환 타입 매핑 누락"
+    fix_type: prompt_injection
+    fix_prompt: |
+      [MSSQL 전용 타입 → MySQL 매핑 안내]
+      
+      ❌ MSSQL 전용 타입 (MySQL 미지원 — 1366 에러):
+        HIERARCHYID         → 계층 구조 표현
+        GEOGRAPHY           → 지리 데이터
+        GEOMETRY            → 기하 데이터
+        SQL_VARIANT         → 가변 타입
+        UNIQUEIDENTIFIER    → GUID
+      
+      ✅ MySQL 호환 매핑:
+        HIERARCHYID         → VARCHAR(255) 또는 BLOB (직접 변환 어려움)
+                              실제 데이터는 path string 또는 parent_id 로 재모델링
+        GEOGRAPHY           → MySQL 의 GEOMETRY (공간 인덱스)
+        GEOMETRY            → MySQL GEOMETRY (그대로)
+        SQL_VARIANT         → 사용하는 컨텍스트별로 명확한 타입 (VARCHAR/JSON 등)
+        UNIQUEIDENTIFIER    → CHAR(36) 또는 BINARY(16)
+      
+      파라미터/컬럼 변환:
+        @OrgNode HIERARCHYID  → IN p_OrgNode VARCHAR(255)
+        @id UNIQUEIDENTIFIER  → IN p_id CHAR(36)
+      
+      비교/할당 시:
+        - 같은 타입끼리 비교 (CAST 명시)
+        - INT 컬럼에 VARCHAR 할당 시 CAST 또는 CONVERT 필수
+    seed_source: "본부장님 환경 2026-05-08 — uspUpdateEmployeeLogin (HIERARCHYID 의심)"
+    seed_count: 1
+
+
+# ════════════════════════════════════════════════════════════════════
+# v95_p89_kb 메타 정보
+# ════════════════════════════════════════════════════════════════════
+metadata:
+  v95_p89_kb_seed:
+    total_seed_patterns: 18
+    total_cases_covered: 51
+    seed_date: "2026-05-07"
+    seed_source: "AdventureWorks 2022 macOS 변환 결과 (51건 1064/1049)"
+    
+    coverage:
+      FUNCTION_1064:  11   # 백틱 11 + RETURNS money + AS BEGIN
+      PROCEDURE_1064:  9   # 백틱 + OUTPUT + ERROR 함수
+      TRIGGER_1064:   11   # ON Schema.Table + NOT FOR REPL + INSTEAD OF + END 끊김
+      VIEW_1064:      11   # XML + SCHEMABINDING + PIVOT + 환각
+      VIEW_1049:       9   # Unknown database (스키마 정규화)
+    
+    growth_strategy:
+      step1: "운영 중 새 에러 → error_cases.txt 자동 누적"
+      step2: "본부장님 검증 후 → 이 yml 정식 패턴 등록"
+      step3: "Gemma 호출 시 assemble_preflight_hint 가 자동 적용"
+      step4: "충분 누적 후 → LoRA fine-tune 학습 데이터로 활용"
+
+  # ════════════════════════════════════════════════════════════════════
+  # v95_p95_kb (2026-05-08 본부장님 비전 — RAG 풍성하게)
+  # ════════════════════════════════════════════════════════════════════
+  v95_p95_kb_growth:
+    new_patterns: 8
+    new_cases_covered: 17
+    seed_date: "2026-05-08"
+    seed_source: "본부장님 점심 후 끝까지 처방 — AdventureWorks 잔여 17건"
+    
+    pattern_breakdown:
+      1064_XML_CAST_RESIDUE:           5  # vJobCandidate 등
+      1064_DATE_ADD_TAIL_RESIDUE:      1  # ufnGetAccountingEndDate
+      1415_TVF_NOT_SUPPORTED:          2  # ufnGetProductDealerPrice/ListPrice
+      1064_GEMMA_TRUNCATED_RESPONSE:   3  # uspGetWhereUsedProductID 등
+      1054_TRIGGER_NEW_HALLUCINATION:  1  # uSalesOrderHeader
+      1064_SELF_JOIN_ALIAS_COLLISION:  1  # vIndividualCustomer
+      1064_RECURSIVE_CTE:              2  # uspGetBillOfMaterials 등
+      1363_INSERT_TRIGGER_OLD:         2  # iduSalesOrderDetail, iuPerson
+    
+    fix_type_breakdown:
+      engine_rule:      9   # post_process 자동 정정 (R-029a, R-032, validator)
+      prompt_injection: 8   # AI 프롬프트 강화 (NEW/OLD, alias, CTE, 트리거 분리)
+    
+    cumulative:
+      total_patterns: 26    # 18 + 8
+      total_cases:    68    # 51 + 17
+    
+    note: |
+      본부장님 모토 100% 부합:
+        - 하드코딩 0%: 정규식은 일반화, case 는 KB 메타에 누적
+        - KB 자산: 매 사례 → KB 등재 → RAG 활용
+        - DataBridgeGemma: 누적 KB 가 fine-tune 학습 데이터
+      
+      다음 단계 (DataBridgeGemma 비전):
+        Phase 1: KB 패턴 → preflight_kb_learner 가 사전 매칭 → AI 호출 회피
+        Phase 2: 새 패턴 자동 누적 (error_cases.txt → KB 패턴 자동 생성)
+        Phase 3: LoRA fine-tune 학습 데이터로 활용
+
+  # ════════════════════════════════════════════════════════════════════
+  # v95_p97_kb (2026-05-08 16:30 본부장님 비전: KB 자산 누적 Step 2)
+  # ════════════════════════════════════════════════════════════════════
+  v95_p97_kb_growth:
+    new_patterns: 7
+    new_cases_covered: 8
+    seed_date: "2026-05-08 16:30"
+    seed_source: "본부장님 검증 후 KB 정식 등재 (Step 2)"
+    seed_method: "AI 재이관 _UNMATCHED_ 결과 → 본부장님 본질 분석 → 정식 KB 패턴"
+    
+    pattern_breakdown:
+      1054_PARAM_AS_COLUMN:                  1  # uspGetBillOfMaterials
+      1146_DBO_PREFIX_HALLUCINATION:         1  # uspGetEmployeeManagers
+      1054_CTE_VAR_HALLUCINATION:            2  # uspGetManagerEmployees, uspGetBillOfMaterials
+      1054_SIGNAL_VAR_RESIDUE:               1  # uspLogError
+      1305_MSSQL_SYSTEM_FUNC_NOT_FOUND:      1  # uspPrintError
+      1318_ARG_COUNT_MISMATCH:               1  # uspUpdateEmployeeHireInfo
+      1366_TYPE_CLASH:                       1  # uspUpdateEmployeeLogin
+    
+    fix_type_breakdown:
+      prompt_injection: 7   # 모두 강한 fix_prompt — Gemma 의 의미적 변환 안내
+    
+    cumulative:
+      total_patterns: 33    # 26 + 7
+      total_cases:    76    # 68 + 8
+    
+    note: |
+      본부장님 비전 Step 2 첫 실행:
+        ✅ Step 1 완료: AI 재이관 → _UNMATCHED_ 자동 등재
+        ✅ Step 2 진행: 본부장님 검증 → 정식 KB 패턴 등재
+        ⏳ Step 3: 다음 재이관 시 KB 매칭 → 강한 fix_prompt 자동 적용
+        ⏳ Step 4: 충분 누적 후 → DataBridgeGemma fine-tune
+      
+      이번 7개 패턴 = 본부장님 비전의 진짜 자산:
+        - 모두 Gemma 의 의미적 변환 환각
+        - prompt_injection 으로 다음 재이관 시 정정 기대
+        - 같은 패턴 또 만나면 → KB 매칭 → 자동 fix_prompt 주입
+
+
 # =============================================================
 # 초기 통계 (구현 시점 기본값)
 # 실제 통계는 backend/data/kb_stats.db (SQLite) 에 누적

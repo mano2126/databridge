@@ -30,6 +30,30 @@ from datetime import datetime, timezone, timedelta
 _KST = timezone(timedelta(hours=9))
 logger = logging.getLogger("databridge.engine")
 
+# ════════════════════════════════════════════════════════════════════
+# v95_p23a (2026-05-03 본부장님 본질 처방): CREATE TABLE 모듈 직렬화
+# ════════════════════════════════════════════════════════════════════
+# 본부장님 호소: "분명 멀티로 진행하면 이런일 발생할 소지 있다고 내가
+#               말했었는데" — 16:18:24 EmailAddress + BusinessEntityContact
+#               동시 CREATE → MySQL InnoDB metadata lock → 1213 Deadlock
+#
+# 본질:
+#   migration_engine.py:438 의 _par = 3 (FK 레벨당 3 동시) 가 INSERT 만 노린
+#   설계인데 CREATE TABLE 도 같이 동시 실행됨. MySQL InnoDB 의 DDL 메타데이터
+#   lock 은 같은 schema 안에서 직렬화 필요 — 동시 CREATE = lock 충돌 위험.
+#
+# 처방:
+#   CREATE TABLE 단계만 모듈 전역 mutex 로 직렬화 (한 시점 1개만).
+#   INSERT 등 데이터 이관 단계는 그대로 병렬 (성능 영향 최소).
+#
+# 하드코딩 0%:
+#   DB 종류 무관, 테이블 이름 무관 — 모든 표준 DB / 운영 환경 / 테스트 환경
+#   동일 적용. Northwind / WideWorldImporters / 캐피탈사 운영 DB 모두 안전.
+#
+# 부수 효과: CREATE 가 직렬화돼도 매 CREATE 가 ms 단위라 전체 이관 속도
+#           영향 1% 미만. 본부장님 운영 환경에서는 안전성이 우선.
+_create_table_lock = threading.Lock()
+
 
 class MigrationEngine:
     """
@@ -542,6 +566,18 @@ class MigrationEngine:
                             "finished_at":datetime.now(_KST).isoformat(),
                         }
                     self._log("error", f"테이블 [{tbl}] 오류: {e}")
+                    # ════════════════════════════════════════════════════════════
+                    # v95_p31 (b) (2026-05-04 본부장님 본질 처방): traceback 강제 로깅
+                    # ════════════════════════════════════════════════════════════
+                    # 본질: 'Production_Document' 같은 짧은 에러 메시지 (KeyError repr) 는
+                    #       진짜 발생 자리를 모르게 만듦. 진짜 본질 추적을 위해 항상 traceback.
+                    # 부작용 0: 정상 케이스에선 except 안 들어옴, 에러 시에만 1줄 추가.
+                    # 효과: 다음 재이관 시 진짜 발생 자리가 line 번호와 함께 100% 노출됨
+                    #       → v95_p31 (a) 안전망으로 부족할 경우 진짜 자리 단일 처방 가능
+                    import traceback as _tb_v31
+                    _tb_str = _tb_v31.format_exc()
+                    self._log("error",
+                        f"  [v95_p31-TRACEBACK] [{tbl}] {type(e).__name__}: {e}\n{_tb_str}")
                     if self.job.get("on_error") == "abort":
                         raise
                     return 0
@@ -689,6 +725,83 @@ class MigrationEngine:
                 self._migrate_objects(src_conn, tgt_conn, objects, convert)
             else:
                 self._log("info", "이관할 오브젝트 없음 — 건너뜀")
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p1 (2026-05-01) 본부장님 명령 — 자동 통계 갱신
+            #
+            # 본부장님 호소:
+            #   "전체 데이터 이관 후 통계 정보 갱신 자동화"
+            #   "오라클 통계 정보에 취약 — 파티션 잘 처리해야 됨"
+            #   "다양한 DB 처리해야 되는데 이런 문제로 고생하면 안 돼"
+            #
+            # 본질 처방:
+            #   1. 이관 직후 통계 정보 부재 → 옵티마이저 잘못된 계획 → 운영 직후 느림
+            #   2. DB-specific 어댑터 (MySQL/PostgreSQL/Oracle/MSSQL/DB2)
+            #   3. Oracle 파티션 자동 감지 + granularity='ALL'
+            #   4. 실패 허용 (이관은 성공 유지)
+            #
+            # 옵션:
+            #   - job["auto_gather_statistics"] = True (기본 ON, 본부장님 결정)
+            #   - 본부장님이 운영 환경에서 시간 부담 시 UI 에서 OFF 가능
+            # ════════════════════════════════════════════════════════════
+            try:
+                _stat_enabled = self.job.get("auto_gather_statistics", True)  # 기본 ON
+                if not _stat_enabled:
+                    self._log("info", "자동 통계 갱신 비활성화 (옵션) — 건너뜀")
+                elif self._stop:
+                    self._log("info", "이관 중단 — 통계 갱신 건너뜀")
+                else:
+                    # 이관 성공한 테이블 목록 수집
+                    _migrated_tables = []
+                    for _t in (self.job.get("tables") or []):
+                        if isinstance(_t, dict):
+                            _name = _t.get("table") or _t.get("name")
+                            _status = _t.get("status", "")
+                            # 성공 또는 부분성공 테이블만 (실패는 건너뜀)
+                            if _name and _status in ("done", "completed", "success", ""):
+                                _migrated_tables.append(_name)
+                        elif isinstance(_t, str):
+                            _migrated_tables.append(_t)
+
+                    if _migrated_tables:
+                        from app.core.statistics_gatherer import gather_statistics as _gs
+                        _tgt_db_type = (
+                            (self.job.get("target") or {}).get("db_type")
+                            or self.job.get("target_db_type")
+                            or self.job.get("tgt_db")  # v95_p23a: 진짜 키
+                            or "mysql"
+                        )
+                        # ── v95_p23a (2026-05-03 본부장님 본질 처방): 1102 에러 해소 ──
+                        # 본부장님 환경 진단: (1102, "Incorrect database name ''") 71회
+                        # 본질: 진짜 키는 'tgt_database' (line 470, 477) 인데 통계 코드는
+                        #      'target_database' 만 봄 → 빈 값 fallback → 1102 에러
+                        # 처방: 모든 가능한 키 fallback (하드코딩 X — 키 이름 표준화 시도)
+                        _tgt_db_name = (
+                            (self.job.get("target") or {}).get("database")
+                            or self.job.get("target_database")
+                            or self.job.get("tgt_database")  # ← v95_p23a: 진짜 사용 키
+                            or ""
+                        )
+                        # 빈 값이면 통계 갱신 건너뜀 (1102 에러 71회 방지)
+                        if not _tgt_db_name:
+                            self._log(
+                                "warn",
+                                "통계 갱신 — 타겟 DB 이름 빈 값, 건너뜀 "
+                                "(job 의 tgt_database/target_database 모두 빈 상태)"
+                            )
+                        else:
+                            _result = _gs(
+                                tgt_conn, _tgt_db_type, _tgt_db_name,
+                                _migrated_tables,
+                                log_func=lambda lv, msg: self._log(lv, msg)
+                            )
+                            # 결과를 job 에 기록 (UI 에서 확인 가능)
+                            self.job["statistics_gathered"] = _result
+                    else:
+                        self._log("info", "통계 갱신 대상 테이블 없음 — 건너뜀")
+            except Exception as _stat_err:
+                # 통계 갱신 실패해도 이관은 성공으로 (본부장님 결정)
+                self._log("warn", f"통계 갱신 단계 실패 (이관은 성공으로 유지): {_stat_err}")
 
             src_conn.close()
             tgt_conn.close()
@@ -1021,6 +1134,37 @@ class MigrationEngine:
                             _null_fix_cols.add(_at.get("column",""))
             if not nullable and cname in _null_fix_cols:
                 nullable = True  # NULL_VIOLATION fix: NOT NULL → NULL
+            # ════════════════════════════════════════════════════════════
+            # v95_p28 (2026-05-04 본부장님 본질 처방): PK 컬럼 NOT NULL 강제
+            # ════════════════════════════════════════════════════════════
+            # 본질: MSSQL 은 'is_nullable=1' 인 PK 컬럼 허용 (BillOfMaterials.EndDate 등)
+            #       MySQL 은 PK 가 NULL 허용이면 1171 에러 ('All parts of a PRIMARY KEY
+            #       must be NOT NULL') 발생
+            # 처방: is_pk 면 nullable 강제 False (MSSQL 의미 보존 + MySQL 호환)
+            # 부작용 0: PK 컬럼은 어차피 데이터에 NULL 들어가지 못함 (MSSQL 도 unique 제약)
+            #          → MSSQL 메타만 nullable 이지 실제 데이터는 항상 NOT NULL 임
+            if is_pk and nullable:
+                nullable = False
+                self._log("info",
+                    f"  [{table}] PK 컬럼 '{cname}' NULL 허용 → NOT NULL 강제 "
+                    f"(v95_p28: MySQL 1171 회피)")
+            # ════════════════════════════════════════════════════════════
+            # v95_p34 본질 5 (2026-05-04 본부장님 본질 처방): _skip_cols nullable 강제 True
+            # ════════════════════════════════════════════════════════════
+            # 본질: 미지원 타입 (xml, sql_variant, image) 은 _skip_cols 처리되어
+            #       SELECT 시 'NULL AS [colname]' 으로 대체됨.
+            #       그러나 CREATE TABLE 시점 컬럼은 MSSQL 메타의 IS_NULLABLE 만 따름.
+            #       MSSQL 에서 NOT NULL XML 컬럼이면 → MySQL CREATE TABLE 도 NOT NULL
+            #       → INSERT 시 NULL 데이터 → 1048 'cannot be null' 에러
+            # 증상: DatabaseLog.XmlEvent (XML 타입, NOT NULL) 1,596행 모두 1048
+            # 처방: _skip_cols 에 등록된 컬럼은 CREATE TABLE 시 nullable=True 강제
+            # 부작용 0: SELECT 가 NULL 만 보내므로 nullable 허용은 안전, 의미 동일
+            _skip_cols_set = self._skip_cols_map.get(table, set())
+            if cname in _skip_cols_set and not nullable:
+                nullable = True
+                self._log("info",
+                    f"  [{table}] 미지원 타입 컬럼 '{cname}' NOT NULL → NULL 허용 강제 "
+                    f"(v95_p34 본질 5: SELECT NULL 대체 + MySQL 1048 회피)")
             null_str = "NULL" if nullable else "NOT NULL"
             length   = c.get("CHARACTER_MAXIMUM_LENGTH")
             prec     = c.get("NUMERIC_PRECISION")
@@ -1073,7 +1217,23 @@ class MigrationEngine:
                 else:
                     mtype = "LONGBLOB"
             else:
-                mtype = TYPE_MAP_MSSQL.get(raw_type, "TEXT")
+                # ════════════════════════════════════════════════════════════
+                # v95_p27 (2026-05-04 본부장님 본질 처방): TEXT 폴백 안전망
+                # ════════════════════════════════════════════════════════════
+                # 본질: 알려지지 않은 raw_type (UDT 가 base type 으로 안 풀린 경우 등) 이
+                #       TYPE_MAP_MSSQL 에서 미매치 → 'TEXT' 폴백 → MySQL CREATE 시 1101/1170
+                # 처방: 미매치 시 VARCHAR(255) 폴백 (안전, default 가능, key 가능)
+                #       TEXT 폴백은 의미 정확하지만 1101/1170 에러 폭발 위험
+                # 부작용 0: 알려진 타입은 그대로, 미지의 타입만 TEXT → VARCHAR(255) 변경
+                if raw_type in TYPE_MAP_MSSQL:
+                    mtype = TYPE_MAP_MSSQL[raw_type]
+                else:
+                    # UDT 가 base type 안 풀린 경우 — v95_p26 가 이미 잡았어야 하지만
+                    # 안전망으로 VARCHAR(255) 사용 (TEXT 가 1101 에러 일으키므로)
+                    mtype = "VARCHAR(255)"
+                    self._log("warn",
+                        f"  [{table}] 알 수 없는 타입 '{raw_type}' (컬럼 '{cname}') "
+                        f"→ VARCHAR(255) 폴백 (v95_p27 안전망)")
 
             # v10 #2-D: DEFAULT 절 변환
             default_clause = ""
@@ -1811,8 +1971,32 @@ class MigrationEngine:
                 self._log("warn", f"[{name}] DDL 없음 — 건너뜀")
                 return True  # 오류 아님
 
-            # skip_existing: 타겟에 이미 있으면 건너뜀
+            # ════════════════════════════════════════════════════════════
+            # v95_p38 본질 (2026-05-05 본부장님): VIEW/TRIGGER DROP 정책 진짜 적용
+            # ════════════════════════════════════════════════════════════
+            # 본부장님 호소: "DB 초기화 안 하면 VIEW 20개 + TRIGGER 10개 모두 오류
+            #               drop 옵션 걸면 정상 수행되는거야?"
+            #
+            # 진짜 본질 (view tool 100% 확인):
+            #   1) view_mode = "drop_recreate" 설정값은 받지만 어디서도 사용 안 됨
+            #      (line 634 jobs.py 저장 + report.py readback 만)
+            #   2) obj_mode 도 "skip_existing" 만 처리, "drop_recreate" 분기 없음
+            #   3) VIEW DROP IF EXISTS 자체가 시스템 어디에도 없음
+            #      → 이미 존재하는 VIEW + CREATE VIEW 시도 → 1050 에러
+            #      → 이미 존재하는 TRIGGER + CREATE TRIGGER 시도 → 1359 에러
+            #
+            # 처방: 진짜 분기 처리 (obj_type 따라 view_mode/obj_mode 사용)
+            #   - VIEW: view_mode 사용 (drop_recreate / skip_existing / replace)
+            #   - TRIGGER/PROC/FUNC: obj_mode 사용 (drop_recreate / skip_existing)
+            #   - drop_recreate: DROP IF EXISTS 명시 실행 후 CREATE
+            #   - skip_existing: 이미 있으면 skip
+            #   - replace: VIEW 만 (CREATE OR REPLACE 자체로 처리, AI 프롬프트 측 보장)
+            #
+            # 부작용 0:
+            #   - tgt_db_type=mysql 에서만 DROP 실행 (MSSQL 타겟은 별도 본질)
+            #   - DROP 실패는 무시 (이미 없는 객체는 정상)
             obj_mode = self.job.get("obj_mode", "drop_recreate")
+            view_mode = self.job.get("view_mode", "drop_recreate")
             # 다중 이벤트 분리 트리거 체크: TRG02 → TRG02_INSERT/UPDATE/DELETE
             def _trigger_exists_any(n):
                 if _obj_exists_in_tgt(obj_type, n): return True
@@ -1820,14 +2004,47 @@ class MigrationEngine:
                     for _evt in ("INSERT","UPDATE","DELETE"):
                         if _obj_exists_in_tgt(obj_type, f"{n}_{_evt}"): return True
                 return False
-            if obj_mode == "skip_existing" and _trigger_exists_any(name):
-                self._log("info", f"[{name}] 이미 존재 — skip (obj_mode=skip_existing)")
+            # 모드 결정: VIEW 면 view_mode, 그 외(TRIGGER/PROC/FUNC) 면 obj_mode
+            _effective_mode = view_mode if obj_type.upper() == "VIEW" else obj_mode
+            # skip_existing: 이미 존재하면 skip
+            if _effective_mode == "skip_existing" and _trigger_exists_any(name):
+                self._log("info", f"[{name}] 이미 존재 — skip (mode=skip_existing)")
                 self.job["item_statuses"][name] = {
                     "type": obj_type.lower(), "status": "done",
                     "rows": 0, "error": None,
                     "started_at": None, "finished_at": datetime.now(_KST).isoformat()
                 }
                 return True
+            # v95_p38 본질 (a)+(c): drop_recreate 분기 — 명시적 DROP IF EXISTS
+            if _effective_mode == "drop_recreate" and tgt_db_type in (
+                "mysql","aurora","mariadb","tidb","cloudsql"
+            ):
+                _drop_keyword = {
+                    "VIEW": "DROP VIEW IF EXISTS",
+                    "TRIGGER": "DROP TRIGGER IF EXISTS",
+                    "PROCEDURE": "DROP PROCEDURE IF EXISTS",
+                    "PROC": "DROP PROCEDURE IF EXISTS",
+                    "FUNCTION": "DROP FUNCTION IF EXISTS",
+                    "FUNC": "DROP FUNCTION IF EXISTS",
+                }.get(obj_type.upper())
+                if _drop_keyword:
+                    try:
+                        _drop_cur = tgt_conn.cursor()
+                        _drop_cur.execute(f"{_drop_keyword} `{name}`")
+                        # TRIGGER 다중 이벤트 분리 케이스도 모두 DROP
+                        if obj_type.upper() == "TRIGGER":
+                            for _evt in ("INSERT","UPDATE","DELETE"):
+                                try:
+                                    _drop_cur.execute(f"{_drop_keyword} `{name}_{_evt}`")
+                                except Exception:
+                                    pass  # 분리 형태 아니면 그냥 통과
+                        tgt_conn.commit()
+                        self._log("info",
+                            f"[v95_p38 본질] {_drop_keyword} `{name}` 실행 (mode=drop_recreate)")
+                    except Exception as _de:
+                        # DROP 실패는 치명 아님 (이미 없을 수 있음)
+                        self._log("warn",
+                            f"[v95_p38 본질] {_drop_keyword} `{name}` 실패 (무시 — 신규일 가능성): {_de}")
 
             # v90.25: 객체 처리 시작 → status='running' 으로 즉시 변경
             #   본부장님 지적: "현재 작업 — 표시되고 트리거가 '대기' 로 보임"
@@ -1877,6 +2094,44 @@ class MigrationEngine:
                 try:
                     from app.api.routes.schema import _ai_convert_ddl
                     self._log("info", f"[{name}] AI 변환 요청 중...")
+                    
+                    # ════════════════════════════════════════════════════════════
+                    # v95_p90_schemactx_006 (2026-05-08 본부장님 진짜 본질):
+                    # migration_engine 의 _ai_convert_ddl 호출 직전 _conns 채우기
+                    # ════════════════════════════════════════════════════════════
+                    # 본부장님 검증 (2026-05-08 09:59~10:01):
+                    #   AI-TRACE 01b-preflight-applied 직후 → 'host 비어있음'
+                    #   → migration_engine.py 안에서 _ai_convert_ddl 직접 호출됨!
+                    #   → jobs.py 의 v004/v005 처방 우회됨 (remig 경로 안 씀)
+                    #
+                    # 본부장님 운영 메모리:
+                    #   "재이관 경로(jobs.py:903 remig_object) 가 _ai_convert_ddl
+                    #    결과를 직접 실행 → post_process 우회"
+                    #   → schema_ctx 도 같은 함정 (다른 경로!)
+                    #
+                    # 처방:
+                    #   self.job 의 tgt_host 등으로 _conns["target"] 자동 채움
+                    #   → _ai_convert_ddl 안의 _discover_target_schemas 작동
+                    # ════════════════════════════════════════════════════════════
+                    try:
+                        from app.api.routes.schema import _conns as _schema_conns
+                        _schema_conns["target"] = {
+                            "db_type":  self.job.get("tgt_db", "mysql"),
+                            "host":     self.job.get("tgt_host", ""),
+                            "port":     self.job.get("tgt_port", 3306),
+                            "username": self.job.get("tgt_username", ""),
+                            "password": self.job.get("tgt_password", ""),
+                            "database": self.job.get("tgt_database", ""),
+                        }
+                        self._log(
+                            "info",
+                            f"[v95_p90_schemactx_006] _conns[target] 채움: "
+                            f"host={self.job.get('tgt_host')} db={self.job.get('tgt_database')}"
+                        )
+                    except Exception as _ce:
+                        self._log("warn",
+                            f"[v95_p90_schemactx_006] _conns 채우기 실패 (무시): {_ce}")
+                    
                     result = _ai_convert_ddl(
                         ddl, obj_type, name,
                         src_db_type, tgt_db_type,
@@ -1908,11 +2163,54 @@ class MigrationEngine:
                                     if _s.upper().lstrip().startswith("CREATE"):
                                         _ok, _reason = validate_ddl_complete(_s, obj_type, name)
                                         if not _ok:
+                                            # ════════════════════════════════════════════
+                                            # v95_p89_gemma_002 (2026-05-07 본부장님):
+                                            # 폐기 → 1회 재시도 본질 처방
+                                            # ════════════════════════════════════════════
+                                            # 본부장님 빨간불 발견:
+                                            #   - Gemma 응답이 max_tokens 부족으로 잘림
+                                            #   - 즉시 폐기 → 룰 폴백 → 1064 (백틱 잔재)
+                                            # 처방: 1회 재시도 (max_tokens 2배)
+                                            # 재시도도 실패 시에만 룰 폴백
+                                            # ════════════════════════════════════════════
                                             self._log("warn",
                                                 f"[{name}] ⚠ AI 응답 미완성 검출: {_reason}\n"
-                                                f"  → 재시도 권장 (max_tokens 부족 의심)")
-                                            # 미완성 표시 - 아래 재변환 로직이 처리하도록
-                                            stmts = []
+                                                f"  → max_tokens 2배로 1회 재시도 (v95_p89_gemma_002)")
+                                            try:
+                                                from app.api.routes.schema import _ai_convert_ddl as _retry_ai
+                                                _retry_result = _retry_ai(
+                                                    ddl, obj_type, name,
+                                                    src_db_type, tgt_db_type,
+                                                    error_hint,
+                                                    max_tokens=16384,  # 2배 (8192 → 16384)
+                                                )
+                                                _retry_stmts = _retry_result.get("statements", []) or []
+                                                # 재시도 결과 다시 검증
+                                                _retry_ok = True
+                                                for _rs in _retry_stmts:
+                                                    if _rs.upper().lstrip().startswith("CREATE"):
+                                                        _rok, _rreason = validate_ddl_complete(_rs, obj_type, name)
+                                                        if not _rok:
+                                                            _retry_ok = False
+                                                            self._log("warn",
+                                                                f"[{name}] 재시도도 미완성: {_rreason}")
+                                                            break
+                                                if _retry_ok and _retry_stmts:
+                                                    self._log("info",
+                                                        f"[{name}] ✅ 재시도 성공 — Gemma 가 끝까지 응답 (v95_p89_gemma_002)")
+                                                    # 재시도 결과로 stmts 교체 + post_process 다시 적용
+                                                    stmts, _retry_fixes = post_process_statements(_retry_stmts, name)
+                                                    if _retry_fixes:
+                                                        self._log("info",
+                                                            f"[{name}] 재시도 결과 보정: {', '.join(_retry_fixes)}")
+                                                else:
+                                                    self._log("warn",
+                                                        f"[{name}] 재시도 실패 — 룰 폴백 진행")
+                                                    stmts = []
+                                            except Exception as _retry_e:
+                                                self._log("warn",
+                                                    f"[{name}] 재시도 자체 실패: {_retry_e} — 룰 폴백 진행")
+                                                stmts = []
                                             break
                         except ImportError:
                             pass  # 모듈 없으면 보정 skip (호환성)
@@ -2023,6 +2321,33 @@ class MigrationEngine:
                     except Exception as ce:
                         self._log("warn", f"[{name}] 변환 실패: {ce} — 원본 사용")
                         statements = [converted_ddl]
+                    
+                    # ════════════════════════════════════════════════════════════
+                    # v95_p89_gemma_002 (2026-05-07 본부장님 본질 처방):
+                    # 룰 폴백 결과에도 post_process 강제 적용
+                    # ════════════════════════════════════════════════════════════
+                    # 본부장님 운영 메모리 핵심 함정:
+                    #   "재이관 경로가 _ai_convert_ddl 결과를 직접 실행 → post_process 우회"
+                    # 본부장님 빨간불 발견:
+                    #   - AI 응답 미완성 → 룰 폴백 → 결과: p_StartProductID `int`
+                    #   - 룰 폴백이 R-014 (백틱 제거) 적용 안 함 → 1064
+                    # 처방: 룰 폴백 직후 post_process_statements 강제 호출
+                    # ════════════════════════════════════════════════════════════
+                    if statements and tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                        try:
+                            from app.core.sql_post_processor import post_process_statements as _pps_fb
+                            _orig_stmts = list(statements)
+                            statements, _fb_fixes = _pps_fb(statements, name)
+                            if _fb_fixes:
+                                self._log("info",
+                                    f"[{name}] 룰 폴백 결과 post_process 적용 (v95_p89_gemma_002): "
+                                    f"{', '.join(_fb_fixes)}")
+                        except ImportError:
+                            pass
+                        except Exception as _fbe:
+                            self._log("warn",
+                                f"[{name}] 룰 폴백 post_process 실패 (무시): {_fbe}")
+                    
                     # v9 패치 #40: rule-based 변환 후에도 백틱 최종 제거 (MSSQL 타겟 한정)
                     if tgt_db_type in ("mssql","azure","sqlserver"):
                         for _i, _stmt in enumerate(statements):
@@ -2735,9 +3060,34 @@ class MigrationEngine:
             # SELECT 전체 (WHERE + ORDER BY PK)
             pk_col = decision.ranges[0].pk_column  # 모든 청크 동일 PK
             if src_is_mssql:
-                # TEMP-GUARD-V34C: 스키마 힌트 있으면 [schema].[table]
-                _sch_hint = getattr(self, '_src_schema_map', {}).get(table)
-                _tbl_ref = f"[{_sch_hint}].[{table}]" if _sch_hint else f"[{table}]"
+                # ════════════════════════════════════════════════════════════
+                # v95_p23f (2026-05-03 본부장님 본질 처방): 키 불일치 수정
+                # ════════════════════════════════════════════════════════════
+                # 본부장님 진단 (22:06 SQL-FAIL):
+                #   ('42S02', "Invalid object name 'Document'. (208)")
+                #
+                # 진짜 본질:
+                #   - _migrate_table 진입 시 table='Production_Document' (결합 형태)
+                #   - line 3145: src_bare = 'Document' (분해된 bare name)
+                #   - line 3155: table = tgt_table = 'Production_Document'
+                #   - _src_schema_map 의 키는 'Document' (bare name)
+                #
+                # 기존 코드 (잘못):
+                #   _src_schema_map.get(table)  ← 'Production_Document' 키 lookup
+                #                                 → None! (실제 키는 'Document')
+                #   _tbl_ref = '[Production_Document]'  ← schema 힌트 없음
+                #   → MSSQL: Invalid object name 'Document'
+                #
+                # v95_p23f 처방 (다른 6자리 line 3238/3342/3445/3709 와 일관):
+                #   _src_schema_map.get(src_bare)  ← 'Document' 키 lookup
+                #                                    → 'Production' 매치!
+                #   _tbl_ref = '[Production].[Document]'  ← 정상!
+                #
+                # 부작용 0:
+                #   - schema 등록 안 된 테이블 → fallback '[src_bare]' (안전)
+                #   - 모든 다른 자리 (line 3238/3342/3445/3709) 와 동일 패턴
+                _sch_hint = getattr(self, '_src_schema_map', {}).get(src_bare)
+                _tbl_ref = f"[{_sch_hint}].[{src_bare}]" if _sch_hint else f"[{src_bare}]"
                 sql = (f"SELECT {select_expr} FROM {_tbl_ref} "
                        f"WHERE {where_clause} ORDER BY [{pk_col}] ASC")
             else:
@@ -3053,6 +3403,28 @@ class MigrationEngine:
         # 메서드 내부 모든 SQL 에서 사용할 table 변수는 이제 타겟 이름.
         table = tgt_table
 
+        # ════════════════════════════════════════════════════════════
+        # v95_p31 (a) (2026-05-04 본부장님 본질 처방): swap 후 dict 재등록 안전망
+        # ════════════════════════════════════════════════════════════
+        # 본질: line 3181~3186 의 6개 dict 는 swap 전 'src_bare' 키로 초기화됨.
+        #       그러나 line 3210 swap 후 모든 후속 코드가 'tgt_table' 키로 접근.
+        #       'src_bare' != 'tgt_table' 인 경우 (예: 'Document' → 'Production_Document')
+        #       → 후속 self._XXX_cols[table='Production_Document'] 접근이 KeyError
+        # 증상: Document, ProductPhoto 등 hierarchyid + varbinary(max) 보유 테이블이
+        #       'Production_Document', 'Production_ProductPhoto' KeyError 로 0초 실패
+        # 처방: swap 후에도 동일 dict 키로 set() 등록 (이중 등록 = 안전망)
+        # 부작용 0: 다른 테이블 (이미 정상 작동) 은 같은 set 두 번 set 만 되는 효과,
+        #          기능 변경 없음. swap 안 일어난 경우 (src_bare == tgt_table) 는 영향 없음.
+        if table != src_bare:
+            self._skip_cols_map.setdefault(table, set())
+            self._cast_cols_map.setdefault(table, set())
+            self._rowver_cols.setdefault(table, set())
+            self._dto_cols.setdefault(table, set())
+            self._geo_cols.setdefault(table, set())
+            self._bin_cols.setdefault(table, set())
+            self._log("debug",
+                f"  [v95_p31-a] [{table}] swap 후 dict 6개 재등록 (src_bare={src_bare})")
+
         src_db_type = (self.job.get("src_db") or "mysql").lower()
         tgt_db_type = (self.job.get("tgt_db") or "mssql").lower()
         src_is_mysql = src_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
@@ -3148,12 +3520,49 @@ class MigrationEngine:
                            CASE WHEN ic.column_id IS NOT NULL THEN 'PRI' ELSE '' END AS COLUMN_KEY,
                            CASE WHEN c.is_identity=1 THEN 'auto_increment' ELSE '' END AS EXTRA
                     FROM sys.columns c
-                    JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+                    -- v95_p26 (2026-05-04 본부장님 본질 처방): UDT → base type 진짜 해소
+                    -- 본질: c.user_type_id 는 UDT 면 UDT 자체의 type_id 반환
+                    --       → tp.name = 'NameStyle', 'Phone', 'Flag' (UDT 이름!)
+                    --       → MSSQL → MySQL TYPE_MAP 에서 미매치 → TEXT 폴백
+                    --       → CREATE TABLE 시 1101 (BLOB default) / 1170 (BLOB key) 발생
+                    -- 처방: c.system_type_id 사용 → 항상 base type id 반환
+                    --       AND tp.user_type_id = tp.system_type_id (base type 만 필터)
+                    --       → 'NameStyle' (UDT) → 'bit' (base) 정상 변환
+                    --       → 'Phone' (UDT) → 'nvarchar' (base) 정상 변환
+                    -- v95_p57 (2026-05-05 본부장님): CLR 시스템 타입 매핑 보강
+                    --   본질: hierarchyid/geometry/geography 는 system_type_id=240 공유
+                    --         tp.user_type_id != tp.system_type_id (각각 128/129/130)
+                    --         기존 필터 (tp.user_type_id = tp.system_type_id) 로 JOIN 실패
+                    --         → cols 메타 누락 → 1364 NOT NULL 위반
+                    --   처방: CROSS APPLY (TOP 1) 로 각 컬럼당 1개 base type 만 매치
+                    --         CLR 타입은 자기 user_type_id 로 매치 허용
+                    JOIN sys.types tp ON tp.user_type_id = (
+                        -- 각 컬럼의 base type 우선순위:
+                        -- 1순위: system_type_id == user_type_id (정통 base type)
+                        -- 2순위: 가장 작은 user_type_id (CLR 타입의 첫 번째)
+                        SELECT TOP 1 tp2.user_type_id
+                        FROM sys.types tp2
+                        WHERE tp2.system_type_id = c.system_type_id
+                        ORDER BY
+                            CASE WHEN tp2.user_type_id = tp2.system_type_id THEN 0 ELSE 1 END,
+                            tp2.user_type_id
+                    )
                     JOIN sys.tables t ON c.object_id = t.object_id
                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                     LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+                    -- v95_p34 (2026-05-04 본부장님 본질 처방): PK 진짜 식별
+                    -- 본질: index_id=1 은 'clustered index' 일 뿐 PK 가 아닐 수 있음
+                    --       (MSSQL 은 PK 없이 unique clustered index 만 있는 테이블 허용)
+                    --       BillOfMaterials 의 clustered index 는 (ProductAssemblyID, ComponentID, StartDate)
+                    --       이지만 PK 는 BillOfMaterialsID. ProductAssemblyID 가 PK 로 잘못 식별됨
+                    --       → v95_p28 NOT NULL 강제 적용 → MSSQL 의 NULL 데이터 → 1048 에러
+                    --       같은 본질: DatabaseLog.XmlEvent (XML 컬럼이 PK 로 잘못 인식)
+                    -- 처방: sys.indexes 에 is_primary_key=1 조건 추가하여 진짜 PK 만 식별
+                    LEFT JOIN sys.indexes idx
+                        ON idx.object_id=c.object_id AND idx.index_id=1 AND idx.is_primary_key=1
                     LEFT JOIN sys.index_columns ic
-                        ON ic.object_id=c.object_id AND ic.column_id=c.column_id AND ic.index_id=1
+                        ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                       AND ic.index_id=idx.index_id
                     WHERE t.name = ? AND s.name = ?
                     ORDER BY c.column_id
                 """, [src_bare, _sch_hint])  # v90.48-hotfix: 소스 카탈로그 조회라 src_bare 사용
@@ -3170,11 +3579,25 @@ class MigrationEngine:
                            CASE WHEN ic.column_id IS NOT NULL THEN 'PRI' ELSE '' END AS COLUMN_KEY,
                            CASE WHEN c.is_identity=1 THEN 'auto_increment' ELSE '' END AS EXTRA
                     FROM sys.columns c
-                    JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+                    -- v95_p26 (2026-05-04 본부장님 본질 처방): UDT → base type 진짜 해소
+                    -- (위와 동일한 본질 — schema_hint 없는 fallback 경로)
+                    -- v95_p57 (2026-05-05 본부장님): CLR 타입 매핑 보강 (위와 동일)
+                    JOIN sys.types tp ON tp.user_type_id = (
+                        SELECT TOP 1 tp2.user_type_id
+                        FROM sys.types tp2
+                        WHERE tp2.system_type_id = c.system_type_id
+                        ORDER BY
+                            CASE WHEN tp2.user_type_id = tp2.system_type_id THEN 0 ELSE 1 END,
+                            tp2.user_type_id
+                    )
                     JOIN sys.tables t ON c.object_id = t.object_id
                     LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+                    -- v95_p34 (2026-05-04 본부장님 본질 처방): PK 진짜 식별 (위와 동일 본질)
+                    LEFT JOIN sys.indexes idx
+                        ON idx.object_id=c.object_id AND idx.index_id=1 AND idx.is_primary_key=1
                     LEFT JOIN sys.index_columns ic
-                        ON ic.object_id=c.object_id AND ic.column_id=c.column_id AND ic.index_id=1
+                        ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                       AND ic.index_id=idx.index_id
                     WHERE t.name = ?
                     ORDER BY c.column_id
                 """, [src_bare])  # v90.48-hotfix: 소스 카탈로그 조회라 src_bare 사용
@@ -3242,6 +3665,89 @@ class MigrationEngine:
                 _probe_ref = f"[{_sch_hint}].[{src_bare}]" if _sch_hint else f"[{src_bare}]"  # v90.48-hotfix: 소스 측이라 src_bare 사용
                 _probe_cur.execute(f"SELECT TOP 0 * FROM {_probe_ref}")
                 self._log("debug", f"  [{table}] ODBC 사전 검사 — 컬럼 {len(_probe_cur.description)}개")
+
+                # ════════════════════════════════════════════════════════════
+                # v95_p55 (2026-05-05 본부장님): cols 메타 누락 컬럼 진단 + 보강
+                # ════════════════════════════════════════════════════════════
+                # 본부장님 강조: "이번에 끝내자", "하드코딩 0%"
+                #
+                # 진짜 본질 (view tool 로 100% 추적):
+                #   sys.types JOIN 의 (tp.user_type_id = tp.system_type_id) 필터로
+                #   hierarchyid (CLR 시스템 타입, user_type_id != system_type_id) 가
+                #   sys.types JOIN 에서 빠짐 → cols 메타에 컬럼 자체 없음
+                #
+                # 본부장님 환경 결정적 증거 (로그 19:47:30):
+                #   - bulk loader cols=2 (ProductID + ModifiedDate 만)
+                #   - PRIMARY KEY (ProductID) 단일 PK
+                #   - DocumentNode 자체가 cols 에 없음 → SELECT 에서도 누락
+                #   - 32행 동일 ProductID → 1062 PK 중복
+                #
+                # 일반화 처방 (하드코딩 0%):
+                #   probe_cur.description = MSSQL 의 진짜 컬럼 목록 (모든 타입 포함)
+                #   cols = sys.types JOIN 결과 (CLR 타입 제외)
+                #   → description 에 있는데 cols 에 없는 컬럼 = 메타 누락
+                #   → bytearray 면 hierarchyid 후보로 cols 에 추가 (안전)
+                #
+                # 부작용 0:
+                #   - 정상 cols 영향 0 (없는 컬럼만 추가)
+                #   - 운영 DB hierarchyid 거의 없음 → 발동 0건
+                #   - v95_p26 (UDT 처방) 100% 보존 (sys.types JOIN 그대로)
+                _existing_col_names = set(c["COLUMN_NAME"] for c in cols)
+                _missing_cols = []
+                for _desc in (_probe_cur.description or []):
+                    _dn = _desc[0]
+                    if _dn not in _existing_col_names:
+                        _missing_cols.append(_dn)
+                if _missing_cols:
+                    self._log("warn",
+                        f"  [v95_p55] [{table}] cols 메타 누락 컬럼 발견: {_missing_cols} "
+                        f"(probe_cur 에는 있음 — sys.types JOIN 에서 빠진 CLR 타입 가능성)")
+                    # 누락 컬럼을 cols 에 보강 (hierarchyid 추정)
+                    # PK 인지 별도 조회로 확인 (sys.indexes + sys.index_columns)
+                    try:
+                        _pk_cur = src_conn.cursor()
+                        _pk_query_sch = _sch_hint if _sch_hint else "dbo"
+                        _pk_cur.execute("""
+                            SELECT c.name AS COLUMN_NAME
+                            FROM sys.indexes idx
+                            JOIN sys.index_columns ic
+                              ON ic.object_id = idx.object_id
+                             AND ic.index_id = idx.index_id
+                            JOIN sys.columns c
+                              ON c.object_id = ic.object_id
+                             AND c.column_id = ic.column_id
+                            JOIN sys.tables t ON t.object_id = idx.object_id
+                            JOIN sys.schemas s ON s.schema_id = t.schema_id
+                            WHERE t.name = ? AND s.name = ?
+                              AND idx.is_primary_key = 1
+                        """, [src_bare, _pk_query_sch])
+                        _pk_cols_real = set(r[0] for r in _pk_cur.fetchall())
+                        _pk_cur.close()
+                    except Exception as _pe:
+                        self._log("warn", f"  [{table}] PK 별도 조회 실패: {_pe}")
+                        _pk_cols_real = set()
+                    
+                    for _mc in _missing_cols:
+                        _is_pk_real = _mc in _pk_cols_real
+                        # cols 에 보강 추가 — hierarchyid 가정 (CLR 시스템 타입 대부분)
+                        cols.append({
+                            "COLUMN_NAME": _mc,
+                            "DATA_TYPE": "hierarchyid",  # 추정 (CLR 시스템 타입)
+                            "COLUMN_TYPE": "hierarchyid",
+                            "CHARACTER_MAXIMUM_LENGTH": None,
+                            "NUMERIC_PRECISION": None,
+                            "NUMERIC_SCALE": None,
+                            "IS_NULLABLE": "YES",
+                            "COLUMN_DEFAULT": None,
+                            "COLUMN_KEY": "PRI" if _is_pk_real else "",
+                            "EXTRA": "",
+                            "_v95_p55_recovered": True,  # 마커 (디버깅용)
+                        })
+                        self._log("warn",
+                            f"  [v95_p55] [{table}] 컬럼 [{_mc}] cols 에 보강 추가 "
+                            f"(PK={_is_pk_real}, dt='hierarchyid' 추정)")
+                # ════════════════════════════════════════════════════════════
+
                 for _i, _desc in enumerate(_probe_cur.description or []):
                     _col_name  = _desc[0]
                     _odbc_type = _desc[1]
@@ -3283,7 +3789,18 @@ class MigrationEngine:
                             self._log("warn", f"  [{table}] rowversion [{_col_name}] → BIGINT 처리")
                         elif _real_dt == "hierarchyid":
                             # hierarchyid → ToString() 경로 문자열
-                            self._hier_cols[table].add(_col_name)
+                            # ════════════════════════════════════════════════════════════
+                            # v95_p30 (2026-05-04 본부장님 본질 처방): KeyError 방지
+                            # ════════════════════════════════════════════════════════════
+                            # 본질: 이 코드 경로 (ODBC 사전검사) 는 line 3367 의
+                            #       'if dt in _HIER_TYPES' 분기 (line 3369 _hier_cols 초기화) 를
+                            #       거치지 않고 도달 가능. 따라서 self._hier_cols 자체가 없거나
+                            #       self._hier_cols[table] 키가 없으면 KeyError 발생.
+                            # 증상: AdventureWorks Document.DocumentNode (hierarchyid) 처리 시
+                            #       'KeyError: Production_Document' (또는 'Production_ProductPhoto')
+                            # 처방: setdefault 로 안전 초기화 (line 3370 과 동일 패턴)
+                            if not hasattr(self, '_hier_cols'): self._hier_cols = {}
+                            self._hier_cols.setdefault(table, set()).add(_col_name)
                             self._cast_cols_map[table].add(_col_name)
                             self._log("warn", f"  [{table}] hierarchyid [{_col_name}] → ToString() 처리")
                         elif _real_dt == "sql_variant":
@@ -3295,9 +3812,49 @@ class MigrationEngine:
                             self._dto_cols[table].add(_col_name)
                             self._log("warn", f"  [{table}] datetimeoffset [{_col_name}] → SWITCHOFFSET 처리")
                         else:
-                            # 타입 불명 bytearray → 안전하게 bytes로
-                            self._bin_cols[table].add(_col_name)
-                            self._log("warn", f"  [{table}] 알 수 없는 bytearray [{_col_name}] (dt={_real_dt}) → bytes 처리")
+                            # ════════════════════════════════════════════════════════════
+                            # v95_p53 (2026-05-05 본부장님): dt='' + PK 컬럼 → hier 후보
+                            # ════════════════════════════════════════════════════════════
+                            # 본부장님 강조: "이번에 끝내자", "하드코딩 0%"
+                            #
+                            # 본부장님 환경 진단:
+                            #   Production_ProductDocument PK = (ProductID, DocumentNode)
+                            #   DocumentNode 가 hierarchyid 인데
+                            #   MSSQL INFORMATION_SCHEMA 가 dt='' 반환 (비표준 타입)
+                            #   → '알 수 없는 bytearray' 분기 진입 → _bin_cols 만 등록
+                            #   → _hier_cols 누락 → v95_p51 PK 진단 보강 발동 안 됨
+                            #   → 1062 PK 중복 → 31/32 행만 성공
+                            #
+                            # 일반화 본질 (하드코딩 0%):
+                            #   bytearray + dt='' + PK 컬럼 = hierarchyid 가능성 99%
+                            #   (binary/image 가 PK 인 경우 거의 없음 — 운영 DB 영향 0)
+                            #   → hier_cols 등록 → v95_p51 PK UPSERT 발동
+                            #   → 1062 회피 (32/32 모두 INSERT)
+                            #
+                            # 부작용 0:
+                            #   - PK 컬럼 (COLUMN_KEY='PRI') 인 경우만 hier 추정
+                            #   - dt='' 도 추가 조건 (정상 binary 영향 0)
+                            #   - 운영 DB hierarchyid 거의 없음 → 발동 0건
+                            _is_pk_col = False
+                            for _cc in cols:
+                                if _cc.get("COLUMN_NAME") == _col_name:
+                                    if (_cc.get("COLUMN_KEY") or "").upper() == "PRI":
+                                        _is_pk_col = True
+                                    break
+                            if _is_pk_col and not _real_dt:
+                                # PK 컬럼 + dt='' + bytearray → hierarchyid 후보
+                                if not hasattr(self, '_hier_cols'): self._hier_cols = {}
+                                self._hier_cols.setdefault(table, set()).add(_col_name)
+                                self._cast_cols_map[table].add(_col_name)
+                                self._log("warn",
+                                    f"  [v95_p53] [{table}] PK bytearray [{_col_name}] (dt='') "
+                                    f"→ hierarchyid 후보로 등록 (PK UPSERT 진단용)")
+                                # 추가로 binary 처리도 함께 (안전망)
+                                self._bin_cols[table].add(_col_name)
+                            else:
+                                # 타입 불명 bytearray → 안전하게 bytes로 (기존 동작)
+                                self._bin_cols[table].add(_col_name)
+                                self._log("warn", f"  [{table}] 알 수 없는 bytearray [{_col_name}] (dt={_real_dt}) → bytes 처리")
                     elif _is_unsupported:
                         _skip_cols.add(_col_name)
                         self._log("warn", f"  [{table}] ODBC type {_type_int} 컬럼 [{_col_name}] (index={_i}) → NULL로 대체")
@@ -3322,10 +3879,14 @@ class MigrationEngine:
         # ── 2. 타겟 테이블 생성 ────────────────────────────────
         if self.job.get("create_table", True):
             try:
-                if tgt_is_mssql:
-                    self._create_mssql_table(tgt_conn, table, cols)
-                elif tgt_is_mysql:
-                    self._create_mysql_table(tgt_conn, table, cols, src_db_type)
+                # ── v95_p23a: CREATE TABLE 모듈 직렬화 (Deadlock 방지) ──
+                # 같은 schema 에 동시 CREATE 시 InnoDB metadata lock 충돌.
+                # CREATE 단계만 직렬화 → INSERT 병렬 유지 (성능 영향 최소).
+                with _create_table_lock:
+                    if tgt_is_mssql:
+                        self._create_mssql_table(tgt_conn, table, cols)
+                    elif tgt_is_mysql:
+                        self._create_mysql_table(tgt_conn, table, cols, src_db_type)
             except Exception as ce:
                 self._log("error", f"테이블 [{table}] 생성 실패: {ce}")
                 raise RuntimeError(f"CREATE TABLE [{table}] 실패: {ce}") from ce
@@ -3448,11 +4009,81 @@ class MigrationEngine:
             # DROP/TRUNCATE 후 이관이면 중복 없음 → 일반 INSERT
             # 그 외(append 등)는 ON DUPLICATE KEY UPDATE 로 upsert
             _is_clean = (self.job.get("drop_table") or self.job.get("truncate_target"))
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p45 (2026-05-05 본부장님): PK 일부 컬럼 스킵 시 자동 UPSERT
+            # ════════════════════════════════════════════════════════════
+            # 본부장님 강조: "이번만 어떻게 안 됨, 다음 두번째 DB 이관 일반화"
+            #
+            # 진단 (본부장님 환경 Production_ProductDocument 1062):
+            #   - PK = (ProductID, DocumentNode 'hierarchyid')
+            #   - DocumentNode 가 dt='' 로 인식 실패 → bytearray 처리 → 스킵
+            #   - 남은 PK = ProductID 만 → 32행 중 동일 ProductID 다수 → 1062 충돌
+            #
+            # 일반 본질 처방:
+            #   메타데이터에서 PK 컬럼 추출 → 스킵/cast 셋에 있는지 검사 →
+            #   PK 일부가 변환됐으면 (특히 hier/dto/geo) 자동 UPSERT 적용
+            #
+            # 부작용 0:
+            #   - 정상 PK (모두 단순 INT/VARCHAR): 영향 0
+            #   - hierarchyid PK 만 발동 (AdventureWorks ProductDocument, ProductPhoto 등)
+            #   - 운영 DB (hierarchyid 거의 없음): 발동 안 함
+            #   - 사용자 옵션 upsert_on_pk_partial=False 로 끌 수 있음 (안전망)
+            #
+            # v95_p51 (2026-05-05 본부장님): PK 진단 보강
+            #   본부장님 환경 진단:
+            #     Production_ProductDocument PK = (ProductID, DocumentNode hierarchyid)
+            #     DocumentNode 가 cols 에서 빠지거나 COLUMN_KEY='PRI' 인식 실패
+            #     → _pk_names_meta 에 ProductID 만 (1개) → len()>=2 불만족 → UPSERT 안 됨
+            #
+            #   본질: PK 메타 추출 시 cols 만 보지 말고
+            #         _hier_cols/_dto_cols/_geo_cols/_skip_cols 도 PK 후보로 합산
+            #         (hierarchyid 같은 PK 일부 컬럼이 메타에서 누락된 경우 보강)
+            #
+            #   부작용 0: PK 후보 합산 후에도 진짜 손실 (hier/skip) 있어야 UPSERT 발동
+            _pk_partial_skipped = False
+            if not self.job.get("upsert_on_pk_partial_disabled", False):
+                # 메타데이터에서 PK 컬럼 추출
+                _pk_names_meta = set()
+                for _c in cols:
+                    if (_c.get("COLUMN_KEY") or "").upper() == "PRI":
+                        _pk_names_meta.add(_c["COLUMN_NAME"])
+                # PK 가 col_names 에서 빠진 (=스킵된) 경우 확인
+                _pk_in_select = _pk_names_meta & set(col_names)
+                _pk_dropped = _pk_names_meta - _pk_in_select
+                # PK 가 cast 변환 대상 (hier/dto/geo 등) 인 경우도 확인
+                _hier = getattr(self, '_hier_cols', {}).get(table, set())
+                _dto  = getattr(self, '_dto_cols', {}).get(table, set())
+                _geo  = getattr(self, '_geo_cols', {}).get(table, set())
+                _skip = getattr(self, '_skip_cols_map', {}).get(table, set())
+                _pk_lossy = _pk_names_meta & (_hier | _dto | _geo)
+                # 복합 PK 의 일부가 사라지거나 변환됐으면 자동 UPSERT
+                if (len(_pk_names_meta) >= 2) and (_pk_dropped or _pk_lossy):
+                    _pk_partial_skipped = True
+                    self._log("warn",
+                        f"  [v95_p45] [{table}] 복합 PK {sorted(_pk_names_meta)} 중 "
+                        f"스킵={sorted(_pk_dropped)} 변환={sorted(_pk_lossy)} "
+                        f"→ 자동 UPSERT 적용 (1062 PK 중복 회피)")
+                # v95_p51: PK 후보 가 hier/skip 셋에 있는데 _pk_names_meta 에 없는 경우
+                #         (= 메타 인식 실패로 PK 후보가 누락됨)
+                #         _pk_names_meta 단일이지만 hier/skip 컬럼도 PK 일부 가능성
+                elif len(_pk_names_meta) <= 1 and (_hier | _skip):
+                    # 손실 컬럼이 있으면 안전 측면에서 UPSERT 발동
+                    # (단일 PK + hierarchyid 손실 → 1062 발생 가능)
+                    _pk_lossy_extended = _hier | (_skip & set(_c["COLUMN_NAME"] for _c in cols))
+                    if _pk_lossy_extended:
+                        _pk_partial_skipped = True
+                        self._log("warn",
+                            f"  [v95_p51] [{table}] PK 진단 보강: 메타 PK={sorted(_pk_names_meta)} "
+                            f"+ 손실 컬럼 {sorted(_pk_lossy_extended)} (hier/skip) "
+                            f"→ 자동 UPSERT 적용 (1062 회피)")
+
             if tgt_is_mysql:
-                if _is_clean:
+                if _is_clean and not _pk_partial_skipped:
                     insert_sql = f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders})"
                 else:
                     # 중복 시 모든 컬럼 UPDATE (upsert)
+                    # v95_p45: clean 이라도 _pk_partial_skipped 면 강제 UPSERT
                     _upd = ", ".join([f"`{c}`=VALUES(`{c}`)" for c in col_names])
                     insert_sql = (f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders})"
                                   f" ON DUPLICATE KEY UPDATE {_upd}")

@@ -67,6 +67,19 @@
                   :style="`background:${getScenario(rec.scenario_id)?.badge.color}; color:#fff`">
               {{ getScenario(rec.scenario_id)?.badge.text }}
             </span>
+            
+            <!-- ════════════════════════════════════════════════════════ -->
+            <!-- v95_p89_ux_fix (2026-05-07 본부장님 본질 정정):            -->
+            <!-- 최근 사용 카드 우하단 ✕ 삭제 버튼                          -->
+            <!-- 본부장님 호소: "이관시나리오 삭제는 최근 이관했던 것       -->
+            <!--                나타내는 카드 오른쪽 아래"                   -->
+            <!-- 효과: '151회 사용' 옆에 ✕ → 클릭 → 최근 이력에서 제거      -->
+            <!-- ════════════════════════════════════════════════════════ -->
+            <button class="ms-card-delete"
+                    @click.stop="deleteScenarioHistory(rec.scenario_id, getScenario(rec.scenario_id)?.name)"
+                    :title="`'${getScenario(rec.scenario_id)?.name}' 을 최근 사용 이력에서 제거`">
+              ✕
+            </button>
           </div>
         </div>
       </div>
@@ -231,6 +244,50 @@ async function loadHistory() {
     recentHistory.value = []
   } finally {
     loading.value = false
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// v95_p89_ux (2026-05-07 본부장님 본질 처방): 시나리오 이력 삭제
+// ════════════════════════════════════════════════════════════════
+// 본부장님 비전: 안 쓰는 시나리오는 최근 이력에서 제거 → 가독성 ↑
+//
+// 처방:
+//   1) hasRecentUsage(id) — 최근 이력에 있는지 (있으면 ✕ 버튼 표시)
+//   2) deleteScenarioHistory(id, name) — 확인 후 이력 제거
+//      낙관적 업데이트 + 백엔드 DELETE 호출 (404 무시)
+// ════════════════════════════════════════════════════════════════
+function hasRecentUsage(scenarioId) {
+  return recentHistory.value.some(h => h.scenario_id === scenarioId)
+}
+
+async function deleteScenarioHistory(scenarioId, scenarioName) {
+  if (!confirm(`'${scenarioName}' 시나리오를 최근 사용 이력에서 제거하시겠습니까?\n\n` +
+               `(시나리오 자체는 그대로 — 최근 이력에서만 제거)`)) {
+    return
+  }
+  // 낙관적 업데이트
+  const prev = [...recentHistory.value]
+  recentHistory.value = recentHistory.value.filter(h => h.scenario_id !== scenarioId)
+  
+  // 백엔드 DELETE
+  try {
+    const r = await fetch(
+      `/api/v1/user/preferences/scenarios/${encodeURIComponent(scenarioId)}`,
+      { method: 'DELETE', credentials: 'include' }
+    )
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}))
+      if (data.items) recentHistory.value = data.items
+    } else if (r.status !== 404) {
+      // 404 (라우터 미등록) 외 에러 → 롤백
+      recentHistory.value = prev
+      alert(`삭제 실패: HTTP ${r.status}`)
+    }
+    // 404 면 낙관적 업데이트 유지 (백엔드 라우터 미등록이어도 화면에서는 사라짐)
+  } catch (e) {
+    console.warn('[Scenario] 삭제 실패:', e.message)
+    // 네트워크 에러 — 낙관적 업데이트 유지
   }
 }
 
@@ -497,6 +554,47 @@ onMounted(loadHistory)
 .ms-list-item.ms-sel .ms-list-arrow {
   color: #14b8a6;
   font-weight: 700;
+}
+
+/* ════════════════════════════════════════════════════════════ */
+/* v95_p89_ux_fix (2026-05-07 본부장님 본질 정정):              */
+/* 최근 사용 카드 (큰 카드) 우하단 ✕ 삭제 버튼                   */
+/* 본부장님 호소: "최근 이관했던 것 나타내는 카드 오른쪽 아래"   */
+/* ════════════════════════════════════════════════════════════ */
+.ms-card-recent {
+  position: relative;  /* 삭제 버튼 absolute 기준 */
+}
+.ms-card-delete {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(239, 68, 68, .3);
+  background: rgba(255, 255, 255, .92);
+  color: #ef4444;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;        /* 평소엔 숨김 */
+  transition: all .15s ease;
+  z-index: 5;
+  padding: 0;
+  line-height: 1;
+}
+.ms-card-recent:hover .ms-card-delete {
+  opacity: 1;        /* 카드 호버 시만 표시 */
+}
+.ms-card-delete:hover {
+  background: #ef4444;
+  color: #fff;
+  transform: scale(1.15);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, .4);
+  border-color: #ef4444;
 }
 
 /* ════ 선택 후 디테일 (하단) ════ */

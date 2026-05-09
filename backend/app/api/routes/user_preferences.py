@@ -174,6 +174,27 @@ def clear_scenario_history(user=Depends(current_user)):
 
 
 # ════════════════════════════════════════════════════════════════
+# v95_p89_ux (2026-05-07 본부장님 본질 처방): 개별 시나리오 이력 삭제
+# ════════════════════════════════════════════════════════════════
+# 본부장님 비전: 카드 우하단 ✕ 버튼 → 안 쓰는 시나리오 제거
+# ════════════════════════════════════════════════════════════════
+@router.delete("/scenarios/{scenario_id}", response_model=ScenarioHistoryResponse)
+def delete_scenario_history_item(scenario_id: str, user=Depends(current_user)):
+    """특정 시나리오 1건만 이력에서 제거"""
+    username = user.get("username") or user.get("id") or "anonymous"
+    history = _get_user_history(username)
+    before_n = len(history)
+    history = [h for h in history if h.get("scenario_id") != scenario_id]
+    after_n = len(history)
+    if before_n != after_n:
+        _save_user_history(username, history)
+        logger.info(f"[scenario] {username} 이력에서 '{scenario_id}' 제거 ({before_n} → {after_n})")
+    return ScenarioHistoryResponse(
+        items=[ScenarioHistoryItem(**h) for h in history]
+    )
+
+
+# ════════════════════════════════════════════════════════════════
 # v90.2: DB 사용 이력 (소스/타겟 각각)
 # ════════════════════════════════════════════════════════════════
 class DbHistoryItem(BaseModel):

@@ -162,6 +162,53 @@
               <div v-if="jobLastDecision[job.id]" class="fm-ai-decision">
                 🤖 {{ jobLastDecision[job.id] }}
               </div>
+              <!-- v95_p44 (2026-05-05 본부장님): Throttle + Mode 동시 표시 (덮어쓰기 X) -->
+              <!-- Throttle 변경 카드 (있을 때만) -->
+              <div v-if="jobLastChange[job.id] && jobLastChange[job.id].throttle"
+                   class="fm-change-detail">
+                <div class="fm-change-rows">
+                  <div class="fm-change-row">
+                    <span class="fm-change-label">⚙️ Thread</span>
+                    <span class="fm-change-arrow">
+                      <span class="fm-change-from">{{ jobLastChange[job.id].throttle.before.parallelism }}개</span>
+                      <span class="fm-change-mid">→</span>
+                      <span class="fm-change-to" :class="threadDeltaClass(jobLastChange[job.id].throttle)">
+                        {{ jobLastChange[job.id].throttle.after.parallelism }}개
+                      </span>
+                    </span>
+                  </div>
+                  <div class="fm-change-row">
+                    <span class="fm-change-label">📦 Batch</span>
+                    <span class="fm-change-arrow">
+                      <span class="fm-change-from">{{ jobLastChange[job.id].throttle.before.batch_size.toLocaleString() }}</span>
+                      <span class="fm-change-mid">→</span>
+                      <span class="fm-change-to" :class="batchDeltaClass(jobLastChange[job.id].throttle)">
+                        {{ jobLastChange[job.id].throttle.after.batch_size.toLocaleString() }} 행
+                      </span>
+                    </span>
+                  </div>
+                  <div class="fm-change-hint">
+                    {{ throttleHint(jobLastChange[job.id].throttle) }}
+                  </div>
+                </div>
+              </div>
+              <!-- Mode 변경 카드 (있을 때만) — Throttle 카드와 독립 -->
+              <div v-if="jobLastChange[job.id] && jobLastChange[job.id].mode"
+                   class="fm-change-detail fm-change-mode-card">
+                <div class="fm-change-rows">
+                  <div class="fm-change-row">
+                    <span class="fm-change-label">🎚 모드</span>
+                    <span class="fm-change-arrow">
+                      <span class="fm-change-from">{{ jobLastChange[job.id].mode.before.mode }}</span>
+                      <span class="fm-change-mid">→</span>
+                      <span class="fm-change-to">{{ jobLastChange[job.id].mode.after.mode }}</span>
+                    </span>
+                  </div>
+                  <div class="fm-change-hint">
+                    {{ modeHint(jobLastChange[job.id].mode.after.mode) }}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -379,6 +426,13 @@ const jobThrottle = reactive({})        // job_id → throttle_pct (100/75/50/25
 const jobMode = reactive({})            // job_id → 'auto'/'hybrid'/'manual'
 const jobLastDecision = reactive({})    // job_id → 가장 최근 AI 의사결정 텍스트
 
+// v95_p39 (2026-05-05 본부장님): 변경 효과 상세 표시 — 이전/이후 policy
+//   본부장님 호소: "Throttle 100→75 변경 시 구체적으로 어떻게 변경되는지 보여줘"
+//                "Thread X개 → Thread Y개 처럼"
+//   진단: 백엔드 API 가 policy 객체 (throttle_pct, batch_size, parallelism) 응답
+//   처방: 응답 받아서 변경 전후 비교를 두세줄로 표시
+const jobLastChange = reactive({})      // job_id → {action, before:{...}, after:{...}, time}
+
 // v90.21: 우하단 리사이즈 핸들
 function startResize(ev) {
   ev.preventDefault()
@@ -439,6 +493,9 @@ function getOverallPct(job) {
 }
 
 async function setJobThrottle(jobId, pct) {
+  // v95_p39 (2026-05-05 본부장님): 변경 전 정책 캡처 (이전 → 이후 비교용)
+  const prevThrottle = jobThrottle[jobId] ?? 100
+  const prevPolicy = computeLocalPolicy(prevThrottle)
   jobThrottle[jobId] = pct  // 낙관적 UI 업데이트
   try {
     const r = await fetch(`/api/v1/jobs/${jobId}/resource/throttle`, {
@@ -452,15 +509,42 @@ async function setJobThrottle(jobId, pct) {
       const detail = data.detail || `HTTP ${r.status}`
       throw new Error(detail)
     }
-    jobLastDecision[jobId] = `Throttle ${pct}% 적용 (수동) ✓`
+    // v95_p39: 백엔드 응답의 policy 활용 — Thread 수 + Batch 크기 변화
+    const newPolicy = data.policy || computeLocalPolicy(pct)
+    // v95_p44 (2026-05-05 본부장님): 슬롯 분리 — throttle 슬롯만 갱신 (mode 정보 보존)
+    if (!jobLastChange[jobId] || typeof jobLastChange[jobId] !== 'object'
+        || jobLastChange[jobId].action !== undefined) {
+      // 기존 단일 객체 형태 → 새 슬롯 형태로 마이그레이션
+      jobLastChange[jobId] = { throttle: null, mode: null }
+    }
+    jobLastChange[jobId].throttle = {
+      before: prevPolicy,
+      after: {
+        throttle_pct: newPolicy.throttle_pct ?? pct,
+        batch_size: newPolicy.batch_size ?? computeLocalPolicy(pct).batch_size,
+        parallelism: newPolicy.parallelism ?? computeLocalPolicy(pct).parallelism,
+      },
+      time: Date.now(),
+      manual: true,
+    }
+    jobLastDecision[jobId] = `Throttle ${prevThrottle}% → ${pct}% (수동) ✓`
     console.log('[FloatingMonitor] throttle 적용 성공:', data)
   } catch (e) {
     console.warn('[FloatingMonitor] throttle 실패:', e.message)
     jobLastDecision[jobId] = `⚠️ ${e.message}`
+    // v95_p44: 실패 시 throttle 슬롯만 비움 (mode 슬롯 보존)
+    if (jobLastChange[jobId] && typeof jobLastChange[jobId] === 'object'
+        && jobLastChange[jobId].action === undefined) {
+      jobLastChange[jobId].throttle = null
+    } else {
+      jobLastChange[jobId] = { throttle: null, mode: null }
+    }
   }
 }
 
 async function setJobMode(jobId, mode) {
+  // v95_p39: 변경 전 모드 캡처
+  const prevMode = jobMode[jobId] ?? 'hybrid'
   jobMode[jobId] = mode
   try {
     const r = await fetch(`/api/v1/jobs/${jobId}/resource/mode`, {
@@ -475,12 +559,89 @@ async function setJobMode(jobId, mode) {
       throw new Error(detail)
     }
     const modeName = mode === 'auto' ? 'AI 자동' : mode === 'hybrid' ? '하이브리드' : '수동'
-    jobLastDecision[jobId] = `모드: ${modeName} ✓`
+    const prevModeName = prevMode === 'auto' ? 'AI 자동' : prevMode === 'hybrid' ? '하이브리드' : '수동'
+    // v95_p39: 모드 변경 효과 (현재 throttle 기반 정책)
+    const curThrottle = jobThrottle[jobId] ?? 100
+    const curPolicy = computeLocalPolicy(curThrottle)
+    // v95_p44 (2026-05-05 본부장님): 슬롯 분리 — mode 슬롯만 갱신 (throttle 정보 보존)
+    if (!jobLastChange[jobId] || typeof jobLastChange[jobId] !== 'object'
+        || jobLastChange[jobId].action !== undefined) {
+      jobLastChange[jobId] = { throttle: null, mode: null }
+    }
+    jobLastChange[jobId].mode = {
+      before: { mode: prevModeName, ...curPolicy },
+      after: { mode: modeName, ...curPolicy },
+      time: Date.now(),
+      manual: true,
+    }
+    jobLastDecision[jobId] = `모드: ${prevModeName} → ${modeName} ✓`
     console.log('[FloatingMonitor] mode 변경 성공:', data)
   } catch (e) {
     console.warn('[FloatingMonitor] mode 변경 실패:', e.message)
     jobLastDecision[jobId] = `⚠️ ${e.message}`
+    // v95_p44: 실패 시 mode 슬롯만 비움 (throttle 슬롯 보존)
+    if (jobLastChange[jobId] && typeof jobLastChange[jobId] === 'object'
+        && jobLastChange[jobId].action === undefined) {
+      jobLastChange[jobId].mode = null
+    } else {
+      jobLastChange[jobId] = { throttle: null, mode: null }
+    }
   }
+}
+
+// v95_p39 (2026-05-05 본부장님): throttle_pct → batch_size + parallelism 로컬 매핑
+//   백엔드 ThrottleController._throttle_to_batch / _throttle_to_parallelism 와 일치
+//   백엔드 응답이 없거나 늦을 때의 즉시 표시용 (낙관적 UI)
+function computeLocalPolicy(pct) {
+  const BASE_BATCH = 5000
+  const batch_size = Math.max(500, Math.floor(BASE_BATCH * pct / 100))
+  let parallelism
+  if (pct >= 100) parallelism = 3
+  else if (pct >= 75) parallelism = 2
+  else parallelism = 1
+  return { throttle_pct: pct, batch_size, parallelism }
+}
+
+// v95_p39: Thread 변화에 따른 클래스 (감소=노란색, 증가=초록, 동일=회색)
+function threadDeltaClass(change) {
+  const delta = (change.after.parallelism || 0) - (change.before.parallelism || 0)
+  if (delta < 0) return 'fm-delta-down'
+  if (delta > 0) return 'fm-delta-up'
+  return 'fm-delta-same'
+}
+function batchDeltaClass(change) {
+  const delta = (change.after.batch_size || 0) - (change.before.batch_size || 0)
+  if (delta < 0) return 'fm-delta-down'
+  if (delta > 0) return 'fm-delta-up'
+  return 'fm-delta-same'
+}
+
+// Throttle 변경 힌트 — 사용자가 효과를 직관적으로 이해
+function throttleHint(change) {
+  const before = change.before.throttle_pct
+  const after = change.after.throttle_pct
+  if (after === before) return '— 변화 없음'
+  const delta = after - before
+  const pctRel = Math.abs(Math.round((delta / before) * 100))
+  if (delta < 0) {
+    if (after <= 25)
+      return `💡 부하 최소화 모드 — DB 부담 ${pctRel}% 경감, 이관 속도 느림`
+    if (after <= 50)
+      return `💡 부하 절감 — 동시 처리량 ${pctRel}% 감소, 다른 작업과 공존 유리`
+    return `💡 부하 살짝 절감 — 메모리/CPU 여유 확보`
+  } else {
+    if (after >= 100)
+      return `🚀 최대 성능 — 모든 자원 사용, 가장 빠른 이관`
+    return `🚀 속도 ${pctRel}% 향상 — 이관 시간 단축`
+  }
+}
+
+// 모드 변경 힌트
+function modeHint(modeName) {
+  if (modeName === 'AI 자동') return '💡 AI 가 시스템 부하 보고 자동 조정 — 최소 개입'
+  if (modeName === '하이브리드') return '💡 AI 권고 + 사용자 승인 — 균형형 (default)'
+  if (modeName === '수동') return '💡 사용자 직접 제어 — AI 조정 비활성화'
+  return ''
 }
 
 // 드래그
@@ -1113,6 +1274,66 @@ html.reduced-motion .fm-running-dot {
   border-left: 2px solid #14b8a6;
   border-radius: 0 3px 3px 0;
   font-style: italic;
+}
+
+/* v95_p39 (2026-05-05 본부장님): 변경 효과 상세 표시 */
+.fm-change-detail {
+  margin-top: 4px;
+  padding: 5px 7px;
+  background: rgba(99, 102, 241, 0.04);
+  border-left: 2px solid #6366f1;
+  border-radius: 0 3px 3px 0;
+}
+/* v95_p44 (2026-05-05 본부장님): Mode 카드 — Throttle 카드와 시각 구분 */
+.fm-change-mode-card {
+  background: rgba(20, 184, 166, 0.04);
+  border-left-color: #14b8a6;
+}
+.fm-change-rows {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.fm-change-row {
+  display: flex; align-items: center;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  letter-spacing: 0.01em;
+}
+.fm-change-label {
+  width: 56px; flex-shrink: 0;
+  color: var(--color-text-secondary, #64748b);
+  font-family: var(--font, system-ui);
+}
+.fm-change-arrow {
+  display: flex; align-items: center; gap: 5px;
+}
+.fm-change-from {
+  color: var(--color-text-tertiary, #94a3b8);
+  font-weight: 500;
+}
+.fm-change-mid {
+  color: var(--color-text-tertiary, #94a3b8);
+  opacity: 0.6;
+}
+.fm-change-to {
+  font-weight: 700;
+}
+.fm-delta-down {
+  color: #d97706;  /* 감소 = 노란색 (부하 절감) */
+}
+.fm-delta-up {
+  color: #059669;  /* 증가 = 초록 (성능 향상) */
+}
+.fm-delta-same {
+  color: var(--color-text-secondary, #64748b);
+}
+.fm-change-hint {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 0.5px dashed rgba(99, 102, 241, 0.15);
+  font-size: 9.5px;
+  color: var(--color-text-secondary, #64748b);
+  font-style: italic;
+  line-height: 1.45;
 }
 
 /* v90.21: 우하단 리사이즈 핸들 */

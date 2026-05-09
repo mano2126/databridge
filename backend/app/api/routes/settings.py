@@ -27,9 +27,30 @@ _DEFAULTS: dict = {
     "log_backup_count":   10,
     # v9 패치 #18: 로그 백업
     "log_backup_dir":     "./logs/backups",
-    "log_backup_schedule": "off",        # off | hourly | 6h | daily
+    # v95_p9_REAL: 옵션 확장 (off | 5min | 30min | hourly | 2h | 6h | 12h | daily)
+    "log_backup_schedule": "off",
     "log_backup_retention_days": 30,     # 이보다 오래된 백업은 자동 삭제
+    # v95_p9_REAL: 사이즈 OR 조건 - 시간 도달해도 이 크기 미만이면 백업 SKIP (작은 파일 양산 방지)
+    "log_backup_min_size_mb": 1,         # 기본 1MB. 0이면 사이즈 조건 무시 (구버전 동작)
+    # v95_p9_REAL: 사이즈 도달 시 즉시 백업 (시간 안 기다림)
+    "log_backup_size_trigger_mb": 5,     # 5MB 초과하면 즉시 백업. 0이면 비활성
     "anthropic_api_key":  "",
+    # ════════════════════════════════════════════════════════════════
+    # v95_p89 (2026-05-07 본부장님 비전): DataBridgeGemma 자체 호스팅 어댑터
+    # ════════════════════════════════════════════════════════════════
+    # 본부장님 비전:
+    #   1) Anthropic API 의존 → 자체 호스팅 Gemma (망분리 가능, 크레딧 무관)
+    #   2) RAG 인프라 (KB) + Ollama + Gemma 4 26B MoE = 본부장님 환경 전용 변환 엔진
+    #   3) 검증된 KB 누적 → 향후 LoRA fine-tune 학습 데이터로 활용
+    #
+    # 본질 처방:
+    #   - ai_provider: "anthropic" (기본, 기존 동작 유지) | "ollama" (Gemma)
+    #   - 부작용 0: 기본값 anthropic 유지 → 기존 모든 호출 경로 그대로 작동
+    #   - 본부장님 settings 화면에서 토글 가능 → 운영 중 무중단 전환
+    # ════════════════════════════════════════════════════════════════
+    "ai_provider":   "anthropic",                # "anthropic" | "ollama"
+    "ollama_url":    "http://localhost:11434",   # Ollama 데몬 URL
+    "ollama_model":  "gemma4:26b",               # 본부장님 24GB 환경 권장 — Gemma 4 26B MoE
 }
 
 # ── JSON 파일 영속 스토어 ─────────────────────────────────
@@ -316,13 +337,116 @@ def delete_api_key(_=Depends(require_admin)):
     return {"ok": True}
 
 
+# ════════════════════════════════════════════════════════════════════
+# v95_p89_ui (2026-05-07 본부장님 비전): Ollama 통합 엔드포인트
+# ════════════════════════════════════════════════════════════════════
+@router.get("/ollama-models")
+def get_ollama_models(_=Depends(require_viewer)):
+    """현재 Ollama 데몬에서 풀된 모델 목록을 반환.
+    
+    화면의 ai_provider="ollama" 선택 시 Model 드롭다운 채우기용.
+    Ollama 데몬이 응답하지 않으면 빈 리스트 반환 (에러 처리).
+    """
+    import urllib.request as _ur, json as _j, logging as _log
+    _lg = _log.getLogger("settings.ollama")
+    cfg = _cfg()
+    ollama_url = (cfg.get("ollama_url", "http://localhost:11434") or "http://localhost:11434").rstrip("/")
+    
+    try:
+        req = _ur.Request(f"{ollama_url}/api/tags")
+        with _ur.urlopen(req, timeout=5) as r:
+            data = _j.loads(r.read())
+        models = data.get("models", []) or []
+        # 모델 객체 → {name, size, modified} 정리
+        result = []
+        for m in models:
+            result.append({
+                "name": m.get("name", ""),
+                "size_mb": int((m.get("size", 0) or 0) / 1024 / 1024),
+                "modified_at": m.get("modified_at", ""),
+            })
+        _lg.info(f"[Ollama] 모델 {len(result)}개")
+        return {"ok": True, "url": ollama_url, "models": result}
+    except Exception as e:
+        _lg.warning(f"[Ollama] 데몬 응답 없음: {e}")
+        return {"ok": False, "url": ollama_url, "models": [],
+                "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 @router.post("/api-key-test")
 def test_api_key(_=Depends(require_admin)):
-    """Anthropic API 키 연결 테스트"""
+    """AI provider 연결 테스트 (Anthropic 또는 Ollama)
+    
+    v95_p89_ui (2026-05-07 본부장님 비전): provider 분기 추가
+      - ai_provider="anthropic" → 기존 Anthropic API 테스트
+      - ai_provider="ollama"    → Ollama 데몬 + 모델 가용성 테스트
+    """
     import urllib.request as _ur, urllib.error as _ue, json as _j, logging as _log
     _lg = _log.getLogger("settings.apitest")
 
-    key = _cfg().get("anthropic_api_key", "").strip()
+    cfg = _cfg()
+    provider = (cfg.get("ai_provider", "anthropic") or "anthropic").strip().lower()
+
+    # ════════════════════════════════════════════════════════════════
+    # v95_p89_ui: Ollama 분기 (Gemma 자체 호스팅 검증)
+    # ════════════════════════════════════════════════════════════════
+    if provider == "ollama":
+        ollama_url = (cfg.get("ollama_url", "http://localhost:11434") or "http://localhost:11434").rstrip("/")
+        ollama_model = (cfg.get("ollama_model", "gemma4:26b") or "gemma4:26b").strip()
+        _lg.info(f"[Ollama테스트] url={ollama_url} model={ollama_model}")
+
+        # 1. Ollama 데몬 가용성 검증
+        try:
+            req = _ur.Request(f"{ollama_url}/api/tags",
+                              headers={"Content-Type": "application/json"})
+            with _ur.urlopen(req, timeout=5) as r:
+                data = _j.loads(r.read())
+        except Exception as e:
+            _lg.error(f"[Ollama테스트] 데몬 미응답: {e}")
+            return {"ok": False,
+                    "error": f"Ollama 데몬에 접속할 수 없습니다 ({ollama_url})",
+                    "debug": f"오류: {type(e).__name__}: {str(e)[:120]}\n"
+                             f"Ollama 가 실행 중인지 확인: brew services list | grep ollama"}
+
+        # 2. 모델 가용성 검증
+        models = data.get("models", []) or []
+        model_names = [m.get("name", "") for m in models]
+        if ollama_model not in model_names and not any(ollama_model in n for n in model_names):
+            _lg.warning(f"[Ollama테스트] 모델 없음: {ollama_model}")
+            return {"ok": False,
+                    "error": f"모델이 풀돼있지 않습니다: {ollama_model}",
+                    "debug": f"사용 가능 모델: {', '.join(model_names) or '(없음)'}\n"
+                             f"풀 명령: ollama pull {ollama_model}"}
+
+        # 3. 간단한 추론 호출 검증 ("hi" → 응답)
+        try:
+            payload = _j.dumps({
+                "model": ollama_model,
+                "messages": [{"role": "user", "content": "Say OK"}],
+                "stream": False,
+                "options": {"num_predict": 10, "temperature": 0.1},
+            }).encode()
+            req = _ur.Request(f"{ollama_url}/api/chat", data=payload,
+                              headers={"Content-Type": "application/json"})
+            with _ur.urlopen(req, timeout=60) as r:
+                resp_data = _j.loads(r.read())
+            text = (resp_data.get("message") or {}).get("content", "")
+            eval_count = resp_data.get("eval_count", 0)
+            _lg.info(f"[Ollama테스트] 성공! tokens={eval_count}")
+            return {"ok": True,
+                    "message": f"Ollama + {ollama_model} 연결 성공! 응답: {text[:60]}",
+                    "debug": f"URL: {ollama_url} | 모델: {ollama_model} | "
+                             f"풀된 모델 {len(model_names)}개 | tokens={eval_count}"}
+        except Exception as e:
+            _lg.error(f"[Ollama테스트] 추론 호출 실패: {e}")
+            return {"ok": False,
+                    "error": f"Ollama 추론 호출 실패",
+                    "debug": f"오류: {type(e).__name__}: {str(e)[:200]}"}
+
+    # ════════════════════════════════════════════════════════════════
+    # 기존 Anthropic API 테스트 (provider="anthropic" 또는 미지정)
+    # ════════════════════════════════════════════════════════════════
+    key = cfg.get("anthropic_api_key", "").strip()
 
     # 로그: 키 앞 20자 + 뒤 4자만 기록 (보안)
     if key:
@@ -680,22 +804,74 @@ _backup_last_run: float = 0.0
 def _scheduler_interval_sec() -> int:
     cfg = _cfg()
     s = str(cfg.get("log_backup_schedule", "off")).lower()
-    return {"hourly": 3600, "6h": 21600, "daily": 86400}.get(s, 0)
+    # v95_p9_REAL: 옵션 확장 (5min, 30min, 2h, 12h 추가)
+    return {
+        "5min":   300,
+        "30min":  1800,
+        "hourly": 3600,
+        "2h":     7200,
+        "6h":     21600,
+        "12h":    43200,
+        "daily":  86400,
+    }.get(s, 0)
+
+
+def _current_log_size_mb() -> float:
+    """v95_p9_REAL: 현재 백엔드 로그 파일 크기 (MB) - OR 조건 판단용"""
+    cfg = _cfg()
+    log_file = cfg.get("backend_log_file", "./logs/databridge_backend.log")
+    abs_path = os.path.abspath(log_file)
+    try:
+        if os.path.exists(abs_path):
+            return os.path.getsize(abs_path) / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
 
 
 def _backup_scheduler_loop():
-    """백그라운드 스레드 — 설정된 주기마다 _do_backup_once() 호출"""
+    """
+    백그라운드 스레드 — 설정된 주기마다 _do_backup_once() 호출
+    
+    v95_p9_REAL: 본부장님 요청 본질 처방
+    - 시간 도달 OR 사이즈 도달 (먼저 도달하는 쪽)
+    - 시간 도달했어도 min_size_mb 미만이면 SKIP (작은 파일 양산 방지)
+    - 사이즈 트리거가 설정되어 있고 도달하면 시간 안 기다리고 즉시 백업
+    """
     global _backup_last_run
     import time as _t
     logger_bk = logging.getLogger("databridge.log_backup")
     while not _backup_timer_stop.wait(60):  # 1분마다 설정 확인
         try:
-            interval = _scheduler_interval_sec()
-            if interval <= 0:
-                continue
-            now = _t.time()
-            if now - _backup_last_run >= interval:
-                logger_bk.info("자동 로그 백업 실행 (주기=%ds)", interval)
+            cfg = _cfg()
+            interval     = _scheduler_interval_sec()
+            min_size_mb  = float(cfg.get("log_backup_min_size_mb", 1))
+            trigger_mb   = float(cfg.get("log_backup_size_trigger_mb", 5))
+            current_mb   = _current_log_size_mb()
+            now          = _t.time()
+            
+            should_backup = False
+            reason = ""
+            
+            # 조건 A: 사이즈 트리거 — 시간 무관 즉시
+            if trigger_mb > 0 and current_mb >= trigger_mb:
+                should_backup = True
+                reason = f"사이즈 트리거 ({current_mb:.1f}MB ≥ {trigger_mb}MB)"
+            # 조건 B: 시간 트리거 — 단, 최소 사이즈 조건 만족해야
+            elif interval > 0 and (now - _backup_last_run) >= interval:
+                if current_mb >= min_size_mb:
+                    should_backup = True
+                    reason = f"시간 트리거 (주기={interval}s, 크기={current_mb:.1f}MB ≥ 최소 {min_size_mb}MB)"
+                else:
+                    # 시간 도달했지만 크기 작음 → SKIP, 다음 사이클에 재평가
+                    logger_bk.debug(
+                        "시간 트리거 도달이지만 크기 부족 (%.1fMB < %.1fMB) — SKIP",
+                        current_mb, min_size_mb
+                    )
+                    # last_run 은 갱신 X — 사이즈 채워지면 그때 백업
+            
+            if should_backup:
+                logger_bk.info("자동 로그 백업 실행 — %s", reason)
                 _do_backup_once(compress=True)
                 _purge_old_backups()
                 _backup_last_run = now

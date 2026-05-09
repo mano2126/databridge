@@ -79,39 +79,38 @@
       </div>
     </div>
 
-    <!-- v91p5 통합 진행 표시 — 텍스트 변환/파일 일괄/튜닝 모두 -->
+    <!-- v91p5 통합 진행 표시 — 텍스트 변환/파일 일괄/튜닝 모두
+         v92p1: Windows 11 시스템 톤 슬림 라인 (2px) + 우측 마이크로 카운터로 재구성 -->
     <div v-if="converting || fileBatchRunning || tuning || (mode==='file' && fileBatchProgress.total > 0 && fileBatchProgress.done >= fileBatchProgress.total)"
-         class="batch-progress-bar">
-      <div class="bp-head">
-        <div class="bp-title">
-          <span v-if="converting || fileBatchRunning || tuning" class="spinner"></span>
-          <span v-else class="bp-done-ico">✓</span>
-          <span class="bp-label">
-            <template v-if="tuning">🚀 AI 튜닝 진행 중</template>
-            <template v-else-if="fileBatchRunning">일괄 변환 중</template>
-            <template v-else-if="converting">{{ mode === 'text' ? '텍스트 변환 중' : (mode === 'folder' ? '폴더 변환 중' : '파일 변환 중') }}</template>
-            <template v-else>변환 완료</template>
+         class="batch-progress-bar slim">
+      <div class="bp-row">
+        <div class="bp-label-line">
+          <span v-if="converting || fileBatchRunning || tuning" class="bp-mini-spin"></span>
+          <span v-else class="bp-mini-check">✓</span>
+          <span class="bp-text">
+            <template v-if="tuning">AI 튜닝</template>
+            <template v-else-if="fileBatchRunning">일괄 변환</template>
+            <template v-else-if="converting">{{ mode === 'text' ? '변환' : (mode === 'folder' ? '폴더 변환' : '파일 변환') }}</template>
+            <template v-else>완료</template>
           </span>
-          <span class="bp-current" v-if="tuning && tuneStatus">— {{ tuneStatus }}</span>
-          <span class="bp-current" v-else-if="fileBatchProgress.currentName">— {{ fileBatchProgress.currentName }}</span>
-          <span class="bp-current" v-else-if="converting && convEngine === 'claude'">— Claude AI 호출 중...</span>
-          <span class="bp-current" v-else-if="converting && convEngine === 'auto'">— AI 우선 / 실패 시 규칙 기반...</span>
-          <span class="bp-current" v-else-if="converting">— 규칙 기반 변환 중...</span>
+          <span class="bp-sep" v-if="(tuning && tuneStatus) || fileBatchProgress.currentName || (converting && convEngine === 'claude') || (converting && convEngine === 'auto') || converting">·</span>
+          <span class="bp-meta" v-if="tuning && tuneStatus">{{ tuneStatus }}</span>
+          <span class="bp-meta" v-else-if="fileBatchProgress.currentName">{{ fileBatchProgress.currentName }}</span>
+          <span class="bp-meta" v-else-if="converting && convEngine === 'claude'">Claude AI 호출 중</span>
+          <span class="bp-meta" v-else-if="converting && convEngine === 'auto'">AI 우선 / 폴백 규칙</span>
+          <span class="bp-meta" v-else-if="converting">규칙 기반 변환 중</span>
         </div>
-        <div class="bp-stats" v-if="mode === 'file' && fileBatchProgress.total">
-          <span class="bp-stat">{{ fileBatchProgress.done }}/{{ fileBatchProgress.total }}</span>
-          <span class="bp-stat ok" v-if="fileBatchProgress.ok > 0">✓ {{ fileBatchProgress.ok }}</span>
-          <span class="bp-stat fail" v-if="fileBatchProgress.fail > 0">✗ {{ fileBatchProgress.fail }}</span>
-          <span class="bp-stat pct">
-            {{ fileBatchProgress.total ? Math.round(fileBatchProgress.done / fileBatchProgress.total * 100) : 0 }}%
-          </span>
+        <div class="bp-counter" v-if="mode === 'file' && fileBatchProgress.total">
+          <span class="bp-c-num">{{ fileBatchProgress.done }}/{{ fileBatchProgress.total }}</span>
+          <span class="bp-c-pct">{{ fileBatchProgress.total ? Math.round(fileBatchProgress.done / fileBatchProgress.total * 100) : 0 }}%</span>
+          <span v-if="fileBatchProgress.ok > 0"   class="bp-c-ok">✓{{ fileBatchProgress.ok }}</span>
+          <span v-if="fileBatchProgress.fail > 0" class="bp-c-fail">✗{{ fileBatchProgress.fail }}</span>
         </div>
       </div>
-      <div class="bp-track">
-        <!-- 일괄변환은 비율, 텍스트/튜닝은 indeterminate (인디터미닛) -->
-        <div v-if="mode === 'file' && fileBatchProgress.total" class="bp-fill"
+      <div class="bp-line">
+        <div v-if="mode === 'file' && fileBatchProgress.total" class="bp-line-fill"
              :style="{width: (fileBatchProgress.done / fileBatchProgress.total * 100) + '%'}"></div>
-        <div v-else class="bp-fill bp-indeterminate"></div>
+        <div v-else class="bp-line-fill bp-line-shimmer"></div>
       </div>
     </div>
 
@@ -246,9 +245,9 @@
             </template>
             <span class="conv-btn-label">{{ converting ? '변환중' : '변환' }}</span>
           </button>
-          <div v-if="converting" class="conv-progress-text">
-            <span class="conv-dots"></span>
-            <span>잠시만 기다려주세요</span>
+          <!-- v92p1: 두 줄 텍스트 제거 — 버튼 라벨 + 미니 점 애니메이션만 (한 줄) -->
+          <div v-if="converting" class="conv-mini-status">
+            <span class="conv-dot"></span><span class="conv-dot"></span><span class="conv-dot"></span>
           </div>
           <div v-if="!converting && textChanges.length" class="change-cnt ok">{{ textChanges.length }}건 변경</div>
           <div v-if="!converting && textWarnings.length" class="change-cnt warn">{{ textWarnings.length }}건 확인</div>
@@ -593,6 +592,23 @@
           </button>
         </div>
       </div>
+
+      <!-- v92p1: 일괄 plan 분석 + AI 튜닝 권장 패널 -->
+      <BatchTuningPanel
+        :visible="btpVisible"
+        :items="btpItems"
+        :summary="btpSummary"
+        :threshold="btpThreshold"
+        :analyzing="btpAnalyzing"
+        :analyze-progress="btpAnalyzeProg"
+        :tuning="btpTuning"
+        :tune-items="btpTuneItems"
+        @reanalyze="analyzeBatch"
+        @tune="tuneBatch"
+        @reset-tune="btpReset"
+        @close="btpClose"
+        @notify="btpNotify"
+      />
     </template>
 
     <!-- ══ 폴더 모드 ══ -->
@@ -785,6 +801,7 @@ import { useConverterStore } from '@/store/converterStore.js'
 import { useConnectorStore } from '@/store/connectorStore.js'   // v91p5: DB 연결
 import ConnectPanel from '@/components/common/ConnectPanel.vue'  // v91p5
 import PageHeader   from '@/components/layout/PageHeader.vue'    // v91p5
+import BatchTuningPanel from '@/components/converter/BatchTuningPanel.vue'  // v92p1: 일괄 튜닝 권장
 import axios from 'axios'
 
 const app    = useAppStore()
@@ -1019,6 +1036,13 @@ watch([srcDb, tgtDb, convEngine], () => {
   localStorage.setItem('sc_tgtDb',  tgtDb.value)
   localStorage.setItem('sc_engine', convEngine.value)
 })
+// v92p1: schemaStrategy 를 Validate.vue 와 공유 (LocalStorage)
+watch(schemaStrategy, (v) => {
+  try {
+    localStorage.setItem('sc_schema_strategy', v || 'underscore')
+    window.__sc_schema_strategy = v || 'underscore'
+  } catch (e) {}
+}, { immediate: true })
 
 // ════════════════════════════════════════════════════════════
 // v91 (2026-04-29): SQL 튜닝 — 5개 variant + EXPLAIN + 실측
@@ -1301,6 +1325,16 @@ async function doConvertFilesNew() {
   app.notify(`${allConverted.length}개 파일 변환 완료`, 'success')
   // ZIP 다운로드 준비
   _fileConvertedList.value = allConverted
+
+  // v92p1: 변환 후 자동으로 일괄 plan 분석 → 튜닝 권장 패널 표시
+  //         (DB 연결돼 있고 SELECT 가 1개 이상 있을 때만)
+  try {
+    const hasSelect = fileResults.value.some(r => /^\s*(--[^\n]*\n|\/\*[^*]*\*\/)*\s*(SELECT|WITH)\b/i.test(r.converted || ''))
+    if (hasSelect) {
+      // 약간 지연 → 변환 완료 토스트 먼저 보이도록
+      setTimeout(() => analyzeBatch(btpThreshold.value), 350)
+    }
+  } catch (e) { /* analyze 실패해도 변환은 성공 */ }
 }
 
 async function doConvertFiles() {
@@ -1721,6 +1755,128 @@ function skipRemigrate() {
   showRemigrateBar.value = false
   remigrateQueue.value   = []
 }
+
+// ════════════════════════════════════════════════════════════
+// v92p1 (2026-04-30): 일괄 변환 후 자동 plan 분석 + 튜닝 권장
+// 본부장님 비전: "변환후 쿼리를 수행해보고 속도가 잘 안나오거나 plan을
+//                ai 없이 분석후 AI로 튜닝이 필요한 건을 아래창에 보여줘"
+// ════════════════════════════════════════════════════════════
+const btpVisible        = ref(false)
+const btpItems          = ref([])      // analyze-batch 결과
+const btpSummary        = ref(null)
+const btpThreshold      = ref(500)     // ms
+const btpAnalyzing      = ref(false)
+const btpAnalyzeProg    = ref({ done: 0, total: 0 })
+const btpTuning         = ref(false)
+const btpTuneItems      = ref([])      // tune-batch 결과
+
+function _getTargetConn() {
+  if (connector.target?.host && connector.target?.status === 'ok') {
+    return {
+      host:     connector.target.host,
+      port:     connector.target.port,
+      username: connector.target.username,
+      password: connector.target.password,
+      database: connector.target.database,
+    }
+  }
+  return null
+}
+
+async function analyzeBatch(threshold) {
+  if (threshold) btpThreshold.value = Number(threshold) || 500
+  // 변환된 SELECT 위주의 항목 수집 (파일/폴더 모드 공용)
+  const sources = []
+  if (mode.value === 'file' && fileResults.value.length) {
+    for (const r of fileResults.value) {
+      sources.push({ filename: r.filename, sql: r.converted })
+    }
+  } else if (mode.value === 'folder' && tgtFiles.value.length) {
+    // tgtFiles 에는 content 가 없을 수 있음 → folderFiles 의 변환 결과를 가져와야 함
+    // 폴더 모드는 store.runConvert 가 변환 결과를 즉시 보존하지 않으므로
+    // convertReport 와 매칭하여 파일명만 추출 → 본 분석은 파일 모드 위주로 동작
+    for (const r of convertReport.value || []) {
+      if (r.ok && r.changesDetail) {
+        // 폴더 모드는 SQL 본문을 갖고 있지 않음 — 안내
+      }
+    }
+  }
+  if (!sources.length) {
+    app.notify('분석할 변환 결과가 없습니다 (파일 모드에서만 지원)', 'warn')
+    return
+  }
+  const tgtConn = _getTargetConn()
+  if (!tgtConn) {
+    app.notify('타겟 DB 연결 정보 없음 → 정적 분석만 수행', 'warn')
+  }
+  btpVisible.value = true
+  btpAnalyzing.value = true
+  btpAnalyzeProg.value = { done: 0, total: sources.length }
+  btpItems.value = []
+  btpTuneItems.value = []
+  try {
+    const { data } = await axios.post('/api/v1/sql-converter/analyze-batch', {
+      items: sources,
+      target_conn: tgtConn,
+      threshold_ms: btpThreshold.value,
+      measure: tgtConn ? 'both' : 'explain',
+    }, { timeout: 240000 })
+    btpItems.value = (data.items || []).map(it => ({
+      ...it,
+      _selected: it.rank !== 'green',   // 🔴/🟡 자동 체크
+    }))
+    btpSummary.value = data.summary || null
+    btpAnalyzeProg.value = { done: sources.length, total: sources.length }
+    const s = btpSummary.value || {}
+    app.notify(`분석 완료 — 🔴${s.red||0} / 🟡${s.yellow||0} / ⚪${s.green||0}`, 'success')
+  } catch (e) {
+    app.notify('분석 실패: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    btpAnalyzing.value = false
+  }
+}
+
+async function tuneBatch(selected) {
+  if (!selected || !selected.length) return
+  const tgtConn = _getTargetConn()
+  btpTuning.value = true
+  btpTuneItems.value = []
+  try {
+    const items = selected.map(s => ({ filename: s.filename, sql: s.sql }))
+    const { data } = await axios.post('/api/v1/sql-converter/tune-batch', {
+      items,
+      tgt_db: tgtDb.value,
+      target_conn: tgtConn,
+      measure: tgtConn ? 'both' : 'explain',
+    }, { timeout: 600000 })
+    if (data.error) {
+      app.notify('튜닝 실패: ' + data.error, 'error')
+      return
+    }
+    btpTuneItems.value = data.items || []
+    app.notify(
+      `${(data.items||[]).length}개 SQL 튜닝 완료 (${data.total_tokens||0} tokens)`,
+      'success'
+    )
+  } catch (e) {
+    app.notify('튜닝 실패: ' + (e.response?.data?.detail || e.message), 'error')
+  } finally {
+    btpTuning.value = false
+  }
+}
+
+function btpReset() {
+  btpTuneItems.value = []
+}
+function btpClose() {
+  btpVisible.value = false
+  btpItems.value = []
+  btpTuneItems.value = []
+  btpSummary.value = null
+}
+function btpNotify(o) {
+  app.notify(o.msg || '', o.type || 'success')
+}
 </script>
 
 <style>
@@ -2086,6 +2242,95 @@ function skipRemigrate() {
 .conv-overlay-sub { font-size: 11px; color: var(--text-tertiary); }
 
 /* ════ v91 일괄 변환 진행바 ════════════════════════════════════ */
+/* v92p1: 슬림 (Windows 11 시스템 톤) — 배경/테두리 제거, 2px 라인 */
+.batch-progress-bar.slim {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 4px 2px 6px;
+  margin-bottom: 6px;
+  box-shadow: none;
+}
+.batch-progress-bar.slim .bp-row {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 5px;
+  font-size: 11.5px;
+  line-height: 1.2;
+}
+.bp-label-line {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-secondary, #6b7280);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bp-text { font-weight: 600; color: var(--text-primary, #111827); }
+.bp-sep  { color: var(--text-tertiary, #9ca3af); }
+.bp-meta { color: var(--text-tertiary, #9ca3af); font-weight: 400; }
+.bp-mini-spin {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 1.5px solid rgba(20,184,166,0.2);
+  border-top-color: #14b8a6;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+.bp-mini-check {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #10b981; color: white; font-size: 8px; font-weight: 700;
+}
+.bp-counter {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 11px; flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.bp-c-num  { color: var(--text-secondary, #6b7280); font-weight: 500; }
+.bp-c-pct  { color: var(--text-primary, #111827); font-weight: 700; }
+.bp-c-ok   { color: #10b981; font-weight: 600; }
+.bp-c-fail { color: #dc2626; font-weight: 600; }
+.bp-line {
+  height: 2px;
+  background: rgba(0,0,0,0.06);
+  border-radius: 1px;
+  overflow: hidden;
+  position: relative;
+}
+.bp-line-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #14b8a6, #0d9488);
+  border-radius: 1px;
+  transition: width 0.25s ease;
+}
+.bp-line-fill.bp-line-shimmer {
+  width: 35% !important;
+  position: absolute;
+  left: 0; top: 0;
+  animation: bp-line-shimmer-anim 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes bp-line-shimmer-anim {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(330%); }
+}
+
+/* v92p1: 텍스트 변환 미니 점 애니메이션 (3개 점) */
+.conv-mini-status {
+  display: inline-flex; gap: 3px; margin-top: 4px;
+  align-items: center; justify-content: center;
+}
+.conv-dot {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: #0d9488;
+  animation: conv-dot-pulse 1.2s ease-in-out infinite;
+}
+.conv-dot:nth-child(2) { animation-delay: 0.15s; }
+.conv-dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes conv-dot-pulse {
+  0%, 60%, 100% { opacity: 0.25; transform: scale(0.85); }
+  30%           { opacity: 1;    transform: scale(1.15); }
+}
+
+/* (legacy 기존 스타일 — 다른 화면 호환용으로 유지) */
 .batch-progress-bar {
   background: white;
   border: 1px solid var(--border-light, #e5e7eb);

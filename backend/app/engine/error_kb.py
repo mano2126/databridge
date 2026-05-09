@@ -199,6 +199,293 @@ def assemble_prompt_hint(
 
     return "\n".join(sections).strip()
 
+
+# ════════════════════════════════════════════════════════════════════
+# v94_p4 (2026-05-01): KB 사전 학습 적용 (Pre-Apply Mode)
+#
+# 본부장님 호소: "매번 똑같은 4개 객체에서 1차에 같은 에러 발생 — KB 학습이 안 되는가?"
+#
+# 진단 (정직): 기존 KB 는 *에러 발생 후* 그 에러 메시지로 매칭하는 사후 처방 모드.
+#   → 깨끗한 1차 변환에는 누적 자산이 적용되지 않음
+#
+# 처방: 객체 타입 + DDL 시그니처 기반으로 error_cases.txt 검색 →
+#       과거 같은 패턴에서 발생했던 에러의 fix_prompt 를 1차 prompt 에 사전 주입
+# ════════════════════════════════════════════════════════════════════
+def assemble_preflight_hint(
+    obj_type: str = "",
+    src_ddl: str = "",
+    max_hints: int = 5,
+) -> str:
+    """객체 타입 + DDL 패턴 분석 → 과거 KB 자산에서 관련된 fix_prompt 사전 추출.
+
+    동작:
+      1. obj_type (FUNCTION/PROCEDURE/TRIGGER/...) 으로 1차 필터
+      2. src_ddl 의 위험 키워드 시그니처 추출 (TVF/AFTER UPDATE/WHILE+EXISTS/...)
+      3. error_cases.txt 검색 — 같은 시그니처 케이스의 fix_prompt 들 수집
+      4. 추출된 fix_prompt 들을 정리해서 prompt 추가 섹션 반환
+      5. yml 의 정식 KB 패턴 중 obj_type 매칭되는 것도 포함
+    """
+    if not obj_type and not src_ddl:
+        return ""
+
+    obj_type_upper = (obj_type or "").upper()
+    ddl_lower = (src_ddl or "").lower()
+
+    # ─── Step 1: DDL 시그니처 추출 (위험 패턴 검출) ─────────
+    signatures = _extract_ddl_signatures(obj_type_upper, ddl_lower)
+    if not signatures:
+        return ""  # 위험 패턴 없으면 사전 적용 불필요
+
+    # ─── Step 2: error_cases.txt 검색 ─────────────────────
+    relevant_cases = _search_relevant_cases(obj_type_upper, signatures, limit=max_hints)
+
+    # ─── Step 3: yml 정식 패턴에서 obj_type 매칭되는 것도 포함 ─
+    yml_patterns = _get_patterns_for_obj_type(obj_type_upper, signatures)
+
+    if not relevant_cases and not yml_patterns:
+        return ""
+
+    # ─── Step 4: prompt 섹션 조립 ──────────────────────────
+    sections = []
+    sections.append("")
+    sections.append("=" * 60)
+    sections.append(f"[KB 사전 학습] 과거 같은 {obj_type_upper} 패턴에서 다음 에러가 발생했습니다.")
+    sections.append("이번 변환 시 미리 회피하세요:")
+    sections.append("=" * 60)
+
+    # 시그니처 매칭 정보
+    if signatures:
+        sections.append(f"  감지된 위험 패턴: {', '.join(signatures)}")
+        sections.append("")
+
+    # yml 정식 패턴 (가중치 높음 — 검증된 처방)
+    for p in yml_patterns:
+        sections.append(f"▶ [정식 KB] {p['id']} (적중률 {p.get('hit_rate_pct', 0)}%)")
+        if p.get("fix_prompt"):
+            sections.append(p["fix_prompt"].strip())
+        sections.append("")
+
+    # error_cases.txt 의 과거 케이스 (가중치 낮음 — 사후 누적)
+    for c in relevant_cases:
+        sections.append(f"▶ [과거 케이스] {c['timestamp']} {c['obj_name']}")
+        if c.get("error_summary"):
+            sections.append(f"  발생했던 에러: {c['error_summary']}")
+        if c.get("learned_fix"):
+            sections.append(f"  학습된 처방: {c['learned_fix']}")
+        sections.append("")
+
+    sections.append("=" * 60)
+    sections.append("[중요] 위 패턴들을 1차 변환부터 적용하세요. 같은 에러 반복 회피.")
+    sections.append("=" * 60)
+
+    return "\n".join(sections).strip()
+
+
+def _extract_ddl_signatures(obj_type: str, ddl_lower: str) -> list:
+    """DDL 에서 위험 시그니처 추출 (과거 에러 패턴과 매칭용).
+
+    각 시그니처는 짧은 키워드 (TVF, AFTER_UPDATE, WHILE_EXISTS 등).
+    """
+    sigs = []
+
+    # FUNCTION 관련
+    if obj_type in ("FUNCTION", "FUNC", "FN"):
+        if "returns table" in ddl_lower or "returns @" in ddl_lower:
+            sigs.append("TVF")
+        if "while " in ddl_lower and "exists" in ddl_lower:
+            sigs.append("WHILE_EXISTS")
+        if "while " in ddl_lower and ("select" in ddl_lower):
+            sigs.append("WHILE_SUBQUERY")
+        # v94_p5: 본부장님 호소 처방 — LEAVE/ITERATE 패턴 → 세미콜론 누락 위험
+        if "while " in ddl_lower or "loop" in ddl_lower:
+            sigs.append("LEAVE_LOOP")  # 1064_LEAVE_MISSING_SEMI 매칭
+
+    # TRIGGER 관련
+    if obj_type in ("TRIGGER", "TRIG", "TR"):
+        if "after update" in ddl_lower and ("set new" in ddl_lower or "new." in ddl_lower):
+            sigs.append("AFTER_UPDATE_NEW")  # MySQL 1362 에러 발생 패턴
+        if "inserted" in ddl_lower or "deleted" in ddl_lower:
+            sigs.append("INSERTED_DELETED")  # MSSQL 의 INSERTED/DELETED 가상 테이블
+
+    # PROCEDURE 관련
+    if obj_type in ("PROCEDURE", "PROC", "SP"):
+        # DECLARE 문에 SELECT 서브쿼리 (MySQL 미지원)
+        if "declare" in ddl_lower and ("select" in ddl_lower):
+            # DECLARE @var = (SELECT ...) 패턴
+            import re as _re
+            if _re.search(r"declare\s+\@\w+.*=\s*\(?\s*select", ddl_lower, _re.DOTALL):
+                sigs.append("DECLARE_SUBQUERY")
+        if "set nocount on" in ddl_lower:
+            sigs.append("SET_NOCOUNT")
+
+    # v94_p5: 모든 객체 타입 공통 — 변환 후 DELIMITER 추가 위험 (본부장님 호소)
+    # MSSQL 소스에 BEGIN ... END 가 있으면 AI 가 MySQL 변환 시 DELIMITER 추가하기 쉬움
+    if "begin" in ddl_lower and "end" in ddl_lower:
+        sigs.append("DELIMITER_RISK")  # 1064_DELIMITER_NOT_SUPPORTED 매칭
+
+    # 공통
+    if "datetime2" in ddl_lower or "datetimeoffset" in ddl_lower:
+        sigs.append("DATETIME2")
+    if "sysdatetime" in ddl_lower:
+        sigs.append("SYSDATETIME")
+    if "@@identity" in ddl_lower or "scope_identity" in ddl_lower:
+        sigs.append("IDENTITY_FN")
+    if " top " in ddl_lower and " from " in ddl_lower:
+        sigs.append("TOP_CLAUSE")
+
+    return sigs
+
+
+def _search_relevant_cases(obj_type: str, signatures: list, limit: int = 5) -> list:
+    """error_cases.txt 에서 obj_type + 시그니처 매칭되는 케이스 추출.
+
+    파일이 없거나 비어있으면 빈 리스트.
+    """
+    try:
+        from pathlib import Path
+        cases_path = Path("backend/prompts/mssql_to_mysql/error_cases.txt")
+        if not cases_path.exists():
+            cases_path = Path("prompts/mssql_to_mysql/error_cases.txt")
+        if not cases_path.exists():
+            return []
+
+        text = cases_path.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            return []
+
+        # 케이스 단위 파싱
+        import re as _re
+        cases = []
+        lines = text.split("\n")
+        current = None
+        for ln in lines:
+            m = _re.match(r"\[(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]\s*(.*)", ln)
+            if m:
+                if current:
+                    cases.append(current)
+                current = {"timestamp": m.group(1), "summary": m.group(2),
+                          "lines": [], "obj_type": "", "obj_name": ""}
+            elif current is not None:
+                if len(current["lines"]) < 100:
+                    current["lines"].append(ln)
+        if current:
+            cases.append(current)
+
+        # obj_type 필터 + 시그니처 매칭 점수
+        scored = []
+        for c in cases:
+            content = "\n".join(c["lines"]).lower()
+            # obj_type 추출
+            ot_match = _re.search(r"타입:\s*(\w+)", content)
+            c_obj_type = ot_match.group(1).upper() if ot_match else ""
+
+            if obj_type and c_obj_type and obj_type != c_obj_type:
+                # PROCEDURE != FUNCTION 같은 타입 다른 경우 제외
+                # 단 FUNC/FN/FUNCTION 같은 별칭은 같다고 봐야 함 (위에서 통일했음)
+                continue
+
+            # 시그니처 매칭 점수
+            score = 0
+            for sig in signatures:
+                if sig.lower() in content or sig.lower().replace("_", " ") in content:
+                    score += 1
+            # 최근일수록 가중치 (timestamp 기반 간단 가중치)
+            if c["timestamp"] >= "2026-04":
+                score += 1
+
+            if score > 0:
+                # 객체명 + 에러 요약 + 학습 fix 추출
+                obj_name = ""
+                onm = _re.search(r"\[KB-CANDIDATE\]\s+(\S+)\s*\|", "\n".join(c["lines"]))
+                if onm:
+                    obj_name = onm.group(1)
+                else:
+                    sm = _re.match(r"(\S+)", c["summary"])
+                    if sm: obj_name = sm.group(1)
+
+                # 첫 에러 라인
+                error_summary = ""
+                for ln in c["lines"]:
+                    if "1064" in ln or "1362" in ln or "Error" in ln:
+                        error_summary = ln.strip()[:200]
+                        break
+
+                # 학습된 처방 (AI 변환 완료 라인 — 있다면)
+                learned_fix = ""
+                for ln in c["lines"]:
+                    if "AI 변환 완료" in ln or "변환 완료" in ln:
+                        learned_fix = ln.split("변환 완료", 1)[-1].strip(" —")[:300]
+                        break
+
+                scored.append({
+                    "timestamp": c["timestamp"],
+                    "obj_name": obj_name,
+                    "obj_type": c_obj_type,
+                    "score": score,
+                    "error_summary": error_summary,
+                    "learned_fix": learned_fix,
+                })
+
+        # 점수순 정렬, 최신순 보조
+        scored.sort(key=lambda x: (-x["score"], x["timestamp"]), reverse=False)
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        return scored[:limit]
+    except Exception as e:
+        # 사전 학습 실패는 조용히 무시 (1차 시도는 KB 없이도 가능)
+        try:
+            import logging
+            logging.getLogger("databridge.kb").warning(
+                "[KB Pre-Apply] _search_relevant_cases 실패: %s", e)
+        except Exception:
+            pass
+        return []
+
+
+def _get_patterns_for_obj_type(obj_type: str, signatures: list) -> list:
+    """yml 정식 KB 패턴 중 obj_type/시그니처 매칭되는 것 추출."""
+    try:
+        all_p = get_all_patterns()
+        matched = []
+        for pid, entry in all_p.items():
+            # category 가 obj_type 매칭되거나, 시그니처 키워드가 패턴 ID 에 포함
+            entry_cat = (entry.get("category") or "").upper()
+            applies_to = (entry.get("applies_to") or [])
+            if isinstance(applies_to, str):
+                applies_to = [applies_to]
+            applies_to_upper = [str(x).upper() for x in applies_to]
+
+            type_match = (
+                obj_type and (
+                    obj_type in applies_to_upper or
+                    obj_type in entry_cat or
+                    entry_cat in ("ALL", "ANY", "")
+                )
+            )
+            sig_match = any(sig.upper() in pid.upper() for sig in signatures)
+
+            if type_match or sig_match:
+                # 통계로 적중률 계산
+                stats = get_stats(days=90).get("patterns", {}).get(pid, {})
+                attempts = stats.get("attempts", 0)
+                success = stats.get("success", 0)
+                hit_rate = round((success / attempts * 100), 0) if attempts else 0
+
+                matched.append({
+                    "id": pid,
+                    "category": entry_cat,
+                    "fix_prompt": entry.get("fix_prompt", ""),
+                    "hit_rate_pct": hit_rate,
+                    "attempts": attempts,
+                })
+
+        # 적중률 높은 순
+        matched.sort(key=lambda x: x.get("hit_rate_pct", 0), reverse=True)
+        return matched[:5]  # 최대 5개
+    except Exception:
+        return []
+
+
 # ─────────────────────────────────────────────────────
 # 통계 기록 (SQLite)
 # ─────────────────────────────────────────────────────

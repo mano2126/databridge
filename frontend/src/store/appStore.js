@@ -28,6 +28,24 @@ export const useAppStore = defineStore('app', {
 
     toasts:           [],
     toast: { show: false, msg: '', type: 'info' },
+
+    // ════════════════════════════════════════════════════════════════
+    // v95_p7 (2026-05-02) 본부장님 명령 — 좌측 메뉴 진행 표시기
+    //   "진행되고 있는 화면의 경우 왼쪽 메뉴 오른쪽에 수레바퀴"
+    //   "어느 페이지에서 작업 수행 중인지 알 수 있어야"
+    //
+    // 본질 진단:
+    //   기존 busyRoutes 는 *이관 작업 (Job)* 만 인식
+    //   검증 작업 (테이블/오브젝트) 은 컴포넌트 로컬 상태 → 좌측 인식 X
+    //
+    // 본질 처방:
+    //   검증 진행 상태를 *전역 store* 로 승격
+    //   - validateRunning: 어떤 검증이 진행 중인지 (table | object | null)
+    //   - validateProgress: { current, total, label }
+    //   Sidebar 가 이 상태 보고 수레바퀴 표시
+    // ════════════════════════════════════════════════════════════════
+    validateRunning:  null,                     // null | 'table' | 'object'
+    validateProgress: { current: 0, total: 0, label: '' },
   }),
 
   actions: {
@@ -185,6 +203,25 @@ export const useAppStore = defineStore('app', {
       else if (status === 500) this.notify(`서버 오류: ${detail}`, 'error')
       else if (!status)        this.notify('서버에 연결할 수 없습니다', 'error', 4000)
       else                     this.notify(`오류 ${status}: ${detail}`, 'error')
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    // v95_p7 (2026-05-02) 검증 진행 상태 actions
+    // ════════════════════════════════════════════════════════════════
+    setValidateRunning(kind, total = 0, label = '') {
+      // kind: 'table' | 'object' | null
+      this.validateRunning = kind
+      this.validateProgress = { current: 0, total, label }
+    },
+    updateValidateProgress(current, label = '') {
+      if (this.validateRunning) {
+        this.validateProgress.current = current
+        if (label) this.validateProgress.label = label
+      }
+    },
+    clearValidateRunning() {
+      this.validateRunning = null
+      this.validateProgress = { current: 0, total: 0, label: '' }
     },
   },
 })

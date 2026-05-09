@@ -265,6 +265,28 @@ def get_known_schemas_from_job(job: dict) -> list:
         if isinstance(name, str) and '.' in name:
             schemas_found.add(name.split('.')[0])
     
+    # ════════════════════════════════════════════════════════════
+    # v95_p23b (2026-05-03 본부장님 본질 처방): underscore PascalCase 추론
+    # ════════════════════════════════════════════════════════════
+    # 본부장님 환경: "1개씩 이관" 시 'HumanResources_Employee' 형식 입력
+    #               → '.' 분리 못 함 → schemas_found 빈 상태
+    # 처방: PascalCase + underscore 패턴 매치하여 schema 추론
+    #       AdventureWorks/Northwind/WideWorldImporters 같은 표준 DB 동작
+    #
+    # 안전성 (캐피탈사 snake_case 영향 0):
+    #   - 'customer_profile' (snake_case) → PascalCase 정규식 매치 안 됨
+    #   - 'HumanResources_Employee' (PascalCase) → 매치, 'HumanResources' 추출
+    if not schemas_found:
+        import re as _re
+        for _name in all_names:
+            if not isinstance(_name, str) or '.' in _name:
+                continue
+            # PascalCase: [A-Z][a-zA-Z0-9]+ + underscore + [A-Z][a-zA-Z0-9_]+
+            _m = _re.match(r'^([A-Z][a-zA-Z0-9]+)_[A-Z][a-zA-Z0-9_]+$', _name)
+            if _m:
+                schemas_found.add(_m.group(1))
+    # ────────────────────────────────────────────────────────────
+    
     if schemas_found:
         return sorted(schemas_found)
     
