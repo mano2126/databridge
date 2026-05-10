@@ -215,6 +215,7 @@ def assemble_preflight_hint(
     obj_type: str = "",
     src_ddl: str = "",
     max_hints: int = 5,
+    obj_name: str = "",
 ) -> str:
     """객체 타입 + DDL 패턴 분석 → 과거 KB 자산에서 관련된 fix_prompt 사전 추출.
 
@@ -224,6 +225,11 @@ def assemble_preflight_hint(
       3. error_cases.txt 검색 — 같은 시그니처 케이스의 fix_prompt 들 수집
       4. 추출된 fix_prompt 들을 정리해서 prompt 추가 섹션 반환
       5. yml 의 정식 KB 패턴 중 obj_type 매칭되는 것도 포함
+
+    v95_p107 hotfix_007 (2026-05-09 본부장님 본질 처방):
+      obj_name 파라미터 추가 — RAG 의 핵심.
+      "이전에 같은 객체가 어떻게 실패했는지" 가 다음 시도 프롬프트에 우선 주입되어
+      본부장님 시나리오 (이관→실패→AI재이관성공→다시이관해도성공) 를 가능하게 함.
     """
     if not obj_type and not src_ddl:
         return ""
@@ -237,7 +243,10 @@ def assemble_preflight_hint(
         return ""  # 위험 패턴 없으면 사전 적용 불필요
 
     # ─── Step 2: error_cases.txt 검색 ─────────────────────
-    relevant_cases = _search_relevant_cases(obj_type_upper, signatures, limit=max_hints)
+    # v95_p107 hotfix_007: obj_name 전달 — 같은 객체 과거 사례 우선 추출
+    relevant_cases = _search_relevant_cases(
+        obj_type_upper, signatures, limit=max_hints, obj_name=obj_name,
+    )
 
     # ─── Step 3: yml 정식 패턴에서 obj_type 매칭되는 것도 포함 ─
     yml_patterns = _get_patterns_for_obj_type(obj_type_upper, signatures)
@@ -265,8 +274,26 @@ def assemble_preflight_hint(
             sections.append(p["fix_prompt"].strip())
         sections.append("")
 
+    # ─── v95_p107 hotfix_007: obj_name 정확 매칭 케이스 우선 표시 ─
+    # RAG 핵심 — "이전에 이 객체가 어떻게 실패했는가" 가 AI 의 1차 시도에 들어감
+    exact_cases = [c for c in relevant_cases if c.get("is_exact_match")]
+    other_cases = [c for c in relevant_cases if not c.get("is_exact_match")]
+
+    if exact_cases and obj_name:
+        sections.append("")
+        sections.append("★ [최우선] 같은 객체 `{}` 의 과거 실패 사례 ★".format(obj_name))
+        sections.append("이 사례에서 발생한 에러를 반드시 회피하세요:")
+        sections.append("")
+        for c in exact_cases:
+            sections.append(f"  ▶ {c['timestamp']}")
+            if c.get("error_summary"):
+                sections.append(f"    발생했던 에러: {c['error_summary']}")
+            if c.get("learned_fix"):
+                sections.append(f"    학습된 처방: {c['learned_fix']}")
+            sections.append("")
+
     # error_cases.txt 의 과거 케이스 (가중치 낮음 — 사후 누적)
-    for c in relevant_cases:
+    for c in other_cases:
         sections.append(f"▶ [과거 케이스] {c['timestamp']} {c['obj_name']}")
         if c.get("error_summary"):
             sections.append(f"  발생했던 에러: {c['error_summary']}")
@@ -336,16 +363,33 @@ def _extract_ddl_signatures(obj_type: str, ddl_lower: str) -> list:
     return sigs
 
 
-def _search_relevant_cases(obj_type: str, signatures: list, limit: int = 5) -> list:
+def _search_relevant_cases(obj_type: str, signatures: list, limit: int = 5,
+                            obj_name: str = "") -> list:
     """error_cases.txt 에서 obj_type + 시그니처 매칭되는 케이스 추출.
 
     파일이 없거나 비어있으면 빈 리스트.
+
+    v95_p107 hotfix_007 (2026-05-09 본부장님 본질 처방):
+      obj_name 파라미터 추가 — RAG 핵심.
+      우선순위:
+        1) obj_name 정확 매칭 (지난번 이 객체 실패 사례) → 가중치 +10
+        2) obj_name prefix 매칭 (idu_, iu_ 등 i/d/u 통합 트리거 패턴) → +3
+        3) 시그니처 매칭 → +1
+        4) 최근 (2026-04 이후) → +1
+      1순위가 있으면 무조건 결과에 포함 (limit 무시).
     """
     try:
         from pathlib import Path
+        # ─── v95_p107 hotfix_008: 경로 후보 확대 ───────────
+        # 본부장님 환경: ~/project/databridge_full/backend/prompts/...
+        # cwd 가 어디든 동작하도록 절대 경로 후보 추가
         cases_path = Path("backend/prompts/mssql_to_mysql/error_cases.txt")
         if not cases_path.exists():
             cases_path = Path("prompts/mssql_to_mysql/error_cases.txt")
+        if not cases_path.exists():
+            # 이 파일 위치 기준으로 추적 (engine/error_kb.py → ../../prompts/...)
+            here = Path(__file__).resolve().parent
+            cases_path = here.parent.parent / "prompts" / "mssql_to_mysql" / "error_cases.txt"
         if not cases_path.exists():
             return []
 
@@ -353,62 +397,125 @@ def _search_relevant_cases(obj_type: str, signatures: list, limit: int = 5) -> l
         if not text.strip():
             return []
 
-        # 케이스 단위 파싱
+        # ─── v95_p107 hotfix_008: 라인 단위 파싱 ──────────
+        # 본부장님 환경 실제 형식 (1962 라인 기준):
+        #   [YYYY-MM-DD] obj_name | (error_code) error_msg...
+        # 호환: [YYYY-MM-DD HH:MM:SS] 형식도 인식 (구버전)
         import re as _re
         cases = []
-        lines = text.split("\n")
-        current = None
-        for ln in lines:
-            m = _re.match(r"\[(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2})\]\s*(.*)", ln)
+        # 한 줄에 한 케이스 — 핵심 정보 모두 추출
+        line_pat_v1 = _re.compile(
+            r"^\[(\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}:\d{2})?)\]\s+"
+            r"(\S+)\s*\|\s*"
+            r"\(([^)]+)\)\s*"
+            r"(.*)$"
+        )
+        for raw_ln in text.split("\n"):
+            ln = raw_ln.rstrip("\r")
+            m = line_pat_v1.match(ln)
             if m:
-                if current:
-                    cases.append(current)
-                current = {"timestamp": m.group(1), "summary": m.group(2),
-                          "lines": [], "obj_type": "", "obj_name": ""}
-            elif current is not None:
-                if len(current["lines"]) < 100:
-                    current["lines"].append(ln)
-        if current:
-            cases.append(current)
+                cases.append({
+                    "timestamp": m.group(1),
+                    "obj_name_raw": m.group(2),
+                    "error_code": m.group(3).strip(),
+                    "error_msg": m.group(4).strip(),
+                    # 호환성을 위해 기존 필드도 채움
+                    "summary": f"{m.group(2)} | ({m.group(3)}) {m.group(4)}",
+                    "lines": [ln],
+                })
+
+        # ─── v95_p107 hotfix_007: obj_name prefix 추출 ─────
+        # idu_/iu_/du_ 같은 통합 트리거 prefix 도 매칭하기 위함
+        obj_name_lower = (obj_name or "").lower()
+        obj_name_prefix = ""
+        if obj_name_lower:
+            _pm = _re.match(r"^(idu|iud|iu|du|ui|ud|udi|uid|di|id|usp|sp_|p_|ufn|fn_|f_|v_|vw_)",
+                            obj_name_lower)
+            if _pm:
+                obj_name_prefix = _pm.group(1)
 
         # obj_type 필터 + 시그니처 매칭 점수
         scored = []
         for c in cases:
             content = "\n".join(c["lines"]).lower()
-            # obj_type 추출
+            summary_lower = (c.get("summary") or "").lower()
+            c_obj_name_raw = (c.get("obj_name_raw") or "").lower()
+            # ─── v95_p107 hotfix_008: obj_type 추론 ──────────
+            # 본부장님 환경 라인엔 "타입:" 명시 없음 → 객체명 prefix 로 추론
             ot_match = _re.search(r"타입:\s*(\w+)", content)
-            c_obj_type = ot_match.group(1).upper() if ot_match else ""
+            if ot_match:
+                c_obj_type = ot_match.group(1).upper()
+            else:
+                # prefix 기반 추론
+                _otp = _re.match(
+                    r"^(usp|sp_|p_|proc_|ufn|fn_|f_|udf_|tvf_|"
+                    r"v_|vw_|view_|"
+                    r"idu|iud|iu|du|ui|ud|tr_|trg_)",
+                    c_obj_name_raw
+                )
+                if _otp:
+                    p = _otp.group(1)
+                    if p in ("usp", "sp_", "p_", "proc_"):
+                        c_obj_type = "PROCEDURE"
+                    elif p in ("ufn", "fn_", "f_", "udf_", "tvf_"):
+                        c_obj_type = "FUNCTION"
+                    elif p in ("v_", "vw_", "view_"):
+                        c_obj_type = "VIEW"
+                    elif p in ("idu", "iud", "iu", "du", "ui", "ud", "tr_", "trg_"):
+                        c_obj_type = "TRIGGER"
+                    else:
+                        c_obj_type = ""
+                else:
+                    c_obj_type = ""
 
             if obj_type and c_obj_type and obj_type != c_obj_type:
                 # PROCEDURE != FUNCTION 같은 타입 다른 경우 제외
                 # 단 FUNC/FN/FUNCTION 같은 별칭은 같다고 봐야 함 (위에서 통일했음)
                 continue
 
-            # 시그니처 매칭 점수
+            # ─── v95_p107 hotfix_007/008: 점수 계산 ──────────
             score = 0
+            # [1순위] obj_name 정확 매칭 — RAG 핵심
+            is_exact_match = False
+            if obj_name_lower:
+                # 정확 일치 우선
+                if c_obj_name_raw and c_obj_name_raw == obj_name_lower:
+                    score += 20
+                    is_exact_match = True
+                elif obj_name_lower in summary_lower or obj_name_lower in content:
+                    score += 10
+                    is_exact_match = True
+            # [2순위] obj_name prefix 매칭
+            if obj_name_prefix and c_obj_name_raw.startswith(obj_name_prefix):
+                score += 3
+            # [3순위] 시그니처 매칭
             for sig in signatures:
                 if sig.lower() in content or sig.lower().replace("_", " ") in content:
                     score += 1
-            # 최근일수록 가중치 (timestamp 기반 간단 가중치)
+            # [4순위] 최근일수록 가중치
             if c["timestamp"] >= "2026-04":
                 score += 1
 
             if score > 0:
                 # 객체명 + 에러 요약 + 학습 fix 추출
-                obj_name = ""
-                onm = _re.search(r"\[KB-CANDIDATE\]\s+(\S+)\s*\|", "\n".join(c["lines"]))
-                if onm:
-                    obj_name = onm.group(1)
-                else:
-                    sm = _re.match(r"(\S+)", c["summary"])
-                    if sm: obj_name = sm.group(1)
+                # v95_p107 hotfix_008: 새 형식이면 obj_name_raw 우선
+                this_obj_name = c.get("obj_name_raw") or ""
+                if not this_obj_name:
+                    onm = _re.search(r"\[KB-CANDIDATE\]\s+(\S+)\s*\|", "\n".join(c["lines"]))
+                    if onm:
+                        this_obj_name = onm.group(1)
+                    else:
+                        sm = _re.match(r"(\S+)", c["summary"])
+                        if sm: this_obj_name = sm.group(1)
 
-                # 첫 에러 라인
-                error_summary = ""
-                for ln in c["lines"]:
-                    if "1064" in ln or "1362" in ln or "Error" in ln:
-                        error_summary = ln.strip()[:200]
-                        break
+                # 첫 에러 라인 — 새 형식이면 error_msg 직접 사용
+                error_summary = c.get("error_msg") or ""
+                if not error_summary:
+                    for ln in c["lines"]:
+                        if "1064" in ln or "1362" in ln or "1363" in ln or "Error" in ln:
+                            error_summary = ln.strip()[:200]
+                            break
+                error_summary = error_summary[:200]
 
                 # 학습된 처방 (AI 변환 완료 라인 — 있다면)
                 learned_fix = ""
@@ -419,18 +526,30 @@ def _search_relevant_cases(obj_type: str, signatures: list, limit: int = 5) -> l
 
                 scored.append({
                     "timestamp": c["timestamp"],
-                    "obj_name": obj_name,
+                    "obj_name": this_obj_name,
                     "obj_type": c_obj_type,
                     "score": score,
                     "error_summary": error_summary,
                     "learned_fix": learned_fix,
+                    "is_exact_match": is_exact_match,
                 })
 
-        # 점수순 정렬, 최신순 보조
-        scored.sort(key=lambda x: (-x["score"], x["timestamp"]), reverse=False)
-        scored.sort(key=lambda x: x["score"], reverse=True)
+        # ─── v95_p107 hotfix_007: obj_name 정확 매칭 우선 ─────
+        # 1순위: 같은 obj_name 의 과거 케이스 (RAG 핵심) — 모두 포함
+        # 2순위: 점수순 정렬, 최신순 보조
+        exact_hits = [s for s in scored if s.get("is_exact_match")]
+        other_hits = [s for s in scored if not s.get("is_exact_match")]
+        # 정확 매칭은 시간 역순 (최신 실패 우선)
+        exact_hits.sort(key=lambda x: x["timestamp"], reverse=True)
+        # 기타는 점수순 + 최신순
+        other_hits.sort(key=lambda x: (-x["score"], x["timestamp"]), reverse=False)
+        other_hits.sort(key=lambda x: x["score"], reverse=True)
 
-        return scored[:limit]
+        # 정확 매칭 최대 3건 + 기타로 limit 채움
+        result = exact_hits[:3]
+        remaining = max(0, limit - len(result))
+        result.extend(other_hits[:remaining])
+        return result
     except Exception as e:
         # 사전 학습 실패는 조용히 무시 (1차 시도는 KB 없이도 가능)
         try:

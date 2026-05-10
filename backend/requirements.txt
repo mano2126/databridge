@@ -40,3 +40,7 @@ urllib3==2.6.3
 uvicorn==0.42.0
 watchfiles==1.1.1
 websockets==16.0
+
+# v95_p107: OS 트레이 앱 의존성
+pystray==0.19.5
+Pillow==10.4.0

@@ -36,6 +36,7 @@ import Sidebar from '@/components/layout/Sidebar.vue'
 import Topbar  from '@/components/layout/Topbar.vue'
 import ToastNotif from '@/components/common/ToastNotif.vue'
 import FloatingMonitor from '@/components/common/FloatingMonitor.vue'  // v10 #22: 실시간 플로팅 모니터
+// v95_p107: SystemTrayWidget 제거 — OS 트레이 앱 (tray_app.py) 으로 대체
 const app  = useAppStore()
 const jobs = useJobStore()
 const authStore = useAuthStore()

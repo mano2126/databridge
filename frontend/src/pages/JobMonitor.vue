@@ -673,7 +673,12 @@
                 <svg v-else-if="item.status==='error'" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg>
                 <svg v-else viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="6" r="2.5"/></svg>
                 <!-- v90.67: 라벨 — AI 재이관 / 재시도 후 성공 / 일반 완료 구분 -->
-                <span v-if="item.status==='done' && item.via_ai_remig" :title="`AI 재이관으로 성공 (${item.attempts || 2}회 시도)`">AI 재이관 성공</span>
+                <!-- v95_p107 hotfix_013: conversion_path 가 있으면 상세 라벨 우선 표시 -->
+                <span v-if="conversionPathLbl(item.conversion_path)"
+                      :title="`변환 경로: ${(item.conversion_path||[]).join(' → ')} (${item.attempts || 1}회 시도)`">
+                  {{ conversionPathLbl(item.conversion_path) }}
+                </span>
+                <span v-else-if="item.status==='done' && item.via_ai_remig" :title="`AI 재이관으로 성공 (${item.attempts || 2}회 시도)`">AI 재이관 성공</span>
                 <span v-else-if="item.status==='done' && item.had_error" :title="`재시도 후 성공 (${item.attempts || 2}회 시도)`">재시도 성공</span>
                 <span v-else>{{ statusLabel(item.status) }}</span>
               </span>
@@ -2197,6 +2202,36 @@ function progLabel(item){
   return '대기'
 }
 function statusLabel(s){ return {running:'진행중',done:'완료',pending:'대기',error:'오류',completed:'완료',idle:'대기',aborted:'중단'}[s]??s }
+
+// v95_p107 hotfix_013 (2026-05-10 본부장님 본질 처방):
+//   변환 경로 (conversion_path) 배열 → 한 눈에 읽는 라벨
+//   예: ["rule_fail","ai_ollama_ok"]  → "실패→AI(Gemma)성공"
+//       ["kb_match"]                  → "KB 매칭"
+//       ["rule_ok"]                   → "" (단순 완료, 라벨 생략)
+//       ["rule_fail","ai_ollama_fail","ai_anthropic_ok"]
+//                                     → "실패→AI(Gemma)실패→AI(Claude)성공"
+const __PROVIDER_LBL = { anthropic:'Claude', ollama:'Gemma', gemma:'Gemma', claude:'Claude', openai:'OpenAI' }
+function _pathStep(step) {
+  if (!step) return ''
+  if (step === 'rule')        return 'Rule'
+  if (step === 'rule_ok')     return ''  // 단순 완료는 라벨 없음
+  if (step === 'rule_fail')   return '실패'
+  if (step === 'kb_match')    return 'KB매칭'
+  if (step === 'ai_initial')  return 'AI'
+  const m = step.match(/^ai_([a-z0-9]+?)(_ok|_fail)?$/)
+  if (m) {
+    const prov = __PROVIDER_LBL[m[1]] || m[1]
+    const tail = m[2] === '_ok' ? '성공' : (m[2] === '_fail' ? '실패' : '')
+    return tail ? `AI(${prov})${tail}` : `AI(${prov})`
+  }
+  return step
+}
+function conversionPathLbl(path) {
+  if (!path || !path.length) return ''
+  // 단순 완료 (rule_ok 만) 는 라벨 생략 — 기존 "완료" 표기에 위임
+  if (path.length === 1 && path[0] === 'rule_ok') return ''
+  return path.map(_pathStep).filter(Boolean).join('→')
+}
 
 // phase 순서 정의
 // v92p12 (2026-04-30): ADVISOR_APPLY 단계 추가 — AI DBA 권고 자동 적용

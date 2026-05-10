@@ -12026,3 +12026,333 @@ MySQL 은 Table-Valued Function 을 지원하지 않습니다.
   near: '' (line )
   자동 등록 (v90.34 self-learning)
   TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND);\\nEND' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetContactInformation | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductDealerPrice | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductListPrice | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductStandardCost | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspGetBillOfMaterials | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspGetManagerEmployees | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspGetWhereUsedProductID | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspLogError | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspSearchCandidateResumes | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspUpdateEmployeeHireInfo | (1273) (1273, "Unknown collation: 'utf8mbCA_unicode_ci'")
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vJobCandidate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vJobCandidateEducation | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vAdditionalContactInfo | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vPersonDemographics | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vSalesPerson | (1054) (1054, "Unknown column 'a.AddressLoyalty' in 'field list'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vSalesPersonSalesByFiscalYears | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] iduSalesOrderDetail | (1363) (1363, 'There is no OLD row in on INSERT trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND);\\nEND' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND);\\nEND' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetContactInformation | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductListPrice | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductListPrice | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductStandardCost | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetProductStandardCost | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspGetManagerEmployees | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspLogError | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspLogError | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspSearchCandidateResumes | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspSearchCandidateResumes | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: PROCEDURE
+  near: '' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] uspUpdateEmployeeHireInfo | (1273) (1273, "Unknown collation: 'utf8mbCA_unicode_ci'")
+  타입: PROCEDURE
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vJobCandidate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vJobCandidate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vJobCandidateEducation | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vAdditionalContactInfo | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vAdditionalContactInfo | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vPersonDemographics | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vPersonDemographics | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vSalesPerson | (1054) (1054, "Unknown column 'a.AddressLoyalty' in 'field list'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vSalesPersonSalesByFiscalYears | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] vSalesPersonSalesByFiscalYears | (1054) (1054, "Unknown column 'pvt.FullName' in 'field list'")
+  타입: VIEW
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] iduSalesOrderDetail | (1363) (1363, 'There is no OLD row in on INSERT trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] iduSalesOrderDetail | (1363) (1363, 'There is no OLD row in on INSERT trigger')
+  타입: TRIGGER
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND);\\nEND' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-09] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND);\\nEND' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND)' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND)' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND)' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND);\\nEND' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetContactInformation | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetProductListPrice | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetProductStandardCost | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetAccountingEndDate | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: 'MILLISECOND)' (line 1)
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetProductListPrice | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결
+
+[2026-05-10] ufnGetProductStandardCost | (1064) (1064, "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the rig
+  타입: FUNCTION
+  near: '' (line )
+  자동 등록 (v90.34 self-learning)
+  TODO: 패턴 분석 후 sql_post_processor.POSTPROCESS_RULES 에 룰 추가 → 영구 해결

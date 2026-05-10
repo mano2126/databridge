@@ -75,11 +75,17 @@ const routes = [
       { path: 'ai-stats',        component: () => import('@/pages/AIStatsPage.vue'),
         meta: { title: 'AI 사용 통계', section: '관리자' } },
       { path: 'process',         component: () => import('@/pages/AdminProcess.vue'),
-        meta: { title: '백엔드 프로세스', section: '관리자' } },
+        meta: { title: '프로세스', section: '관리자' } },
       { path: 'settings',        component: () => import('@/pages/Settings.vue'),
         meta: { title: '시스템 설정', section: '관리자' } },
     ]
   },
+  // v95_p107 hotfix_005: 콘솔 전용 팝업 — AdminConsole(/admin/console) 와 완전 독립.
+  // children 이 아닌 최상위 라우트라서 사이드바/탑바 없이 콘솔만 풀스크린으로 렌더.
+  { path: '/console-popup/backend',  component: () => import('@/pages/BackendConsole.vue'),
+    meta: { title: 'Backend 콘솔', section: '관리자', standalone: true } },
+  { path: '/console-popup/frontend', component: () => import('@/pages/FrontendConsole.vue'),
+    meta: { title: 'Frontend 콘솔', section: '관리자', standalone: true } },
   // 기존 /admin/* 직접 라우트는 보존 (URL 호환) — 단, 새창에서 자식 라우트로 접근 권장
   r('/admin/users',       'AdminUsers',       '사용자 관리',         '관리자'),
   r('/admin/audit',       'AdminAudit',       '감사 로그',           '관리자'),

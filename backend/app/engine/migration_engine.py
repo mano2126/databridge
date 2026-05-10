@@ -2070,8 +2070,26 @@ class MigrationEngine:
             _obj_engine = self.job.get("obj_engine", "auto")
             statements = []
 
+            # ════════════════════════════════════════════════════════════
+            # v95_p107 hotfix_013 (2026-05-10 본부장님 본질 처방):
+            #   변환 경로 추적 — 각 단계마다 _conversion_path 에 append
+            #   끝에서 item_statuses[name]["conversion_path"] 에 저장 → UI 표시
+            #
+            # 단계 라벨:
+            #   "rule"           Rule-based 변환 시도
+            #   "rule_ok"        Rule 성공
+            #   "rule_fail"      Rule 실패 (DB 송신 후 1064/1054 등)
+            #   "kb_match"       KB 매칭으로 즉시 성공 (AI 호출 우회)
+            #   "ai_<provider>"  AI 시도 (provider 는 anthropic/ollama 등 동적)
+            #   "ai_<provider>_ok"   AI 성공
+            #   "ai_<provider>_fail" AI 실패
+            # ════════════════════════════════════════════════════════════
+            self._conversion_path = []
+
             # ── AI 이관 ──────────────────────────────────────────
             if _obj_engine in ("ai", "claude"):
+                # v95_p107 hotfix_013: 변환 경로 기록 (사용자가 처음부터 AI 선택)
+                self._conversion_path.append("ai_initial")
                 # API 키 확인 (anthropic_api_key 우선)
                 try:
                     from app.api.routes.settings import _cfg as _chk_cfg
@@ -2139,6 +2157,14 @@ class MigrationEngine:
                     )
                     stmts = result.get("statements", [])
                     notes = result.get("notes", "")
+                    # v95_p107 hotfix_013: KB 매칭으로 즉시 성공한 경우 path 갱신
+                    if result.get("path_marker") == "kb_match":
+                        # 사용자가 처음부터 AI 선택했고 KB 가 매칭됨
+                        # path 의 마지막 ai_initial 을 kb_match 로 교체
+                        if self._conversion_path and self._conversion_path[-1] == "ai_initial":
+                            self._conversion_path[-1] = "kb_match"
+                        else:
+                            self._conversion_path.append("kb_match")
                     
                     # v90.34: 자기학습 SQL 보정 + DDL 완성도 검증
                     #   본부장님 모토: "지금은 발생해도 앞으로 똑같은건 발생 시키지 않는다"
@@ -2471,6 +2497,11 @@ class MigrationEngine:
                 _prev = self.job["item_statuses"].get(name) or {}
                 _prev_had_error = bool(_prev.get("had_error") or _prev.get("status") == "error")
                 _prev_attempts  = int(_prev.get("attempts") or 0)
+                # v95_p107 hotfix_013: conversion_path 도 함께 저장
+                # path 가 비어있으면 단순 rule 성공 (1차에 통과)
+                _final_path = list(getattr(self, "_conversion_path", []) or [])
+                if not _final_path:
+                    _final_path = ["rule_ok"]
                 self.job["item_statuses"][name] = {
                     "type": obj_type.lower(),
                     "status": "done",
@@ -2481,25 +2512,61 @@ class MigrationEngine:
                     # v90.67: 이전에 실패한 적 있으면 마킹 — UI 의 "재시도 후 성공" 라벨용
                     "had_error": _prev_had_error,
                     "attempts": _prev_attempts + 1,
+                    # v95_p107 hotfix_013: 변환 경로 (UI 라벨용)
+                    "conversion_path": _final_path,
                 }
                 return True
             except Exception as e:
                 # v9 패치 #48: AI 자동 재시도 — 오류 메시지를 AI 에 피드백해서 다시 변환
                 # MSSQL 타겟 TRIGGER 에 한해, AI 경로로 변환했는데 실패했으면 최대 2회 재시도.
                 # 매번 이전 실패 DDL + 오류 메시지를 AI 에 전달 → AI 가 수정해서 재생성.
+                # ════════════════════════════════════════════════════════════
+                # v95_p107 hotfix_011 (2026-05-10 본부장님 본질 처방):
+                #   AI 자동 재시도 게이트 — 하드코딩 0%
+                #
+                # 이전 (hotfix_010): provider 이름 ("anthropic", "ollama") 하드코딩
+                #   → 새 provider 추가될 때마다 이 코드 손대야 함 (부채)
+                #
+                # 본질: 게이트는 "어떤 provider 인지" 알 필요 없음.
+                #       "AI 변환 호출이 가능한 환경인가?" 한 가지만 알면 됨.
+                #       provider 분기 책임은 schema.is_ai_conversion_available() 가 짐.
+                #
+                # 효과: 미래 OpenAI/vLLM/Cohere/자체 호스팅 LLM 추가되어도
+                #       이 게이트는 영구 무관 (수정 0줄).
+                # ════════════════════════════════════════════════════════════
+                # _obj_engine 이 명시적 "rule" / "rule_only" 가 아닌 모든 경우 AI 시도 가능
+                # (사용자가 UI 에서 "rule_only" 를 명시적으로 선택했을 때만 AI 비활성)
+                _engine_allows_ai = str(_obj_engine or "").lower() not in ("rule", "rule_only", "disable", "disabled", "off", "none")
                 _can_retry = (
-                    tgt_db_type in ("mssql","azure","sqlserver")
-                    and obj_type == "TRIGGER"
-                    and _obj_engine in ("ai","claude","auto")  # AI 사용 가능 환경
+                    tgt_db_type in ("mysql","mariadb","mssql","azure","sqlserver","postgresql","pg")
+                    and obj_type in ("TRIGGER","FUNCTION","PROCEDURE","VIEW","FUNC","PROC")
+                    and _engine_allows_ai
                 )
                 _max_retries = int(self.job.get("ai_retry_count", 2))  # 기본 2회
                 # error_hint 파라미터가 이미 값이 있으면 이건 이미 재시도 중인 호출
                 _current_retry = int(getattr(self, '_ai_retry_depth', 0))
                 if _can_retry and _current_retry < _max_retries:
                     try:
-                        from app.api.routes.schema import _ai_convert_ddl
-                        from app.api.routes.settings import _cfg as _r_cfg
-                        if _r_cfg().get("anthropic_api_key", ""):
+                        from app.api.routes.schema import _ai_convert_ddl, is_ai_conversion_available
+                        # ─── v95_p107 hotfix_011: provider 무관 가용성 체크 ──
+                        # 본부장님 모토 "하드코딩 0%" — 게이트는 provider 종류를 모른다
+                        # provider 분기는 is_ai_conversion_available 가 책임진다
+                        if is_ai_conversion_available():
+                            # v95_p107 hotfix_013: 변환 경로 기록
+                            # provider 이름은 settings 에서 동적으로 가져옴 (하드코딩 0%)
+                            try:
+                                from app.api.routes.settings import _cfg as _path_cfg
+                                _path_provider = (_path_cfg().get("ai_provider", "anthropic") or "anthropic").strip().lower()
+                            except Exception:
+                                _path_provider = "ai"
+                            # rule 실패 후 ai 재시도 진입 — 첫 진입이면 rule_fail 도 누적
+                            if not self._conversion_path:
+                                self._conversion_path.append("rule_fail")
+                            elif self._conversion_path and not self._conversion_path[-1].startswith("rule_fail") \
+                                 and not self._conversion_path[-1].startswith("ai_"):
+                                self._conversion_path.append("rule_fail")
+                            self._conversion_path.append(f"ai_{_path_provider}")
+
                             self._log("info",
                                 f"[{name}] AI 자동 재시도 {_current_retry+1}/{_max_retries} — "
                                 f"오류 컨텍스트를 AI 에 피드백")
@@ -2523,6 +2590,10 @@ class MigrationEngine:
                             )
                             _retry_stmts = _retry_result.get("statements", [])
                             if _retry_stmts:
+                                # v95_p107 hotfix_013: 재시도 성공 — path 에 _ok 마커
+                                if self._conversion_path and self._conversion_path[-1].startswith("ai_") \
+                                   and not self._conversion_path[-1].endswith(("_ok", "_fail")):
+                                    self._conversion_path[-1] = self._conversion_path[-1] + "_ok"
                                 # 재시도 호출 전 depth 증가 (무한 루프 방지)
                                 self._ai_retry_depth = _current_retry + 1
                                 try:
@@ -2612,10 +2683,19 @@ class MigrationEngine:
                     )
                 except Exception:
                     pass
+                # v95_p107 hotfix_013: 최종 실패 — path 마지막 ai_X 가 있으면 _fail 마커
+                _err_path = list(getattr(self, "_conversion_path", []) or [])
+                if _err_path and _err_path[-1].startswith("ai_") \
+                   and not _err_path[-1].endswith(("_ok", "_fail")):
+                    _err_path[-1] = _err_path[-1] + "_fail"
+                if not _err_path:
+                    _err_path = ["rule_fail"]
                 self.job["item_statuses"][name] = {"type":obj_type.lower(),"status":"error","rows":0,"error":str(e)[:200],"started_at":None,"finished_at":datetime.now(_KST).isoformat(),
                     # v90.67: 실패해도 attempts 누적 + had_error 마킹
                     "had_error": True,
                     "attempts": int((self.job["item_statuses"].get(name) or {}).get("attempts") or 0) + 1,
+                    # v95_p107 hotfix_013: 변환 경로
+                    "conversion_path": _err_path,
                 }
                 self.job["rows_error"] += 1
                 # ── 오류 자동 누적 ──────────────────────────────────

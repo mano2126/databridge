@@ -66,6 +66,16 @@ def setup_logging():
         lg.handlers.clear()
         lg.propagate = True
 
+    # v95_p107 hotfix_002: 노이즈 라이브러리 로거를 WARNING 으로 강제.
+    #   - httpx/httpcore   : Supervisor 게이트웨이 호출(/process/status 등)이 매 5초 DEBUG 폭탄
+    #   - urllib3          : Docker SDK가 컨테이너 stats 호출시 DEBUG 폭탄 (Monitor.vue 폴링)
+    #   - docker           : Docker SDK 자체 디버그
+    #   - asyncio/multipart/watchfiles: 부수 잡음
+    for name in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11",
+                 "urllib3", "urllib3.connectionpool",
+                 "docker", "asyncio", "multipart", "watchfiles"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
     logging.info("DataBridge Studio v2.0 로깅 시작 → %s", log_file)
     return log_file
 

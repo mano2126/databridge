@@ -3951,6 +3951,52 @@ def _build_schema_context(src_ddl: str, obj_type: str, obj_name: str, tgt_db: st
     return header + "".join(sections)
 
 
+def is_ai_conversion_available() -> bool:
+    """
+    현재 설정으로 AI 변환을 호출할 수 있는지 여부 반환.
+
+    v95_p107 hotfix_011 (2026-05-10 본부장님 본질 처방):
+      provider 종류는 변환 함수 (_ai_convert_ddl) 만 알면 된다.
+      외부 호출자 (게이트, 재시도 로직) 는 'AI 변환 가능?' 한 가지만 알면 됨.
+      이 함수가 provider 별 가용성 체크를 모두 캡슐화한다.
+
+    미래에 새 provider 추가 시 → 이 함수에만 분기 추가하면 모든 곳에 자동 반영.
+    하드코딩 0%, 부작용 0%, 본질에 충실.
+
+    Returns:
+        bool: 현재 설정으로 _ai_convert_ddl 호출이 의미 있는 결과를 낼 수 있으면 True
+    """
+    try:
+        from app.api.routes.settings import _cfg as _gcfg
+        cfg = _gcfg()
+        provider = (cfg.get("ai_provider", "anthropic") or "anthropic").strip().lower()
+
+        # provider 별 가용성 체크 — _ai_convert_ddl 의 분기와 정확히 일치해야 함
+        # (이 함수와 _ai_convert_ddl 의 provider 분기는 한 곳에서 같이 갱신되어야 본부장님 모토 유지)
+        if provider == "ollama":
+            # Ollama: ollama_url 만 있으면 OK (api_key 불필요)
+            return bool((cfg.get("ollama_url") or "").strip())
+        elif provider == "anthropic":
+            # Anthropic: api_key 필요
+            api_key = (cfg.get("anthropic_api_key") or "").strip()
+            if not api_key:
+                # 호환성 — claude_api_key 도 시도
+                try:
+                    from app.core.json_store import JsonStore as _Store
+                    api_key = (_Store("settings").get("claude_api_key") or {}).get("value", "")
+                except Exception:
+                    pass
+            return bool(api_key)
+        else:
+            # 미래 provider: 보수적으로 False
+            # 새 provider 추가 시 여기에 elif 추가
+            _log.warning("[is_ai_conversion_available] 알 수 없는 provider=%s", provider)
+            return False
+    except Exception as e:
+        _log.warning("[is_ai_conversion_available] 가용성 체크 실패 (False 반환): %s", e)
+        return False
+
+
 def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
                     src_db: str, tgt_db: str, error_hint: str = "",
                     job_id: str = "",
@@ -3982,6 +4028,40 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
     _trace("01-enter", obj_type=obj_type, src=src_db, tgt=tgt_db,
            ddl_len=len(src_ddl or ""), max_tokens=max_tokens,
            has_error_hint=bool(error_hint))
+
+    # ════════════════════════════════════════════════════════════════
+    # v95_p107 hotfix_012 (2026-05-10 본부장님 본질 처방):
+    #   KB 매칭 시도 — 같은 obj_name 의 과거 성공 SQL 이 KB 에 있으면
+    #   AI 호출 없이 즉시 그 SQL 반환 (RAG 의 본질).
+    #
+    # 본부장님 정리 흐름 Step 8 ("다시 처음부터 이관 → 100% 성공") 작동의 핵심.
+    # error_hint 가 있으면 (재시도 호출) 매칭 우회 — AI 가 직접 회피해야 함.
+    # ════════════════════════════════════════════════════════════════
+    if not error_hint:
+        try:
+            from app.core.obj_executor import _kb_match_pattern as _kb_match_p107
+            _kb_hit = _kb_match_p107(src_db, tgt_db, obj_type, obj_name, src_ddl)
+            if _kb_hit and _kb_hit.get("tgt_sample_ddl"):
+                _trace("01b-kb-match-hit",
+                       kb_id=_kb_hit.get("id"),
+                       source=_kb_hit.get("source"),
+                       use_count=_kb_hit.get("use_count"))
+                _log.info(
+                    "[v95_p107-KB-MATCH] %s [%s] KB 매칭 성공 — AI 호출 우회 "
+                    "(id=%s, source=%s, use_count=%s)",
+                    obj_type, obj_name,
+                    _kb_hit.get("id"), _kb_hit.get("source"), _kb_hit.get("use_count"),
+                )
+                return {
+                    "statements": [_kb_hit["tgt_sample_ddl"]],
+                    "notes": (f"[KB 매칭 source={_kb_hit.get('source')} "
+                              f"use_count={_kb_hit.get('use_count')}]"),
+                    # v95_p107 hotfix_013: 호출자가 변환 경로 추적용
+                    "path_marker": "kb_match",
+                }
+        except Exception as _kme:
+            _log.warning("[v95_p107] KB 매칭 시도 실패 (무시, AI 변환 진행): %s", _kme)
+    # ════════════════════════════════════════════════════════════════
 
     # anthropic_api_key (시스템 설정) 또는 claude_api_key 둘 다 시도
     from app.api.routes.settings import _cfg as _gcfg
@@ -4606,6 +4686,33 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
         except Exception as _le:
             _log.warning("[KB 학습] 훅 실패 (무시): %s", _le)
         # ───────────────────────────────────────────────────
+
+        # ════════════════════════════════════════════════════════════
+        # v95_p107 hotfix_012 (2026-05-10 본부장님 본질 처방):
+        #   AI 변환 성공 시 KB 에 패턴 등록 (다음 이관 시 같은 패턴 매칭용)
+        #
+        # 본부장님 정리 흐름 Step 3,7 ("AI 성공 시 KB 축적") 작동의 핵심.
+        # 등록된 패턴은 다음 _ai_convert_ddl 호출 시 위(01b-kb-match)에서 매칭됨.
+        # ════════════════════════════════════════════════════════════
+        if stmts:  # 성공한 변환만 등록
+            try:
+                from app.core.obj_executor import _kb_register_pattern as _kb_reg_p107
+                _converted_ddl = "\n".join(s for s in stmts if s).strip()
+                _kb_reg_p107(
+                    src_db=src_db, tgt_db=tgt_db,
+                    obj_type=obj_type, obj_name=obj_name,
+                    src_ddl=src_ddl, tgt_ddl=_converted_ddl,
+                    source="ai_success",
+                )
+                _trace("15b-kb-registered", obj_name=obj_name)
+                _log.info(
+                    "[v95_p107-KB-REGISTER] %s [%s] 변환 성공 SQL → KB 등록 "
+                    "(다음 이관 시 RAG 매칭 가능)",
+                    obj_type, obj_name,
+                )
+            except Exception as _kre:
+                _log.warning("[v95_p107] KB 등록 실패 (무시): %s", _kre)
+        # ════════════════════════════════════════════════════════════
 
         # v90.40: TRACE 15 - 정상 반환 직전
         _trace("15-return-ok", final_stmt_count=len(stmts))

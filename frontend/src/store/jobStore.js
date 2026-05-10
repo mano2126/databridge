@@ -171,7 +171,8 @@ export const useJobStore = defineStore('jobs', {
         }
       }
       poll()  // 즉시 1회 실행
-      this._pollTimer = setInterval(poll, 5000)
+      // v95_p107 hotfix_002: 5000 → 15000. 사이드바 활성 표시는 15초로 충분, 백엔드 노이즈 ↓
+      this._pollTimer = setInterval(poll, 15000)
     },
 
     stopGlobalPolling() {

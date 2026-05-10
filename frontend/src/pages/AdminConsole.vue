@@ -88,7 +88,7 @@ const MENU_GROUPS = [
     label: '프로세스',
     items: [
       { path: '/admin/console/process',
-        label: '백엔드 프로세스',
+        label: '프로세스',
         icon: '<rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="5" cy="6" r=".7" fill="currentColor"/><line x1="7.5" y1="6" x2="12.5" y2="6"/><line x1="4" y1="9" x2="12" y2="9"/><line x1="4" y1="11" x2="9" y2="11"/>' },
     ]
   },

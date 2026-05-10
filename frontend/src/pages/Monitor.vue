@@ -1021,7 +1021,8 @@ onMounted(async () => {
     running.value.forEach(j => connectJobWs(j.id))
   }
   connectMonitorWs()
-  pollTimer = setInterval(async () => { if (autoRefresh.value) await pollRefresh() }, 2000)
+  // v95_p107 hotfix_002: 2000 → 5000. Docker stats 호출 부하 ↓ (5초 충분히 빠름)
+  pollTimer = setInterval(async () => { if (autoRefresh.value) await pollRefresh() }, 5000)
 })
 
 onUnmounted(() => {
