@@ -608,12 +608,13 @@ def create_job(body: dict, bg: BackgroundTasks, request: Request, user=Depends(r
     body = _resolve_pw(body)
 
     j["src_host"]        = body.get("src_host","localhost")
-    j["src_port"]        = body.get("src_port", 3306)
+    # ─── v95_p107 hotfix_018: 포트 하드코딩 제거 (위저드 값 그대로) ───
+    j["src_port"]        = body.get("src_port")
     j["src_database"]    = body.get("src_database","")
     j["src_username"]    = body.get("src_username","root")
     j["src_password"]    = body.get("src_password","")
     j["tgt_host"]        = body.get("tgt_host","localhost")
-    j["tgt_port"]        = body.get("tgt_port", 1433)
+    j["tgt_port"]        = body.get("tgt_port")  # hotfix_018: 위저드 값 그대로
     j["tgt_database"]    = body.get("tgt_database","target_db")
     j["tgt_username"]    = body.get("tgt_username","sa")
     j["tgt_password"]    = body.get("tgt_password","")
@@ -922,7 +923,7 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
                             _schema_conns["target"] = {
                                 "db_type":  engine_job.get("tgt_db", "mysql"),
                                 "host":     engine_job.get("tgt_host", ""),
-                                "port":     engine_job.get("tgt_port", 3306),
+                                "port":     engine_job.get("tgt_port"),  # hotfix_018: 위저드 값 그대로
                                 "username": engine_job.get("tgt_username", ""),
                                 "password": engine_job.get("tgt_password", ""),
                                 "database": engine_job.get("tgt_database", ""),
@@ -1007,7 +1008,7 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
                 _schema_conns["target"] = {
                     "db_type":  engine_job.get("tgt_db", "mysql"),
                     "host":     engine_job.get("tgt_host", ""),
-                    "port":     engine_job.get("tgt_port", 3306),
+                    "port":     engine_job.get("tgt_port"),  # hotfix_018: 위저드 값 그대로
                     "username": engine_job.get("tgt_username", ""),
                     "password": engine_job.get("tgt_password", ""),
                     "database": engine_job.get("tgt_database", ""),
@@ -1298,11 +1299,11 @@ def restart_job(jid: str, bg: BackgroundTasks, request: Request, body: dict = No
     orig_name = src["name"].replace("[재실행] ","").replace("【재실행】","").strip()
     new_job   = _new_job(new_jid, f"[재실행] {orig_name}", src["src_db"], src["tgt_db"])
 
-    for key in ("src_host","src_database","src_username","src_password",
-                "tgt_host","tgt_database","tgt_username","tgt_password",
+    for key in ("src_host","src_port","src_database","src_username","src_password",
+                "tgt_host","tgt_port","tgt_database","tgt_username","tgt_password",
                 "tables","batch_size","truncate_target","create_table","on_error",
                 "objects","convert_objects",
-                "schema_strategy"):  # v90.48
+                "schema_strategy"):  # v90.48 + hotfix_018: src_port/tgt_port 추가
         new_job[key] = src.get(key, new_job.get(key))
 
     for key in ("src_host","src_database","src_username","src_password","src_port",
@@ -1332,13 +1333,15 @@ def restart_job(jid: str, bg: BackgroundTasks, request: Request, body: dict = No
     
     _replenish_log = []
     _src_db_type = (new_job.get("src_db") or "").lower()
-    _src_default_port = 1433 if _src_db_type in ("mssql","azure") else 3306
+    # ─── v95_p107 hotfix_018 (2026-05-10): 포트 하드코딩 완전 제거 ───
+    # 본부장님 모토 #4: 위저드 = single source, 표준 포트도 환경마다 변경 가능.
+    # _src_default_port 변수 자체를 제거 — 위저드 값(src_port) 만 사용.
     
     # 공통 conn dict (schema._query_tables / _get_objects_* 가 받는 형식)
     _src_conn = {
         "db_type":  _src_db_type,
         "host":     new_job.get("src_host",""),
-        "port":     int(new_job.get("src_port") or _src_default_port),
+        "port":     new_job.get("src_port"),  # hotfix_018: 위저드 값 그대로, None 가능
         "username": new_job.get("src_username",""),
         "password": new_job.get("src_password",""),
         "database": new_job.get("src_database",""),

@@ -85,11 +85,17 @@ class TrayState:
         self.backend_pid: Optional[int] = None
         self.backend_mode: str = ""
         self.backend_uptime: Optional[float] = None
+        # ── hotfix_015: Circuit Breaker 상태 ──
+        self.backend_crash_reason: str = ""
+        self.backend_consecutive_crashes: int = 0
         self.frontend_running = False
         self.frontend_pid: Optional[int] = None
         self.frontend_mode: str = ""
         self.frontend_uptime: Optional[float] = None
         self.frontend_port: int = 3000
+        # ── hotfix_015: Frontend Circuit Breaker 상태 ──
+        self.frontend_crash_reason: str = ""
+        self.frontend_consecutive_crashes: int = 0
         self.last_error: str = ""
         self.last_poll_ts: float = 0.0
         self.lock = threading.RLock()
@@ -97,6 +103,9 @@ class TrayState:
     def overall_color(self) -> str:
         with self.lock:
             if not self.supervisor_running:
+                return "red"
+            # ── hotfix_015: 회로 차단 상태도 빨간색 ──
+            if self.backend_crash_reason or self.frontend_crash_reason:
                 return "red"
             be, fe = self.backend_running, self.frontend_running
             if be and fe:
@@ -109,13 +118,21 @@ class TrayState:
         with self.lock:
             if not self.supervisor_running:
                 return "DataBridge — Supervisor 응답 없음"
+            # ── hotfix_015: 회로 차단 시 명시 ──
+            if self.backend_crash_reason and self.frontend_crash_reason:
+                return "DataBridge — 회로 차단 (수동 시작 필요)"
+            if self.backend_crash_reason:
+                return "DataBridge — Backend 회로 차단"
+            if self.frontend_crash_reason:
+                return "DataBridge — Frontend 회로 차단"
             be, fe = self.backend_running, self.frontend_running
             if be and fe:
                 return "DataBridge is running"
-            if be:
-                return "DataBridge — Backend only"
+            # ── hotfix_015: 본부장님 표준 — Frontend 우선 표기 ──
             if fe:
                 return "DataBridge — Frontend only"
+            if be:
+                return "DataBridge — Backend only"
             return "DataBridge is stopped"
 
 state = TrayState()
@@ -169,6 +186,8 @@ def poll_status():
             state.supervisor_running = False
             state.backend_running = False
             state.frontend_running = False
+            state.backend_crash_reason = ""
+            state.frontend_crash_reason = ""
             state.last_error = "Supervisor (port 8765) 응답 없음"
         else:
             state.supervisor_running = True
@@ -176,12 +195,18 @@ def poll_status():
             state.backend_pid = data.get("pid")
             state.backend_mode = data.get("mode") or ""
             state.backend_uptime = data.get("uptime_seconds")
+            # ── hotfix_015: CB 상태 ──
+            state.backend_crash_reason = data.get("crash_reason") or ""
+            state.backend_consecutive_crashes = int(data.get("consecutive_crashes") or 0)
             fe = data.get("frontend") or {}
             state.frontend_running = bool(fe.get("running"))
             state.frontend_pid = fe.get("pid")
             state.frontend_mode = fe.get("mode") or ""
             state.frontend_uptime = fe.get("uptime_seconds")
             state.frontend_port = int(fe.get("port") or 3000)
+            # ── hotfix_015: Frontend CB 상태 ──
+            state.frontend_crash_reason = fe.get("crash_reason") or ""
+            state.frontend_consecutive_crashes = int(fe.get("consecutive_crashes") or 0)
             state.last_error = ""
         state.last_poll_ts = time.time()
 
@@ -221,13 +246,27 @@ def action_open_frontend_console(icon, item):
 def action_open_frontend(icon, item):
     webbrowser.open(FRONTEND_BASE)
 
-# Backend
-def action_be_start(icon, item):
-    log.info("Backend 시작 요청 (mode=safe)")
-    r = http_post("/supervisor/start", {"mode": "safe"})
-    log.info("응답: %s", r)
-    threading.Thread(target=lambda: (time.sleep(1.5), poll_status(), update_icon()),
-                     daemon=True).start()
+# ─── Backend 액션 (mode 파라미터화 — combo_001 옵션 A1) ───
+def _backend_start_mode(mode: str):
+    """Backend 시작 (mode 파라미터화). 메뉴에서 mode 선택 시 호출."""
+    def _action(icon, item):
+        log.info("Backend 시작 요청 (mode=%s)", mode)
+        r = http_post("/supervisor/start", {"mode": mode})
+        log.info("응답: %s", r)
+        # 좀비 검출 / Circuit Breaker 거부 시 사용자에게 보이도록 갱신
+        threading.Thread(target=lambda: (time.sleep(1.5), poll_status(), update_icon()),
+                         daemon=True).start()
+    return _action
+
+def _backend_restart_mode(mode: str):
+    """Backend 재시작 (mode 파라미터화)."""
+    def _action(icon, item):
+        log.info("Backend 재시작 요청 (mode=%s)", mode)
+        r = http_post("/supervisor/restart", {"mode": mode})
+        log.info("응답: %s", r)
+        threading.Thread(target=lambda: (time.sleep(2.5), poll_status(), update_icon()),
+                         daemon=True).start()
+    return _action
 
 def action_be_stop(icon, item):
     log.info("Backend 중지 요청")
@@ -236,33 +275,32 @@ def action_be_stop(icon, item):
     threading.Thread(target=lambda: (time.sleep(1.5), poll_status(), update_icon()),
                      daemon=True).start()
 
-def action_be_restart(icon, item):
-    log.info("Backend 재시작 요청")
-    r = http_post("/supervisor/restart", {})
-    log.info("응답: %s", r)
-    threading.Thread(target=lambda: (time.sleep(2.5), poll_status(), update_icon()),
-                     daemon=True).start()
+# ─── Frontend 액션 (mode 파라미터화) ───
+def _frontend_start_mode(mode: str):
+    """Frontend 시작 (mode 파라미터화)."""
+    def _action(icon, item):
+        log.info("Frontend 시작 요청 (mode=%s)", mode)
+        r = http_post("/supervisor/frontend/start", {"mode": mode})
+        log.info("응답: %s", r)
+        threading.Thread(target=lambda: (time.sleep(2.0), poll_status(), update_icon()),
+                         daemon=True).start()
+    return _action
 
-# Frontend
-def action_fe_start(icon, item):
-    log.info("Frontend 시작 요청 (mode=auto)")
-    r = http_post("/supervisor/frontend/start", {"mode": "auto"})
-    log.info("응답: %s", r)
-    threading.Thread(target=lambda: (time.sleep(2.0), poll_status(), update_icon()),
-                     daemon=True).start()
+def _frontend_restart_mode(mode: str):
+    """Frontend 재시작 (mode 파라미터화)."""
+    def _action(icon, item):
+        log.info("Frontend 재시작 요청 (mode=%s)", mode)
+        r = http_post("/supervisor/frontend/restart", {"mode": mode})
+        log.info("응답: %s", r)
+        threading.Thread(target=lambda: (time.sleep(2.5), poll_status(), update_icon()),
+                         daemon=True).start()
+    return _action
 
 def action_fe_stop(icon, item):
     log.info("Frontend 중지 요청")
     r = http_post("/supervisor/frontend/stop", {})
     log.info("응답: %s", r)
     threading.Thread(target=lambda: (time.sleep(1.5), poll_status(), update_icon()),
-                     daemon=True).start()
-
-def action_fe_restart(icon, item):
-    log.info("Frontend 재시작 요청")
-    r = http_post("/supervisor/frontend/restart", {})
-    log.info("응답: %s", r)
-    threading.Thread(target=lambda: (time.sleep(2.5), poll_status(), update_icon()),
                      daemon=True).start()
 
 def action_refresh(icon, item):
@@ -288,6 +326,9 @@ def be_status_label(_=None) -> str:
     with state.lock:
         if not state.supervisor_running:
             return "● Backend  : Supervisor 응답 없음"
+        # ── hotfix_015: 회로 차단 우선 표시 ──
+        if state.backend_crash_reason:
+            return f"⚠ Backend  : 회로 차단 ({state.backend_consecutive_crashes}회 실패)"
         if state.backend_running:
             mode = state.backend_mode.upper() if state.backend_mode else ""
             up = fmt_uptime(state.backend_uptime)
@@ -298,6 +339,9 @@ def fe_status_label(_=None) -> str:
     with state.lock:
         if not state.supervisor_running:
             return "● Frontend : Supervisor 응답 없음"
+        # ── hotfix_015: 회로 차단 우선 표시 ──
+        if state.frontend_crash_reason:
+            return f"⚠ Frontend : 회로 차단 ({state.frontend_consecutive_crashes}회 실패)"
         if state.frontend_running:
             mode = state.frontend_mode.upper() if state.frontend_mode else ""
             up = fmt_uptime(state.frontend_uptime)
@@ -308,40 +352,73 @@ def header_label(_=None) -> str:
     return state.header_text()
 
 def build_menu():
-    """동적 메뉴. 상태 변경 시 update_menu() 가 재평가."""
+    """동적 메뉴. 상태 변경 시 update_menu() 가 재평가.
+
+    v95_p107 combo_001 (2026-05-10 본부장님 결정):
+      - 옵션 A1: Start ▶ Mode (Safe/Multiprocess/Thread)
+      - 표준 #21: Frontend → Backend 순서 고정
+    """
     return Menu(
         # 헤더 (상태 텍스트, 비활성)
         Item(header_label, None, enabled=False),
         Menu.SEPARATOR,
-        # Backend / Frontend 상태 (비활성, 정보)
-        Item(be_status_label, None, enabled=False),
+        # ── 본부장님 표준 #21: Frontend → Backend 순서 ──
         Item(fe_status_label, None, enabled=False),
+        Item(be_status_label, None, enabled=False),
         Menu.SEPARATOR,
-        # Dashboard (Docker Desktop 의 "Dashboard" 와 동일)
+        # Dashboard
         Item("관리자 콘솔 열기...", action_open_admin),
         Item("Frontend 열기 (브라우저)", action_open_frontend),
         Menu.SEPARATOR,
-        # Backend 서브메뉴
-        Item("Backend", Menu(
-            Item("Start (safe)", action_be_start,
-                 enabled=lambda i: state.supervisor_running and not state.backend_running),
-            Item("Stop", action_be_stop,
-                 enabled=lambda i: state.supervisor_running and state.backend_running),
-            Item("Restart", action_be_restart,
-                 enabled=lambda i: state.supervisor_running and state.backend_running),
-            Menu.SEPARATOR,
-            Item("콘솔 열기...", action_open_backend_console),
-        )),
-        # Frontend 서브메뉴
+        # ── Frontend 서브메뉴 (Frontend 가 위) ──
         Item("Frontend", Menu(
-            Item("Start (auto)", action_fe_start,
-                 enabled=lambda i: state.supervisor_running and not state.frontend_running),
+            # Start ▶ Mode 선택
+            Item("Start", Menu(
+                Item("Auto (default)", _frontend_start_mode("auto"),
+                     enabled=lambda i: state.supervisor_running and not state.frontend_running),
+                Item("Dev", _frontend_start_mode("dev"),
+                     enabled=lambda i: state.supervisor_running and not state.frontend_running),
+                Item("Release", _frontend_start_mode("release"),
+                     enabled=lambda i: state.supervisor_running and not state.frontend_running),
+            )),
             Item("Stop", action_fe_stop,
                  enabled=lambda i: state.supervisor_running and state.frontend_running),
-            Item("Restart", action_fe_restart,
-                 enabled=lambda i: state.supervisor_running and state.frontend_running),
+            # Restart ▶ Mode 선택
+            Item("Restart", Menu(
+                Item("Auto (default)", _frontend_restart_mode("auto"),
+                     enabled=lambda i: state.supervisor_running and state.frontend_running),
+                Item("Dev", _frontend_restart_mode("dev"),
+                     enabled=lambda i: state.supervisor_running and state.frontend_running),
+                Item("Release", _frontend_restart_mode("release"),
+                     enabled=lambda i: state.supervisor_running and state.frontend_running),
+            )),
             Menu.SEPARATOR,
             Item("콘솔 열기...", action_open_frontend_console),
+        )),
+        # ── Backend 서브메뉴 (Backend 가 아래) ──
+        Item("Backend", Menu(
+            # Start ▶ Mode 선택
+            Item("Start", Menu(
+                Item("Safe (default)", _backend_start_mode("safe"),
+                     enabled=lambda i: state.supervisor_running and not state.backend_running),
+                Item("Multiprocess", _backend_start_mode("multiprocess"),
+                     enabled=lambda i: state.supervisor_running and not state.backend_running),
+                Item("Thread", _backend_start_mode("thread"),
+                     enabled=lambda i: state.supervisor_running and not state.backend_running),
+            )),
+            Item("Stop", action_be_stop,
+                 enabled=lambda i: state.supervisor_running and state.backend_running),
+            # Restart ▶ Mode 선택
+            Item("Restart", Menu(
+                Item("Safe (default)", _backend_restart_mode("safe"),
+                     enabled=lambda i: state.supervisor_running and state.backend_running),
+                Item("Multiprocess", _backend_restart_mode("multiprocess"),
+                     enabled=lambda i: state.supervisor_running and state.backend_running),
+                Item("Thread", _backend_restart_mode("thread"),
+                     enabled=lambda i: state.supervisor_running and state.backend_running),
+            )),
+            Menu.SEPARATOR,
+            Item("콘솔 열기...", action_open_backend_console),
         )),
         Menu.SEPARATOR,
         Item("새로고침", action_refresh),

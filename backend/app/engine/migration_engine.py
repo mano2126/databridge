@@ -59,6 +59,42 @@ class MigrationEngine:
     """
     MySQL → MSSQL 실제 데이터 이관 엔진
     """
+
+    # ─── v95_p107 hotfix_018 (2026-05-10): 포트 하드코딩 완전 제거 ───
+    # 본부장님 모토 #4 (위저드 = single source, 하드코딩 0%):
+    #   - 표준 포트(1433/3306) 도 환경마다 변경 사용 가능
+    #   - 위저드에서 설정한 포트만 사용
+    #   - 누락 시 명시적 에러 (위저드 가서 설정하라고 안내)
+    @staticmethod
+    def _resolve_port(job: dict, side: str) -> int:
+        """
+        Job 의 src_port / tgt_port 를 위저드 설정 그대로 반환.
+
+        Args:
+            job: Job dict (self.job)
+            side: 'src' 또는 'tgt'
+
+        Returns:
+            int: 위저드에서 설정한 포트
+
+        Raises:
+            ValueError: 포트 누락/형식 오류 — 위저드에서 재설정 필요
+        """
+        key = f"{side}_port"
+        v = job.get(key)
+        if v is None or v == "" or v == 0:
+            db_type = job.get(f"{side}_db", "?")
+            host = job.get(f"{side}_host", "?")
+            raise ValueError(
+                f"{side.upper()} DB 포트가 위저드에서 설정되지 않았습니다. "
+                f"커넥터 관리에서 포트를 입력해주세요. "
+                f"(db_type={db_type}, host={host})"
+            )
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            raise ValueError(f"{side.upper()} DB 포트 형식 오류: {v!r} — 위저드에서 재설정 필요")
+
     def __init__(self, job: dict):
         self.job = job
         self.jid = job["id"]
@@ -473,7 +509,7 @@ class MigrationEngine:
                 if _sd in ("mysql","aurora","mariadb","tidb","cloudsql"):
                     _s = make_mysql_conn(
                         host=self.job.get("src_host",""),
-                        port=int(self.job.get("src_port") or 3306),
+                        port=self._resolve_port(self.job, "src"),
                         username=self.job.get("src_username",""),
                         password=self.job.get("src_password",""),
                         database=self.job.get("src_database",""),
@@ -481,14 +517,14 @@ class MigrationEngine:
                     )
                 else:
                     _s = make_mssql_conn(
-                        self.job.get("src_host",""), int(self.job.get("src_port") or 1433),
+                        self.job.get("src_host",""), self._resolve_port(self.job, "src"),
                         self.job.get("src_username",""), self.job.get("src_password",""),
                         self.job.get("src_database",""), timeout=60,
                     )
                 if _td in ("mysql","aurora","mariadb","tidb","cloudsql"):
                     _t = make_mysql_conn(
                         host=self.job.get("tgt_host",""),
-                        port=int(self.job.get("tgt_port") or 3306),
+                        port=self._resolve_port(self.job, "tgt"),
                         username=self.job.get("tgt_username",""),
                         password=self.job.get("tgt_password",""),
                         database=self.job.get("tgt_database",""),
@@ -496,7 +532,7 @@ class MigrationEngine:
                     )
                 else:
                     _t = make_mssql_conn(
-                        self.job.get("tgt_host",""), int(self.job.get("tgt_port") or 1433),
+                        self.job.get("tgt_host",""), self._resolve_port(self.job, "tgt"),
                         self.job.get("tgt_username",""), self.job.get("tgt_password",""),
                         self.job.get("tgt_database",""), timeout=60,
                     )
@@ -677,7 +713,7 @@ class MigrationEngine:
                         _tgt_db2 = self.job.get("tgt_database", "")
                         _conn_kw2 = dict(
                             host=self.job.get("tgt_host","localhost"),
-                            port=int(self.job.get("tgt_port") or 3306),
+                            port=self._resolve_port(self.job, "tgt"),
                             user=self.job.get("tgt_username","root"),
                             password=self.job.get("tgt_password",""),
                             database=_tgt_db2, charset="utf8mb4"
@@ -862,7 +898,12 @@ class MigrationEngine:
         j       = self.job
         db_type = (j.get("src_db") or "mysql").lower()
         host    = j.get("src_host", "localhost")
-        port    = int(j.get("src_port") or (1434 if db_type in ("mssql","azure","sqlserver") else 3306))
+        # ─── v95_p107 hotfix_018: 포트는 위저드 입력만 사용 (하드코딩 0%) ───
+        try:
+            port = self._resolve_port(j, "src")
+        except ValueError as e:
+            self._log("error", f"소스 연결 실패: {e}")
+            return None
         user    = j.get("src_username", "root")
         pw      = j.get("src_password", "")
         db      = j.get("src_database", "")
@@ -888,7 +929,12 @@ class MigrationEngine:
         j       = self.job
         db_type = (j.get("tgt_db") or "mssql").lower()
         host    = j.get("tgt_host", "localhost")
-        port    = int(j.get("tgt_port") or (1434 if db_type in ("mssql","azure","sqlserver") else 3306))
+        # ─── v95_p107 hotfix_018: 포트는 위저드 입력만 사용 (하드코딩 0%) ───
+        try:
+            port = self._resolve_port(j, "tgt")
+        except ValueError as e:
+            self._log("error", f"타겟 연결 실패: {e}")
+            return None
         user    = j.get("tgt_username", "sa")
         pw      = j.get("tgt_password", "")
         db      = j.get("tgt_database", "target_db")
@@ -2086,8 +2132,46 @@ class MigrationEngine:
             # ════════════════════════════════════════════════════════════
             self._conversion_path = []
 
-            # ── AI 이관 ──────────────────────────────────────────
-            if _obj_engine in ("ai", "claude"):
+            # ════════════════════════════════════════════════════════════
+            # v95_p107 hotfix_019 (2026-05-10 본부장님 본질 처방):
+            #   KB 우선 매칭 — 모든 분기 (rule/ai/auto) 진입 전 KB 시도
+            # ════════════════════════════════════════════════════════════
+            # 본부장님 본질 발견 (18:44 로그):
+            #   - KB 자산이 누적되어도 (use_count 9) 재실행 시 매번 AI 호출됨
+            #   - 원인: schema.py 의 KB 매칭이 _ai_convert_ddl 안에 있는데,
+            #           그 안에서도 error_hint=True 면 우회됨
+            #   - 즉 첫 시도 (Rule/원본 DDL) 가 1064 → error_hint=True 로 AI 재호출
+            #     → KB 우회 → AI(Gemma) 호출 (매번 같은 일 반복)
+            #
+            # 처방: 어떤 분기든 진입 전 KB 매칭 먼저 시도 → HIT 시 즉시 사용
+            #   - error_hint 없는 깨끗한 첫 시도이므로 KB 매칭 우회 안 됨
+            #   - 첫 시도부터 KB 사용 → AI 호출 0회 → 시간 90% 단축
+            #   - 본부장님 모토 #4 (KB = 살아있는 자산) 정면 충실
+            # ════════════════════════════════════════════════════════════
+            statements = []  # KB-HIT 시 채워짐, MISS 면 [] 유지하고 아래 분기 진입
+            try:
+                from app.core.obj_executor import _kb_match_pattern as _kb_match_first
+                _kb_first_hit = _kb_match_first(
+                    src_db_type, tgt_db_type, obj_type, name, ddl
+                )
+                if _kb_first_hit and _kb_first_hit.get("tgt_sample_ddl"):
+                    self._conversion_path.append("kb_match_first")
+                    self._log("info",
+                        f"[{name}] [v95_p107-KB-MATCH-FIRST] KB 매칭 (id={_kb_first_hit.get('id')}, "
+                        f"use_count={_kb_first_hit.get('use_count')}) — AI 호출 0회 ✨"
+                    )
+                    # KB 의 SQL 을 statements 로 사용 — 아래 _exec_tgt 가 그대로 실행
+                    statements = [_kb_first_hit["tgt_sample_ddl"]]
+                else:
+                    # KB 미스 — 기존 분기 (rule/ai/auto) 그대로 진행
+                    self._conversion_path.append("kb_miss")
+            except Exception as _kme:
+                # KB 매칭 자체 예외 — 안전하게 기존 흐름 fallback
+                self._log("warn",
+                    f"[{name}] hotfix_019 KB 매칭 시도 예외 (무시, 기존 흐름 진행): {_kme}")
+
+            # ── AI 이관 (KB 매칭 미스 시에만 진입) ──────────────────────────────────────────
+            if not statements and _obj_engine in ("ai", "claude"):
                 # v95_p107 hotfix_013: 변환 경로 기록 (사용자가 처음부터 AI 선택)
                 self._conversion_path.append("ai_initial")
                 # API 키 확인 (anthropic_api_key 우선)
@@ -2133,10 +2217,11 @@ class MigrationEngine:
                     # ════════════════════════════════════════════════════════════
                     try:
                         from app.api.routes.schema import _conns as _schema_conns
+                        # ─── v95_p107 hotfix_018: 포트 디폴트 제거, 위저드 값 그대로 ───
                         _schema_conns["target"] = {
                             "db_type":  self.job.get("tgt_db", "mysql"),
                             "host":     self.job.get("tgt_host", ""),
-                            "port":     self.job.get("tgt_port", 3306),
+                            "port":     self.job.get("tgt_port"),
                             "username": self.job.get("tgt_username", ""),
                             "password": self.job.get("tgt_password", ""),
                             "database": self.job.get("tgt_database", ""),
@@ -2457,7 +2542,7 @@ class MigrationEngine:
                     j2 = self.job
                     conn_args = dict(
                         host=j2.get("tgt_host","localhost"),
-                        port=int(j2.get("tgt_port") or 3306),
+                        port=MigrationEngine._resolve_port(j2, "tgt"),
                         user=j2.get("tgt_username","root"),
                         password=j2.get("tgt_password",""),
                         database=j2.get("tgt_database",""),
@@ -2469,7 +2554,7 @@ class MigrationEngine:
                         ddl       = full_ddl,
                         conn_info = {
                             "host":     j2.get("tgt_host",""),
-                            "port":     j2.get("tgt_port", 3306),
+                            "port":     j2.get("tgt_port"),  # hotfix_018: 위저드 값 그대로
                             "username": j2.get("tgt_username",""),
                             "password": j2.get("tgt_password",""),
                             "database": j2.get("tgt_database",""),
@@ -3054,7 +3139,7 @@ class MigrationEngine:
             if src_db_type in ("mysql", "mariadb", "aurora", "tidb", "cloudsql"):
                 return make_mysql_conn(
                     host=self.job.get("src_host",""),
-                    port=int(self.job.get("src_port") or 3306),
+                    port=self._resolve_port(self.job, "src"),
                     username=self.job.get("src_username",""),
                     password=self.job.get("src_password",""),
                     database=self.job.get("src_database",""),
@@ -3064,7 +3149,7 @@ class MigrationEngine:
             else:
                 return make_mssql_conn(
                     host=self.job.get("src_host",""),
-                    port=int(self.job.get("src_port") or 1433),
+                    port=self._resolve_port(self.job, "src"),
                     username=self.job.get("src_username",""),
                     password=self.job.get("src_password",""),
                     database=self.job.get("src_database",""),
@@ -3075,7 +3160,7 @@ class MigrationEngine:
             if tgt_db_type in ("mysql", "mariadb", "aurora", "tidb", "cloudsql"):
                 return make_mysql_conn(
                     host=self.job.get("tgt_host",""),
-                    port=int(self.job.get("tgt_port") or 3306),
+                    port=self._resolve_port(self.job, "tgt"),
                     username=self.job.get("tgt_username",""),
                     password=self.job.get("tgt_password",""),
                     database=self.job.get("tgt_database",""),
@@ -3084,7 +3169,7 @@ class MigrationEngine:
             else:
                 return make_mssql_conn(
                     host=self.job.get("tgt_host",""),
-                    port=int(self.job.get("tgt_port") or 1433),
+                    port=self._resolve_port(self.job, "tgt"),
                     username=self.job.get("tgt_username",""),
                     password=self.job.get("tgt_password",""),
                     database=self.job.get("tgt_database",""),
@@ -4968,7 +5053,7 @@ class MigrationEngine:
         from app.core.db_conn import make_mysql_conn
         _stream_conn = make_mysql_conn(
             host=self.job.get("src_host",""),
-            port=int(self.job.get("src_port") or 3306),
+            port=self._resolve_port(self.job, "src"),
             username=self.job.get("src_username",""),
             password=self.job.get("src_password",""),
             database=self.job.get("src_database",""),

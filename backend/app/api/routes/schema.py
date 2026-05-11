@@ -3997,6 +3997,168 @@ def is_ai_conversion_available() -> bool:
         return False
 
 
+# ════════════════════════════════════════════════════════════════════
+# v95_p107 hotfix_014 (2026-05-10 본부장님 본질 처방)
+#   KB 자산 품질 게이트 — Gemma/Ollama 미완성 출력으로 인한 KB 오염 방지
+#
+# 진단 (2026-05-10):
+#   1) Gemma 가 긴 SQL 출력 시 미완성인데도 done_reason="stop" 으로 거짓 종료
+#   2) num_predict=-1 (무제한) 설정해도 모델 자체가 출력 회피
+#   3) 따라서 done_reason 게이트 무용 — SQL 본문 검증으로 짚어야 함
+#
+# 게이트 5종 (모두 통과해야 KB 등록):
+#   1. 비어있지 않음
+#   2. 괄호 ( ) 짝 일치
+#   3. BEGIN / END 짝 일치 (PROCEDURE/FUNCTION 본문 미완성 검출)
+#   4. 미완성 SQL 패턴 부재 (예: "BusinessEntity NULL AND", "WHERE 끝", "= 끝")
+#   5. 동일 IF EXISTS 블록 중복 부재 (Gemma 의 잘림+재생성 흔적)
+#   6. 길이 비정상 부재 (원본 대비 30% 미만이면 의심)
+#
+# 본부장님 모토 충족:
+#   - 본질에 충실: AI 출력의 거짓 stop 을 SQL 자체로 검증
+#   - 부작용 0%: 거부되어도 AI 결과는 그대로 사용 (실행 차단 없음)
+#   - 하드코딩 0%: 컬럼명/패턴 일반화 (특정 객체에 종속 안 함)
+# ════════════════════════════════════════════════════════════════════
+def _kb_quality_gate_p107(converted_ddl: str, src_ddl: str = "") -> tuple:
+    """
+    AI 변환 결과의 KB 등록 안전성 검증.
+
+    Returns:
+        (is_safe: bool, reason: str)
+        - is_safe=True  → KB 등록 진행
+        - is_safe=False → KB 등록 거부 (AI 결과는 그대로 사용)
+    """
+    import re as _re_kbg
+
+    body = (converted_ddl or "").strip()
+
+    # 게이트 1: 비어있지 않음
+    if not body:
+        return False, "변환 결과 비어있음"
+
+    # 게이트 2: 괄호 짝 일치 (가장 강력한 미완성 신호)
+    open_p = body.count("(")
+    close_p = body.count(")")
+    if open_p != close_p:
+        return False, f"괄호 불일치 ( {open_p} vs ) {close_p}"
+
+    # 게이트 3: BEGIN / END 짝 일치
+    # END IF, END LOOP, END WHILE, END CASE 는 별도 카운트 (BEGIN 없음)
+    # CASE x WHEN ... END (인라인 CASE) 도 BEGIN 없이 END 단독 — 자연스러움
+    # 따라서 BEGIN > pure_END 인 경우만 위험 (BEGIN 을 닫지 못함 = 본문 미완성)
+    begins = len(_re_kbg.findall(r'\bBEGIN\b', body, _re_kbg.IGNORECASE))
+    end_ifs = len(_re_kbg.findall(r'\bEND\s+IF\b', body, _re_kbg.IGNORECASE))
+    end_loops = len(_re_kbg.findall(
+        r'\bEND\s+(?:LOOP|WHILE|CASE|REPEAT)\b', body, _re_kbg.IGNORECASE))
+    # 순수 END (END IF/LOOP/CASE/REPEAT 제외) — 인라인 CASE..END 도 여기 포함됨
+    all_ends = len(_re_kbg.findall(r'\bEND\b', body, _re_kbg.IGNORECASE))
+    pure_ends = all_ends - end_ifs - end_loops
+    # BEGIN 이 pure_END 보다 *많으면* 위험 (BEGIN 못 닫음)
+    # BEGIN 이 pure_END 보다 *적으면* OK (CASE..END 처럼 BEGIN 없이 END 가능)
+    if begins > pure_ends:
+        return False, f"BEGIN 미종결 (BEGIN={begins} > pure_END={pure_ends})"
+
+    # 게이트 4: 미완성 SQL 패턴 (Gemma 가 자주 보이는 잘림 흔적)
+    suspicious_patterns = [
+        # 컬럼명 뒤 NULL 다음 AND/OR — "BusinessEntity NULL AND" 같은 잘림
+        (r'\b\w*(?:Entity|ID|Name|Date|Status|Amount|Count|Value|Price|Rate)'
+         r'\s+NULL\s+(?:AND|OR)\b',
+         "컬럼 비교문 잘림 (예: BusinessEntity NULL AND)"),
+        # 종료 직전 패턴
+        (r'\bWHERE\s*$', "WHERE 절로 끝남"),
+        (r'=\s*$', "= 로 끝남"),
+        (r'\bAND\s*$', "AND 로 끝남"),
+        (r'\bOR\s*$', "OR 로 끝남"),
+        (r'\bSELECT\s*$', "SELECT 로 끝남"),
+        (r'\bFROM\s*$', "FROM 으로 끝남"),
+        (r'\bINTO\s+\w+\s*$', "INSERT INTO 다음 누락"),
+        # 닫는 괄호 직전 콤마
+        (r',\s*\)\s*$', ", 후 ) 로 끝남"),
+    ]
+    for pat, desc in suspicious_patterns:
+        if _re_kbg.search(pat, body, _re_kbg.MULTILINE | _re_kbg.IGNORECASE):
+            return False, f"미완성 SQL: {desc}"
+
+    # 게이트 5: 동일 IF EXISTS 블록 중복 (Gemma 의 truncate-retry 흔적)
+    # 길이 40~300 자의 IF EXISTS (...) 블록이 본문에 2회 이상 나타나면 의심
+    if_exists_blocks = _re_kbg.findall(
+        r'IF\s+EXISTS\s*\([^)]{40,300}\)', body, _re_kbg.IGNORECASE)
+    seen = set()
+    for block in if_exists_blocks:
+        if block in seen:
+            return False, "동일 IF EXISTS 블록 중복 (재생성 흔적)"
+        seen.add(block)
+
+    # 게이트 6: 길이 비정상 (원본 대비 30% 미만은 누락 의심)
+    if src_ddl and len(src_ddl) > 100:
+        ratio = len(body) / len(src_ddl)
+        if ratio < 0.3:
+            return False, f"변환 결과 너무 짧음 (ratio={ratio:.2f}, 원본 대비 30% 미만)"
+
+    # ─── 게이트 7 (hotfix_014_002, 2026-05-10): MSSQL 잔재 검출 ───
+    # 본부장님 사례로 발견 — Gemma 가 MSSQL 의 SELECT @var = col 같은 패턴을
+    # MySQL 식으로 변환 안 하고 그대로 두는 케이스. 1064 에러 영구 반복.
+    # KB 에 등록되면 use_count 누적되며 매번 같은 실수 재생산.
+    mssql_remnants = [
+        # MSSQL: SELECT @var = col FROM ... (MySQL: SELECT col INTO @var FROM ...)
+        (r'\bSELECT\s+[v_@]\w+\s*=\s*[\w\.]+\s+FROM\b',
+         "MSSQL 'SELECT @var = col FROM' 잔재 (MySQL: SELECT col INTO @var FROM)"),
+        # MSSQL @변수 타입 선언 (DECLARE @var INT)
+        (r'\bDECLARE\s+@\w+\s+(?:INT|VARCHAR|NVARCHAR|DECIMAL|DATETIME|MONEY|BIT|BIGINT)',
+         "MSSQL DECLARE @var 타입선언 잔재 (MySQL: DECLARE v_var TYPE)"),
+        # MSSQL SET @var = ...
+        (r'\bSET\s+@\w+\s*=',
+         "MSSQL SET @var 잔재"),
+        # MSSQL OBJECT_ID('[dbo].[xxx]', 'TR') — 트리거 헤더 잔재
+        (r"\bOBJECT_ID\s*\(\s*N?'\[",
+         "MSSQL OBJECT_ID 트리거 헤더 잔재 (MySQL: DROP TRIGGER IF EXISTS)"),
+        # MSSQL [schema].[obj] 대괄호 식별자
+        (r'\[(?:dbo|HumanResources|Sales|Person|Production|Purchasing)\]\.\[',
+         "MSSQL [schema].[obj] 대괄호 식별자 잔재"),
+        # MSSQL N'string' Unicode literal
+        (r"\bN'[^']{2,}'",
+         "MSSQL N'string' 유니코드 리터럴 잔재"),
+        # MSSQL CONVERT(datetime, '...', 112) — MySQL 은 STR_TO_DATE
+        (r"\bCONVERT\s*\(\s*(?:datetime|nvarchar|varchar|int)\s*,",
+         "MSSQL CONVERT(type, ...) 잔재 (MySQL: CAST 또는 STR_TO_DATE)"),
+        # MSSQL ISNULL(...) — MySQL 은 IFNULL(...)
+        (r'\bISNULL\s*\(',
+         "MSSQL ISNULL() 잔재 (MySQL: IFNULL())"),
+        # MSSQL IF OBJECT_ID ... DROP TRIGGER (트리거 헤더 통째)
+        (r'\bIF\s+OBJECT_ID\b',
+         "MSSQL IF OBJECT_ID 트리거 헤더 잔재"),
+        # MSSQL GETDATE() — MySQL 은 NOW() 또는 CURRENT_TIMESTAMP
+        (r'\bGETDATE\s*\(\s*\)',
+         "MSSQL GETDATE() 잔재 (MySQL: NOW())"),
+    ]
+    for pat, desc in mssql_remnants:
+        if _re_kbg.search(pat, body, _re_kbg.IGNORECASE):
+            return False, f"MSSQL 잔재: {desc}"
+
+    # ─── 게이트 8 (hotfix_020, 2026-05-10): 컬럼 정의 무결성 ───
+    # 본부장님 사례: ufnGetContactInformation (use_count 13 누적)
+    #   "VARCHAR(5 NULL)" — Gemma 가 "VARCHAR(50) NULL" 출력 중 토큰 잘림
+    #   → 50 의 '0' + ')' 가 사라짐 → MySQL 1064 영구 발생
+    # 게이트 7 (MSSQL 잔재) 로는 못 잡힘 — 이건 컬럼 정의 형식 깨짐
+    column_def_broken = [
+        # 타입 괄호 안에 NULL/NOT NULL 침투 (Gemma 토큰 잘림 핵심 증상)
+        # 정상: "VARCHAR(50) NULL"  깨짐: "VARCHAR(5 NULL)" (50 → 5, ) 사라짐)
+        (r'\b(?:VARCHAR|CHAR|NVARCHAR|NCHAR|VARBINARY|BINARY|DECIMAL|NUMERIC|FLOAT|DOUBLE)\s*\(\s*\d+(?:\s*,\s*\d+)?\s+(?:NULL|NOT\s+NULL)\b',
+         "컬럼 타입 괄호 안에 NULL/NOT NULL 침투 (Gemma 토큰 잘림)"),
+        # NULL NOT NULL 충돌
+        (r'\bNULL\s+NOT\s+NULL\b',
+         "NULL NOT NULL 충돌"),
+        # NOT NULL NULL 충돌
+        (r'\bNOT\s+NULL\s+NULL\b',
+         "NOT NULL NULL 충돌"),
+    ]
+    for pat, desc in column_def_broken:
+        if _re_kbg.search(pat, body, _re_kbg.IGNORECASE):
+            return False, f"컬럼 정의 깨짐: {desc}"
+
+    return True, "OK"
+
+
 def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
                     src_db: str, tgt_db: str, error_hint: str = "",
                     job_id: str = "",
@@ -4028,6 +4190,86 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
     _trace("01-enter", obj_type=obj_type, src=src_db, tgt=tgt_db,
            ddl_len=len(src_ddl or ""), max_tokens=max_tokens,
            has_error_hint=bool(error_hint))
+
+    # ════════════════════════════════════════════════════════════════
+    # v95_p107 hotfix_024 (2026-05-11 본부장님 본질 처방):
+    #   Layer 2 — TVF Rule Engine 을 KB 매칭보다 먼저 (결정적 변환 우선)
+    #
+    # 본부장님 진단 (오늘 2026-05-11):
+    #   - hotfix_023 의 RULE-TVF 마커가 로그에 0건
+    #   - 본부장님 환경에서 Rule Engine 진입 자체 안 함
+    #   - 본질: error_hint 있을 때 (재시도) 또는 KB 매칭 HIT 시 우회
+    #
+    # 처방: TVF 객체는 KB 매칭/error_hint 무관 결정적 변환 우선.
+    #   - 결정적이므로 KB 깨졌어도 안전 (현재 KB 의 SQL 보다 정확)
+    #   - 0.05초/객체 (Gemma 7분 30초 대비 9,000배)
+    #   - 진입 로그 [v95_p107-RULE-ATTEMPT] 로 항상 추적
+    # ════════════════════════════════════════════════════════════════
+    try:
+        from app.core.tvf_rule_engine import is_tvf as _is_tvf_h024
+        from app.core.tvf_rule_engine import try_convert_tvf as _tvf_h024
+        _h024_is_tvf = _is_tvf_h024(src_ddl or "")
+        _h024_type_ok = (obj_type or "").upper() in ('FUNCTION', 'FN', 'FN_T')
+        # 진단을 위해 진입 시도 항상 로그
+        _log.info(
+            "[v95_p107-RULE-ATTEMPT] %s [%s] is_tvf=%s type_ok=%s error_hint=%s",
+            obj_type, obj_name, _h024_is_tvf, _h024_type_ok, bool(error_hint),
+        )
+        if _h024_is_tvf and _h024_type_ok:
+            _tvf_result = _tvf_h024(src_ddl, obj_type, obj_name)
+            if _tvf_result and _tvf_result.get("final_sql"):
+                _trace("01a-rule-tvf-ok",
+                       elapsed_ms=_tvf_result.get("elapsed_ms"),
+                       notes=_tvf_result.get("notes", "")[:100])
+                _log.info(
+                    "[v95_p107-RULE-TVF] %s [%s] 결정적 변환 성공 — %dms "
+                    "(AI 호출 0회, Gemma 우회, KB 매칭보다 우선)",
+                    obj_type, obj_name,
+                    _tvf_result.get("elapsed_ms", 0),
+                )
+                # KB 등록 (Rule Engine 결과 자산화)
+                try:
+                    from app.core.obj_executor import _kb_register_pattern as _kb_reg_h024
+                    _kb_safe, _kb_reason = _kb_quality_gate_p107(
+                        _tvf_result["final_sql"], src_ddl
+                    )
+                    if _kb_safe:
+                        _kb_reg_h024(
+                            src_db, tgt_db, obj_type, obj_name,
+                            src_ddl, _tvf_result["final_sql"],
+                            source="rule_engine_tvf",
+                        )
+                        _log.info(
+                            "[v95_p107-RULE-KB-REGISTER] %s [%s] "
+                            "Rule Engine 결과 KB 자산화 완료",
+                            obj_type, obj_name,
+                        )
+                    else:
+                        _log.warning(
+                            "[v95_p107-RULE-KB-REJECT] %s [%s] %s",
+                            obj_type, obj_name, _kb_reason,
+                        )
+                except Exception as _kre:
+                    _log.warning(
+                        "[v95_p107-RULE-KB-REGISTER-ERR] %s [%s] %s",
+                        obj_type, obj_name, _kre,
+                    )
+                return {
+                    "statements": [_tvf_result["final_sql"]],
+                    "notes": _tvf_result.get("notes", "TVF Rule Engine 변환"),
+                    "path_marker": "rule_tvf",
+                }
+            else:
+                _log.info(
+                    "[v95_p107-RULE-NOMATCH] %s [%s] TVF 패턴이지만 변환 실패 — KB/AI 로 위임",
+                    obj_type, obj_name,
+                )
+    except Exception as _rule_exc:
+        _log.warning(
+            "[v95_p107-RULE-ERR] %s [%s] Rule Engine 예외 (무시, KB/AI 진행): %s",
+            obj_type, obj_name, _rule_exc,
+        )
+    # ════════════════════════════════════════════════════════════════
 
     # ════════════════════════════════════════════════════════════════
     # v95_p107 hotfix_012 (2026-05-10 본부장님 본질 처방):
@@ -4673,6 +4915,42 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
             _log.warning("[v95_p88++] post_process_sql 실패 (무시, 원본 유지): %s", _ppe)
         # ────────────────────────────────────────────────────────────
 
+        # ════════════════════════════════════════════════════════════
+        # v95_p107 hotfix_025 (2026-05-11 본부장님 본질 처방):
+        #   T-SQL 잔재 자동 정화 — Gemma 의 식별자/함수 변환 실수 해결
+        #
+        # 본부장님 본질 통찰 9번째 (오늘 2026-05-11):
+        #   - 11개 객체 실패 분석 결과
+        #   - 본질: Gemma 가 [bracket] 식별자, OBJECT_ID, ISNULL 등 변환 못 함
+        #   - 토큰 한도가 아닌 변환 실수
+        #
+        # 처방: 기존 sql_post_processor 통과 후 한 번 더 정화.
+        #   - [Schema].[Table] → Schema_Table
+        #   - [Identifier] → `Identifier`
+        #   - OBJECT_ID DROP guard 제거
+        #   - ISNULL → IFNULL, GETDATE → NOW
+        #   - SET NOCOUNT ON 등 T-SQL 전용 제거
+        #
+        # 본부장님 모토 #14 (4-way collision 방지):
+        #   기존 v95_p88++ post_process 그대로 + 뒤에 결정적 후처리 추가
+        # ════════════════════════════════════════════════════════════
+        try:
+            from app.core.tsql_residue_cleaner import clean_residues as _residue_h025
+            stmts_before_h025 = list(stmts)
+            stmts, h025_fixes = _residue_h025(stmts, obj_type, obj_name)
+            if h025_fixes:
+                _log.info(
+                    "[v95_p107-RESIDUE-CLEAN] %s [%s] T-SQL 잔재 정화: %s",
+                    obj_type, obj_name, h025_fixes,
+                )
+                _trace("v95_p107-h025-clean", fixes=h025_fixes[:5])
+        except Exception as _h025e:
+            _log.warning(
+                "[v95_p107-h025] tsql_residue_cleaner 실패 (무시, 원본 유지): %s",
+                _h025e,
+            )
+        # ════════════════════════════════════════════════════════════
+
         result = {"statements": stmts, "notes": parsed.get("notes", "")}
         # ═══════════════════════════════════════════════════════════
         try:
@@ -4693,23 +4971,45 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
         #
         # 본부장님 정리 흐름 Step 3,7 ("AI 성공 시 KB 축적") 작동의 핵심.
         # 등록된 패턴은 다음 _ai_convert_ddl 호출 시 위(01b-kb-match)에서 매칭됨.
+        #
+        # ─── v95_p107 hotfix_014 (2026-05-10 본부장님 본질 처방) ───
+        # KB 자산 품질 보호 — Gemma/Ollama 미완성 출력으로 인한 KB 오염 방지.
+        #
+        # 발견 (2026-05-10 진단):
+        #   - Gemma 가 긴 SQL 출력 시 미완성인데도 done_reason=stop 으로 거짓 종료
+        #   - 잘린 SQL (예: "BusinessEntity NULL AND ...") 이 KB 에 박힘
+        #   - 다음 이관에서 그게 매칭되면 영구 오염 (use_count 누적)
+        #
+        # 처방: KB 등록 직전 5종 게이트로 SQL 자체 품질 검증.
+        #   done_reason 은 Gemma 가 거짓 응답하므로 신뢰 불가 → SQL 본문 검증.
         # ════════════════════════════════════════════════════════════
         if stmts:  # 성공한 변환만 등록
             try:
                 from app.core.obj_executor import _kb_register_pattern as _kb_reg_p107
                 _converted_ddl = "\n".join(s for s in stmts if s).strip()
-                _kb_reg_p107(
-                    src_db=src_db, tgt_db=tgt_db,
-                    obj_type=obj_type, obj_name=obj_name,
-                    src_ddl=src_ddl, tgt_ddl=_converted_ddl,
-                    source="ai_success",
-                )
-                _trace("15b-kb-registered", obj_name=obj_name)
-                _log.info(
-                    "[v95_p107-KB-REGISTER] %s [%s] 변환 성공 SQL → KB 등록 "
-                    "(다음 이관 시 RAG 매칭 가능)",
-                    obj_type, obj_name,
-                )
+
+                # ── hotfix_014 게이트 5종 ──
+                _kb_safe, _kb_reason = _kb_quality_gate_p107(_converted_ddl, src_ddl)
+                if not _kb_safe:
+                    _log.warning(
+                        "[v95_p107-KB-REJECT] %s [%s] KB 등록 거부 — %s "
+                        "(AI 결과는 그대로 사용, KB 오염 방지)",
+                        obj_type, obj_name, _kb_reason,
+                    )
+                    _trace("15b-kb-rejected", obj_name=obj_name, reason=_kb_reason)
+                else:
+                    _kb_reg_p107(
+                        src_db=src_db, tgt_db=tgt_db,
+                        obj_type=obj_type, obj_name=obj_name,
+                        src_ddl=src_ddl, tgt_ddl=_converted_ddl,
+                        source="ai_success",
+                    )
+                    _trace("15b-kb-registered", obj_name=obj_name)
+                    _log.info(
+                        "[v95_p107-KB-REGISTER] %s [%s] 변환 성공 SQL → KB 등록 "
+                        "(다음 이관 시 RAG 매칭 가능)",
+                        obj_type, obj_name,
+                    )
             except Exception as _kre:
                 _log.warning("[v95_p107] KB 등록 실패 (무시): %s", _kre)
         # ════════════════════════════════════════════════════════════

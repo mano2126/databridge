@@ -1,0 +1,5126 @@
+"""
+app/engine/migration_engine.py
+실제 데이터 이관을 수행하는 MigrationEngine 클래스.
+
+분리 배경:
+  기존에는 jobs.py 라우터 파일 안에 2,700 LOC 거대 클래스로 존재.
+  라우터는 HTTP 경계여야 하고, 엔진은 핵심 도메인 로직이어야 하는데
+  같은 파일에 있으면 유닛 테스트·리뷰·수정 모두 악화되어 분리.
+
+외부 인터페이스:
+  engine = MigrationEngine(job_dict)
+  engine.set_log_sink(lambda level, msg: ...)   # 선택 - 로그 출력 훅
+  engine.run()
+  engine.pause() / engine.resume() / engine.stop()
+
+의존성:
+  - app.core.store.Store              — 샘플 잡 생성 체크용 (하위 호환)
+  - app.core.pagination.plan_pagination — #4 Keyset 전략
+  - app.core.db_conn                  — 공통 DB 커넥션
+  - pymysql / pyodbc (Tier 1 지원 DB 드라이버)
+"""
+from __future__ import annotations
+import logging
+import random  # 샘플 데이터 생성용 (초기화 블록에서만 사용)
+import threading
+import time
+import uuid
+from datetime import datetime, timezone, timedelta
+
+_KST = timezone(timedelta(hours=9))
+logger = logging.getLogger("databridge.engine")
+
+# ════════════════════════════════════════════════════════════════════
+# v95_p23a (2026-05-03 본부장님 본질 처방): CREATE TABLE 모듈 직렬화
+# ════════════════════════════════════════════════════════════════════
+# 본부장님 호소: "분명 멀티로 진행하면 이런일 발생할 소지 있다고 내가
+#               말했었는데" — 16:18:24 EmailAddress + BusinessEntityContact
+#               동시 CREATE → MySQL InnoDB metadata lock → 1213 Deadlock
+#
+# 본질:
+#   migration_engine.py:438 의 _par = 3 (FK 레벨당 3 동시) 가 INSERT 만 노린
+#   설계인데 CREATE TABLE 도 같이 동시 실행됨. MySQL InnoDB 의 DDL 메타데이터
+#   lock 은 같은 schema 안에서 직렬화 필요 — 동시 CREATE = lock 충돌 위험.
+#
+# 처방:
+#   CREATE TABLE 단계만 모듈 전역 mutex 로 직렬화 (한 시점 1개만).
+#   INSERT 등 데이터 이관 단계는 그대로 병렬 (성능 영향 최소).
+#
+# 하드코딩 0%:
+#   DB 종류 무관, 테이블 이름 무관 — 모든 표준 DB / 운영 환경 / 테스트 환경
+#   동일 적용. Northwind / WideWorldImporters / 캐피탈사 운영 DB 모두 안전.
+#
+# 부수 효과: CREATE 가 직렬화돼도 매 CREATE 가 ms 단위라 전체 이관 속도
+#           영향 1% 미만. 본부장님 운영 환경에서는 안전성이 우선.
+_create_table_lock = threading.Lock()
+
+
+class MigrationEngine:
+    """
+    MySQL → MSSQL 실제 데이터 이관 엔진
+    """
+    def __init__(self, job: dict):
+        self.job = job
+        self.jid = job["id"]
+        self._stop = False
+        self._pause = False
+        # 외부 로그 수신자 — 라우터가 _job_logs에 append하기 위해 주입.
+        # (level, msg, entry_dict) 시그니처.
+        # set_log_sink()로 주입되지 않으면 파일·콘솔 로거만 남김.
+        self._log_sink = None
+        # ────────────────────────────────────────────────────────────
+        # v90.48: schema 정책 일관성 — 테이블 이관/객체 이관 같은 정책 사용
+        # 본부장님 보고: 테이블은 'profile' 로 평탄화, 객체는 'customer_profile' 
+        #   접두어 결합 → 1146 테이블 없음 187회 발생.
+        # 해결: schema_strategy 정책 (기본 "underscore") 을 테이블에도 적용.
+        # ────────────────────────────────────────────────────────────
+        try:
+            from app.core.schema_conversion_policy import get_strategy_from_job
+            self._schema_strategy = get_strategy_from_job(job)
+        except Exception:
+            self._schema_strategy = job.get("schema_strategy") or "underscore"
+        # 타겟 테이블 이름 매핑 캐시 — _target_table_name() 호출 시 채워짐
+        self._tgt_table_name_cache = {}
+
+    def _target_table_name(self, bare: str) -> str:
+        """
+        v90.48: 소스 bare 테이블명 → 타겟 테이블명.
+        schema_strategy 와 _src_schema_map 을 사용해 변환.
+        
+        - underscore: customer.profile → customer_profile
+        - drop:       customer.profile → profile (기존 동작)
+        - database:   customer.profile → profile (별도 DB)
+        
+        결과는 캐시되어 재호출 시 빠름.
+        """
+        if not bare: return bare
+        if bare in self._tgt_table_name_cache:
+            return self._tgt_table_name_cache[bare]
+        
+        # schema_map 에서 schema 찾기 (없으면 빈 문자열)
+        schema = ""
+        if hasattr(self, '_src_schema_map'):
+            schema = self._src_schema_map.get(bare, "") or ""
+        
+        try:
+            from app.core.schema_conversion_policy import map_table_name
+            tgt = map_table_name(schema, bare, self._schema_strategy)
+        except Exception:
+            tgt = bare  # 안전 fallback
+        
+        self._tgt_table_name_cache[bare] = tgt
+        return tgt
+
+    def _build_target_table_map(self) -> dict:
+        """
+        v90.48: {bare: target} 매핑 dict 한 번에 빌드.
+        Job 시작 시 호출하면 미리 계산되어 일관성 보장.
+        """
+        if not hasattr(self, '_src_schema_map'):
+            return {}
+        try:
+            from app.core.schema_conversion_policy import build_table_name_map
+            mapping = build_table_name_map(self._src_schema_map, self._schema_strategy)
+            self._tgt_table_name_cache.update(mapping)
+            return mapping
+        except Exception as e:
+            self._log("warn", f"타겟 테이블 매핑 실패 (drop 정책으로 fallback): {e}")
+            return {}
+
+    def set_log_sink(self, sink):
+        """
+        로그 이벤트를 받을 외부 함수 등록.
+        sink(level: str, message: str, entry: dict) — entry에는 time/level/tag/message 포함.
+        라우터(jobs.py)가 _job_logs에 append 하기 위해 주입한다.
+        """
+        self._log_sink = sink
+
+    def run(self):
+        self.job["status"] = "running"
+        self.job["started_at"] = datetime.now(_KST).isoformat()
+        # v9 패치 #24: 병렬 환경에서 전체 속도 계산용 전역 시작 시각
+        self._engine_start_t = time.monotonic()
+        self._log("info", f"이관 시작 — {self.job.get('name','')}")
+        self._log("info", f"소스: {self.job.get('src_db','').upper()} {self.job.get('src_host','')} / {self.job.get('src_database','')}")
+        self._log("info", f"타겟: {self.job.get('tgt_db','').upper()} {self.job.get('tgt_host','')} / {self.job.get('tgt_database','')}")
+
+        # v9 패치 #23: finally에서 접근하는 변수들 사전 선언
+        tgt_is_mssql = False
+        tgt_conn = None
+        _mssql_tuning_applied = False
+        _mssql_original_recovery = None
+        _mssql_disabled_indexes: list = []
+
+        try:
+            # 소스/타겟 연결
+            src_conn = self._connect_src()
+            tgt_conn = self._connect_tgt()
+            if not src_conn or not tgt_conn:
+                raise Exception("DB 연결 실패 — 커넥터 관리에서 연결 정보를 확인하세요")
+
+            # tables가 명시적으로 지정된 경우 그대로 사용 (빈 리스트도 존중)
+            _tables_val = self.job.get("tables")
+            if _tables_val is None:
+                tables = self._get_all_tables(src_conn)   # 미지정 → 전체
+            else:
+                tables = _tables_val                       # 빈 리스트 포함 그대로
+                # v90 (2026-04-23) — 명시적 tables 경로 방어:
+                # 사용자가 테이블을 선택해 넘기면 _get_all_tables 가 호출되지 않아
+                # _src_schema_map 이 비어있음. MSSQL 소스인데 맵이 비면 자동 스캔.
+                _src_db_for_map = (self.job.get("src_db") or "").lower()
+                if _src_db_for_map in ("mssql", "azure", "sqlserver"):
+                    if not hasattr(self, '_src_schema_map'):
+                        self._src_schema_map = {}
+                    # tables 안에 이미 "schema.table" 형식 포함 여부 확인
+                    _dotted = [t for t in tables if isinstance(t, str) and "." in t]
+                    _bare   = [t for t in tables if isinstance(t, str) and "." not in t]
+                    # "schema.table" 형식은 맵에 즉시 등록
+                    for _t in _dotted:
+                        try:
+                            _sch, _nm = _t.split(".", 1)
+                            self._src_schema_map[_nm] = _sch
+                        except Exception:
+                            pass
+                    # bare name 이 하나라도 있고 맵에 미등록인 게 있으면 자동 스캔
+                    _need_scan = any(_t not in self._src_schema_map for _t in _bare)
+                    if _need_scan:
+                        try:
+                            _scan_cur = src_conn.cursor()
+                            _src_database = self.job.get("src_database", "")
+                            _scan_cur.execute("""
+                                SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES
+                                WHERE TABLE_CATALOG = ? AND TABLE_TYPE = 'BASE TABLE'
+                                ORDER BY TABLE_NAME, TABLE_SCHEMA
+                            """, (_src_database,))
+                            _seen = set(self._src_schema_map.keys())
+                            _dup  = {}
+                            for _r in _scan_cur.fetchall():
+                                if isinstance(_r, dict):
+                                    _s = _r.get("TABLE_SCHEMA", "dbo")
+                                    _n = _r.get("TABLE_NAME", "")
+                                else:
+                                    _s = _r[0]
+                                    _n = _r[1]
+                                if not _n: continue
+                                if _n not in _seen:
+                                    self._src_schema_map[_n] = _s
+                                    _seen.add(_n)
+                                    _dup[_n] = [_s]
+                                else:
+                                    _dup.setdefault(_n, []).append(_s)
+                            for _n, _ss in _dup.items():
+                                if len(_ss) > 1:
+                                    self._log("warn",
+                                        f"테이블 [{_n}] 이 여러 스키마에 존재: {_ss} "
+                                        f"→ [{_ss[0]}].{_n} 사용 (나머지 무시)")
+                            # 정규화: tables 는 bare name 리스트로 통일
+                            tables = [t.split(".", 1)[1] if isinstance(t, str) and "." in t else t
+                                      for t in tables]
+                            self._log("info",
+                                f"명시적 tables 경로 — 스키마 맵 자동 구성 완료 "
+                                f"({len(self._src_schema_map)}개 매핑)")
+                        except Exception as _me:
+                            self._log("warn", f"명시적 tables 스키마 스캔 실패 (무시): {_me}")
+            self.job["table_total"] = len(tables)
+
+            # ── MySQL 타겟: 이관 전 FK + 트리거 비활성화 ──────────
+            src_db_type = (self.job.get("src_db") or "mssql").lower()
+            src_is_mysql = src_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
+            src_is_mssql = src_db_type in ("mssql","azure","sqlserver")
+            tgt_db_type = (self.job.get("tgt_db") or "mysql").lower()
+            tgt_is_mysql = tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
+            tgt_is_mssql = tgt_db_type in ("mssql","azure","sqlserver")
+            _global_triggers_disabled = False
+            _dropped_triggers = {}
+            # v9 패치 #23: MSSQL 타겟 튜닝 상태
+            _mssql_original_recovery = None        # 원래 recovery model
+            _mssql_tuning_applied = False
+            _mssql_disabled_indexes: list[tuple[str,str]] = []  # [(table, index_name), ...]
+
+            if tgt_is_mssql and self.job.get("mssql_tuning", False):
+                # 1) Recovery model → BULK_LOGGED (로그 절반 이하로 줄어듬)
+                try:
+                    _gc = tgt_conn.cursor()
+                    _gc.execute(
+                        "SELECT recovery_model_desc FROM sys.databases WHERE name=?",
+                        [self.job.get("tgt_database","")],
+                    )
+                    _r = _gc.fetchone()
+                    _mssql_original_recovery = _r[0] if _r else None
+                    if _mssql_original_recovery and _mssql_original_recovery != "BULK_LOGGED":
+                        _db = self.job.get("tgt_database","")
+                        _gc.execute(f"ALTER DATABASE [{_db}] SET RECOVERY BULK_LOGGED")
+                        tgt_conn.commit()
+                        self._log("info",
+                            f"MSSQL 튜닝: Recovery model {_mssql_original_recovery} → BULK_LOGGED "
+                            f"(이관 후 복원)")
+                        _mssql_tuning_applied = True
+                except Exception as _me:
+                    self._log("warn",
+                        f"MSSQL Recovery model 변경 실패 (무시): {_me}. "
+                        f"ALTER DATABASE 권한 필요")
+
+                # 2) 대용량 테이블의 비클러스터 인덱스 DISABLE (이관 후 REBUILD)
+                #    - PK/클러스터 인덱스는 건드리지 않음 (구조적으로 필요)
+                #    - 이관 대상 테이블 중 rows >= parallel_big_table_rows 만 대상
+                if self.job.get("mssql_disable_indexes", False):
+                    _big_rows_tun = int(self.job.get("parallel_big_table_rows", 1_000_000))
+                    try:
+                        _gc = tgt_conn.cursor()
+                        for _tn in tables:
+                            # 소스 기준 추정치 사용
+                            _cc = src_conn.cursor()
+                            try:
+                                if src_is_mysql:
+                                    _cc.execute(
+                                        "SELECT TABLE_ROWS FROM information_schema.TABLES "
+                                        "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s",
+                                        [self.job.get("src_database",""), _tn])
+                                    _rr = _cc.fetchone()
+                                    _rn = int((list(_rr.values())[0] if isinstance(_rr,dict) else _rr[0]) or 0) if _rr else 0
+                                else:
+                                    _rn = 0
+                            except Exception:
+                                _rn = 0
+                            if _rn < _big_rows_tun:
+                                continue
+                            # 비클러스터 인덱스 찾기
+                            try:
+                                _gc.execute("""
+                                    SELECT i.name, OBJECT_NAME(i.object_id)
+                                    FROM sys.indexes i
+                                    JOIN sys.tables t ON i.object_id=t.object_id
+                                    WHERE t.name=? AND i.type=2 AND i.is_primary_key=0
+                                      AND i.is_unique_constraint=0 AND i.is_disabled=0
+                                """, [_tn])
+                                for _row in _gc.fetchall():
+                                    _iname = _row[0]; _tname = _row[1]
+                                    if _iname and _tname:
+                                        _gc.execute(f"ALTER INDEX [{_iname}] ON [{_tname}] DISABLE")
+                                        _mssql_disabled_indexes.append((_tname, _iname))
+                                tgt_conn.commit()
+                            except Exception as _ie:
+                                self._log("warn", f"인덱스 DISABLE 실패 [{_tn}]: {_ie}")
+                        if _mssql_disabled_indexes:
+                            self._log("info",
+                                f"MSSQL 튜닝: 비클러스터 인덱스 {len(_mssql_disabled_indexes)}개 DISABLE "
+                                f"(이관 후 REBUILD)")
+                    except Exception as _te:
+                        self._log("warn", f"인덱스 DISABLE 블록 오류 (무시): {_te}")
+
+            # v9 패치 #42: MSSQL 타겟도 phase 상태 전환 표시 (프론트 UI 용)
+            # MSSQL 은 MySQL 과 달리 전역 FK 체크 비활성화 명령은 없지만,
+            # 타겟 준비 작업 (인덱스 DISABLE, 테이블 사전 체크 등) 을 이 단계로 묶음
+            if tgt_db_type in ("mssql", "azure", "sqlserver"):
+                self.job["phase"] = "FK_DISABLE"
+                self.job["current_table"] = "⚙ 타겟 준비 중..."
+                # 짧은 지연으로 프론트가 FK_DISABLE 단계를 인지하도록 함
+                # (실제 준비 작업이 순식간에 끝나도 최소 1초는 표시)
+                import time as _t_mod
+                _t_mod.sleep(0.5)
+                self.job["phase"] = "RUNNING"
+                self.job["current_table"] = ""
+
+            if tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                try:
+                    self.job["phase"] = "FK_DISABLE"
+                    self.job["current_table"] = "⚙ FK / 트리거 비활성화 중..."
+                    _gc = tgt_conn.cursor()
+                    _gc.execute("SET FOREIGN_KEY_CHECKS=0")
+                    _gc.execute("SET UNIQUE_CHECKS=0")
+                    tgt_conn.commit()
+                    _global_triggers_disabled = True
+                    self._log("info", "MySQL: FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0")
+
+                    # ── 트리거 백업 및 DROP ──────────────────────
+                    import pymysql.cursors as _pyc2
+                    _dict_cur = tgt_conn.cursor(_pyc2.DictCursor)
+                    _tgt_db = self.job.get("tgt_database", "")
+                    _dict_cur.execute(
+                        "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, "
+                        "EVENT_MANIPULATION, ACTION_STATEMENT "
+                        "FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=%s",
+                        [_tgt_db]
+                    )
+                    _all_trigs = _dict_cur.fetchall()
+                    if _all_trigs:
+                        self._log("info", f"트리거 {len(_all_trigs)}개 임시 비활성화(DROP)")
+                        for _tr in _all_trigs:
+                            _tn  = _tr["TRIGGER_NAME"] if isinstance(_tr, dict) else _tr[0]
+                            _tbl = _tr["EVENT_OBJECT_TABLE"] if isinstance(_tr, dict) else _tr[1]
+                            _tim = _tr["ACTION_TIMING"] if isinstance(_tr, dict) else _tr[2]
+                            _evt = _tr["EVENT_MANIPULATION"] if isinstance(_tr, dict) else _tr[3]
+                            _act = _tr["ACTION_STATEMENT"] if isinstance(_tr, dict) else _tr[4]
+                            _dropped_triggers.setdefault(_tbl, []).append({
+                                "name": _tn, "timing": _tim, "event": _evt, "action": _act
+                            })
+                            _gc.execute(f"DROP TRIGGER IF EXISTS `{_tn}`")
+                        tgt_conn.commit()
+                        self._log("info", f"트리거 {len(_all_trigs)}개 DROP 완료")
+
+                    self.job["phase"] = "RUNNING"
+                    self.job["current_table"] = ""
+                except Exception as _ge:
+                    self._log("warn", f"FK/트리거 비활성화 실패 (무시): {_ge}")
+                    self.job["phase"] = "RUNNING"
+                    self.job["current_table"] = ""
+            try:
+                self.job["rows_total"] = self._estimate_total_rows(src_conn, tables)
+            except Exception as _e:
+                self._log("warn", f"rows 추정 실패 (무시): {_e}")
+                self.job["rows_total"] = 0
+            self._log("info", f"이관 대상 테이블 {len(tables)}개, 예상 {self.job['rows_total']:,} rows")
+            # 모든 테이블 pending 초기화 (v9 #41: 추정 rows_total 포함 → 프론트 ETA 정확도 개선)
+            _estimates = self.job.get("_table_rows_estimate", {})
+            for _t in tables:
+                _est = _estimates.get(_t, 0)
+                self.job["item_statuses"][_t] = {
+                    "type":"table","status":"pending","rows":0,
+                    "rows_total": _est,  # 추정치 (실제 COUNT 하면 나중에 덮어씀)
+                    "rows_src":   _est,
+                    "error":None,"started_at":None,"finished_at":None
+                }
+
+            # ── FK 의존성 분석 → 토폴로지 정렬 ─────────────────────
+            def _topo_sort_tables(conn, tbl_list, db_type, return_levels=False):
+                """FK 의존성 토폴로지 정렬. return_levels=True 면 (sorted_list, levels) 반환.
+                levels: [[레벨0 테이블들], [레벨1 테이블들], ...] — 같은 레벨은 병렬 가능.
+                """
+                if len(tbl_list) <= 1:
+                    return (tbl_list, [tbl_list]) if return_levels else tbl_list
+                deps = {t: set() for t in tbl_list}
+                tbl_set = set(t.lower() for t in tbl_list)
+                try:
+                    _cur = conn.cursor()
+                    if db_type in ("mssql","azure","sqlserver"):
+                        _cur.execute("""
+                            SELECT OBJECT_NAME(fk.parent_object_id) AS c,
+                                   OBJECT_NAME(fk.referenced_object_id) AS p
+                            FROM sys.foreign_keys fk
+                            WHERE OBJECT_NAME(fk.parent_object_id)<>OBJECT_NAME(fk.referenced_object_id)
+                        """)
+                        for _r in _cur.fetchall():
+                            _c = _r[0] if not isinstance(_r,dict) else _r["c"]
+                            _p = _r[1] if not isinstance(_r,dict) else _r["p"]
+                            if _c and _p and _c.lower() in tbl_set and _p.lower() in tbl_set:
+                                _cr = next((t for t in tbl_list if t.lower()==_c.lower()),_c)
+                                _pr = next((t for t in tbl_list if t.lower()==_p.lower()),_p)
+                                deps[_cr].add(_pr)
+                    elif db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                        _tdb = self.job.get("src_database","")
+                        _cur.execute(
+                            "SELECT TABLE_NAME,REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE "
+                            "WHERE TABLE_SCHEMA=%s AND REFERENCED_TABLE_NAME IS NOT NULL "
+                            "AND TABLE_NAME<>REFERENCED_TABLE_NAME", [_tdb])
+                        for _r in _cur.fetchall():
+                            _c = _r[0] if not isinstance(_r,dict) else _r["TABLE_NAME"]
+                            _p = _r[1] if not isinstance(_r,dict) else _r["REFERENCED_TABLE_NAME"]
+                            if _c and _p and _c.lower() in tbl_set and _p.lower() in tbl_set:
+                                _cr = next((t for t in tbl_list if t.lower()==_c.lower()),_c)
+                                _pr = next((t for t in tbl_list if t.lower()==_p.lower()),_p)
+                                deps[_cr].add(_pr)
+                except Exception as _te:
+                    self._log("warn", f"FK 의존성 분석 실패 (원래 순서 유지): {_te}")
+                    return (tbl_list, [tbl_list]) if return_levels else tbl_list
+                # Kahn's 토폴로지 정렬 + 레벨별 그룹
+                in_deg = {t: len(deps[t]) for t in tbl_list}
+                result = []
+                levels = []
+                remaining = set(tbl_list)
+                while remaining:
+                    level = sorted([t for t in remaining if in_deg.get(t,0)==0])
+                    if not level:
+                        # 순환 FK 남음 — 나머지 전부 한 레벨에
+                        self._log("warn", f"순환 FK 참조: {list(remaining)} — 뒤에 추가")
+                        levels.append(sorted(remaining))
+                        result.extend(sorted(remaining))
+                        break
+                    levels.append(level)
+                    result.extend(level)
+                    for node in level:
+                        remaining.discard(node)
+                        for child in tbl_list:
+                            if node in deps[child]:
+                                deps[child].discard(node)
+                                in_deg[child] -= 1
+                self._log("info",
+                    f"FK 의존성 정렬: {len(result)}개 테이블, {len(levels)}개 레벨 "
+                    f"(최대 레벨 크기 {max(len(l) for l in levels) if levels else 0})")
+                return (result, levels) if return_levels else result
+
+            if tables:
+                tables, table_levels = _topo_sort_tables(src_conn, tables, src_db_type, return_levels=True)
+                for _t in tables:
+                    if _t not in self.job["item_statuses"]:
+                        self.job["item_statuses"][_t] = {"type":"table","status":"pending","rows":0,"error":None,"started_at":None,"finished_at":None}
+            else:
+                table_levels = []
+
+            total_done = 0
+            # v9 패치 #23: 테이블 병렬 처리 (FK 레벨별)
+            # 설정: job.parallel_tables (기본 3). 1 이면 기존 순차 동작.
+            _par = max(1, int(self.job.get("parallel_tables", 3)))
+            # 단일 테이블 크기 임계값 — 이보다 큰 테이블은 혼자 실행 (메모리/IO 경합 방지)
+            _big_rows = int(self.job.get("parallel_big_table_rows", 1_000_000))
+            self._log("info",
+                f"테이블 병렬도: {_par} (레벨당 동시 실행), 대용량 단독 임계={_big_rows:,} rows")
+
+            # 워커별 DB 연결 생성 함수
+            def _mk_worker_conns():
+                from app.core.db_conn import make_mysql_conn, make_mssql_conn
+                _sd = (self.job.get("src_db") or "mysql").lower()
+                _td = (self.job.get("tgt_db") or "mssql").lower()
+                if _sd in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                    _s = make_mysql_conn(
+                        host=self.job.get("src_host",""),
+                        port=int(self.job.get("src_port") or 3306),
+                        username=self.job.get("src_username",""),
+                        password=self.job.get("src_password",""),
+                        database=self.job.get("src_database",""),
+                        timeout=60, dict_cursor=True,
+                    )
+                else:
+                    _s = make_mssql_conn(
+                        self.job.get("src_host",""), int(self.job.get("src_port") or 1433),
+                        self.job.get("src_username",""), self.job.get("src_password",""),
+                        self.job.get("src_database",""), timeout=60,
+                    )
+                if _td in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                    _t = make_mysql_conn(
+                        host=self.job.get("tgt_host",""),
+                        port=int(self.job.get("tgt_port") or 3306),
+                        username=self.job.get("tgt_username",""),
+                        password=self.job.get("tgt_password",""),
+                        database=self.job.get("tgt_database",""),
+                        timeout=60, dict_cursor=True,
+                    )
+                else:
+                    _t = make_mssql_conn(
+                        self.job.get("tgt_host",""), int(self.job.get("tgt_port") or 1433),
+                        self.job.get("tgt_username",""), self.job.get("tgt_password",""),
+                        self.job.get("tgt_database",""), timeout=60,
+                    )
+                return _s, _t
+
+            # 공유 상태 Lock
+            import threading as _thr_bulk
+            _lock = _thr_bulk.Lock()
+            _tbl_seq = [0]  # i 카운터
+
+            def _run_one(tbl, pre_src, pre_tgt):
+                """단일 테이블 이관 — pre_src/pre_tgt 이 None 이면 워커용 연결 생성"""
+                if self._stop:
+                    return 0
+                own_conns = False
+                s_conn, t_conn = pre_src, pre_tgt
+                if s_conn is None or t_conn is None:
+                    s_conn, t_conn = _mk_worker_conns()
+                    own_conns = True
+                try:
+                    with _lock:
+                        self.job["current_table"] = tbl
+                        _ts = datetime.now(_KST).isoformat()
+                        self.job["item_statuses"][tbl] = {
+                            "type":"table","status":"running","rows":0,"error":None,
+                            "started_at":_ts,"finished_at":None,
+                        }
+                    self._log("info", f"테이블 [{tbl}] 이관 시작")
+                    done = self._migrate_table(s_conn, t_conn, tbl)
+                    # 타겟 실제 행수 확인
+                    _actual_tgt = done
+                    try:
+                        # TEMP-GUARD-V34C: tbl 이 "schema.table" 이면 적절히 처리
+                        # MySQL 타겟: bare name 만 (스키마=DB). MSSQL 타겟: 원래 스키마 유지 or dbo.
+                        _vc = t_conn.cursor()
+                        if tgt_is_mysql:
+                            _tbl_bare = tbl.split(".", 1)[1] if "." in tbl else tbl
+                            _vc.execute(f"SELECT COUNT(*) FROM `{_tbl_bare}`")
+                        else:
+                            if "." in tbl:
+                                _sch, _nm = tbl.split(".", 1)
+                                _vc.execute(f"SELECT COUNT(*) FROM [{_sch}].[{_nm}]")
+                            else:
+                                _vc.execute(f"SELECT COUNT(*) FROM [dbo].[{tbl}]")
+                        _vr = _vc.fetchone()
+                        _actual_tgt = _vr[0] if _vr else done
+                    except: pass
+                    with _lock:
+                        self.job["rows_processed"] = self.job.get("rows_processed", 0) + done
+                        _tbl_seq[0] += 1
+                        self.job["table_done"] = _tbl_seq[0]
+                        self.job["item_statuses"][tbl].update({
+                            "status":"done","rows":done,
+                            "rows_src": done,
+                            "rows_tgt": _actual_tgt,
+                            "rows_tgt_final": True,
+                            "finished_at":datetime.now(_KST).isoformat(),
+                        })
+                    self._log("info", f"✓ 테이블 [{tbl}] 완료 — {done:,} rows")
+                    return done
+                except Exception as e:
+                    with _lock:
+                        self.job["rows_error"] = self.job.get("rows_error", 0) + 1
+                        self.job["item_statuses"][tbl] = {
+                            **self.job["item_statuses"].get(tbl, {}),
+                            "status":"error","error":str(e)[:200],
+                            "finished_at":datetime.now(_KST).isoformat(),
+                        }
+                    self._log("error", f"테이블 [{tbl}] 오류: {e}")
+                    # ════════════════════════════════════════════════════════════
+                    # v95_p31 (b) (2026-05-04 본부장님 본질 처방): traceback 강제 로깅
+                    # ════════════════════════════════════════════════════════════
+                    # 본질: 'Production_Document' 같은 짧은 에러 메시지 (KeyError repr) 는
+                    #       진짜 발생 자리를 모르게 만듦. 진짜 본질 추적을 위해 항상 traceback.
+                    # 부작용 0: 정상 케이스에선 except 안 들어옴, 에러 시에만 1줄 추가.
+                    # 효과: 다음 재이관 시 진짜 발생 자리가 line 번호와 함께 100% 노출됨
+                    #       → v95_p31 (a) 안전망으로 부족할 경우 진짜 자리 단일 처방 가능
+                    import traceback as _tb_v31
+                    _tb_str = _tb_v31.format_exc()
+                    self._log("error",
+                        f"  [v95_p31-TRACEBACK] [{tbl}] {type(e).__name__}: {e}\n{_tb_str}")
+                    if self.job.get("on_error") == "abort":
+                        raise
+                    return 0
+                finally:
+                    if own_conns:
+                        try: s_conn.close()
+                        except: pass
+                        try: t_conn.close()
+                        except: pass
+
+            # 테이블 행수 조회 (대용량 판정용) — information_schema
+            def _get_row_estimate(tbl: str) -> int:
+                try:
+                    _c = src_conn.cursor()
+                    if src_is_mysql:
+                        _c.execute(
+                            "SELECT TABLE_ROWS FROM information_schema.TABLES "
+                            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s",
+                            [self.job.get("src_database",""), tbl],
+                        )
+                    else:
+                        _c.execute(
+                            "SELECT SUM(p.rows) FROM sys.partitions p "
+                            "JOIN sys.tables t ON p.object_id=t.object_id "
+                            "WHERE t.name=? AND p.index_id IN (0,1)",
+                            [tbl],
+                        )
+                    r = _c.fetchone()
+                    if not r: return 0
+                    v = r[0] if not isinstance(r, dict) else list(r.values())[0]
+                    return int(v or 0)
+                except Exception:
+                    return 0
+
+            # 레벨별 실행
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            for _lvl_i, _level in enumerate(table_levels):
+                if self._stop: break
+                # 레벨을 "대용량 단독 그룹" 과 "소용량 병렬 그룹" 으로 분리
+                _big  = []
+                _small = []
+                for _t in _level:
+                    if _get_row_estimate(_t) >= _big_rows:
+                        _big.append(_t)
+                    else:
+                        _small.append(_t)
+
+                # 소용량 그룹 병렬
+                if _small:
+                    if _par > 1 and len(_small) > 1:
+                        self._log("info",
+                            f"레벨 {_lvl_i+1}/{len(table_levels)}: 소용량 {len(_small)}개 병렬 (동시 {min(_par, len(_small))})")
+                        with ThreadPoolExecutor(max_workers=min(_par, len(_small))) as _ex:
+                            _futs = [_ex.submit(_run_one, _t, None, None) for _t in _small]
+                            for _f in as_completed(_futs):
+                                try:
+                                    total_done += (_f.result() or 0)
+                                except Exception as _fe:
+                                    if self.job.get("on_error") == "abort":
+                                        raise
+                    else:
+                        # 병렬도 1 이거나 테이블 1개면 메인 연결 재사용
+                        for _t in _small:
+                            total_done += _run_one(_t, src_conn, tgt_conn)
+
+                # 대용량 단독 처리 (메인 연결 사용)
+                for _t in _big:
+                    if self._stop: break
+                    while self._pause: time.sleep(0.5)
+                    self._log("info", f"레벨 {_lvl_i+1}/{len(table_levels)}: 대용량 [{_t}] 단독 실행")
+                    total_done += _run_one(_t, src_conn, tgt_conn)
+
+            # v9 패치 #42: MSSQL 타겟도 FK_RESTORE phase 표시
+            # MSSQL 은 인덱스 REBUILD 나 통계 갱신이 이 단계에 해당
+            if tgt_db_type in ("mssql", "azure", "sqlserver"):
+                self.job["phase"] = "FK_RESTORE"
+                self.job["current_table"] = "⚙ 인덱스 / 제약 복원 중..."
+                # 인덱스 REBUILD 는 아래 별도 블록 (mssql_tuning 끝에) 에서 처리됨
+                import time as _t_mod2
+                _t_mod2.sleep(0.5)
+                # OBJECTS 로 넘어가기 전 잠깐 RESTORE 상태 유지 (프론트 인지용)
+
+            # ── MySQL 타겟: 이관 완료 후 FK/유니크 체크 복원 ───
+            if _global_triggers_disabled:
+                try:
+                    self.job["phase"] = "FK_RESTORE"
+                    self.job["current_table"] = "⚙ FK / 트리거 복원 중..."
+                    _rc = tgt_conn.cursor()
+                    _rc.execute("SET FOREIGN_KEY_CHECKS=1")
+                    _rc.execute("SET UNIQUE_CHECKS=1")
+                    tgt_conn.commit()
+                    self._log("info", "MySQL: FOREIGN_KEY_CHECKS=1, UNIQUE_CHECKS=1 복원")
+
+                    # ── 트리거 복원 ──────────────────────────────
+                    if _dropped_triggers:
+                        import pymysql as _pm2
+                        _tgt_db2 = self.job.get("tgt_database", "")
+                        _conn_kw2 = dict(
+                            host=self.job.get("tgt_host","localhost"),
+                            port=int(self.job.get("tgt_port") or 3306),
+                            user=self.job.get("tgt_username","root"),
+                            password=self.job.get("tgt_password",""),
+                            database=_tgt_db2, charset="utf8mb4"
+                        )
+                        _restored = 0
+                        _failed_restore = []
+                        _total = sum(len(v) for v in _dropped_triggers.values())
+                        for _rtbl, _rtrigs in _dropped_triggers.items():
+                            for _rtr in _rtrigs:
+                                try:
+                                    _sql = (
+                                        f"CREATE TRIGGER `{_rtr['name']}` "
+                                        f"{_rtr['timing']} {_rtr['event']} "
+                                        f"ON `{_rtbl}` FOR EACH ROW {_rtr['action']}"
+                                    )
+                                    _tc = _pm2.connect(**_conn_kw2)
+                                    try:
+                                        _tc.cursor().execute(_sql)
+                                        _tc.commit()
+                                        _restored += 1
+                                        self._log("info", f"  트리거 [{_rtr['name']}] 복원 완료")
+                                    finally:
+                                        _tc.close()
+                                except Exception as _rte:
+                                    _failed_restore.append(_rtr['name'])
+                                    self._log("warn", f"  트리거 [{_rtr['name']}] 복원 실패: {_rte}")
+                        self._log("info", f"트리거 {_restored}/{_total}개 복원 완료")
+                        if _failed_restore:
+                            self._log("warn", f"복원 실패: {_failed_restore}")
+
+                    self.job["current_table"] = ""
+                    self.job["phase"] = "RUNNING"
+                except Exception as _re:
+                    self._log("warn", f"FK/트리거 복원 실패: {_re}")
+                    self.job["current_table"] = ""
+
+            # ── 오브젝트 이관 (프로시저, 함수, 트리거, 뷰) ──
+            objects = self.job.get("objects") or {}
+            convert = self.job.get("convert_objects", True)
+            obj_counts = {k: len(v) for k, v in objects.items() if v}
+            self._log("info", f"오브젝트 목록: {obj_counts} (총 {sum(obj_counts.values())}개)")
+            if any(objects.get(k) for k in ("procedures","functions","triggers","views")):
+                self.job["phase"] = "OBJECTS"
+                self._log("info", "오브젝트 이관 시작")
+                self._migrate_objects(src_conn, tgt_conn, objects, convert)
+            else:
+                self._log("info", "이관할 오브젝트 없음 — 건너뜀")
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p1 (2026-05-01) 본부장님 명령 — 자동 통계 갱신
+            #
+            # 본부장님 호소:
+            #   "전체 데이터 이관 후 통계 정보 갱신 자동화"
+            #   "오라클 통계 정보에 취약 — 파티션 잘 처리해야 됨"
+            #   "다양한 DB 처리해야 되는데 이런 문제로 고생하면 안 돼"
+            #
+            # 본질 처방:
+            #   1. 이관 직후 통계 정보 부재 → 옵티마이저 잘못된 계획 → 운영 직후 느림
+            #   2. DB-specific 어댑터 (MySQL/PostgreSQL/Oracle/MSSQL/DB2)
+            #   3. Oracle 파티션 자동 감지 + granularity='ALL'
+            #   4. 실패 허용 (이관은 성공 유지)
+            #
+            # 옵션:
+            #   - job["auto_gather_statistics"] = True (기본 ON, 본부장님 결정)
+            #   - 본부장님이 운영 환경에서 시간 부담 시 UI 에서 OFF 가능
+            # ════════════════════════════════════════════════════════════
+            try:
+                _stat_enabled = self.job.get("auto_gather_statistics", True)  # 기본 ON
+                if not _stat_enabled:
+                    self._log("info", "자동 통계 갱신 비활성화 (옵션) — 건너뜀")
+                elif self._stop:
+                    self._log("info", "이관 중단 — 통계 갱신 건너뜀")
+                else:
+                    # 이관 성공한 테이블 목록 수집
+                    _migrated_tables = []
+                    for _t in (self.job.get("tables") or []):
+                        if isinstance(_t, dict):
+                            _name = _t.get("table") or _t.get("name")
+                            _status = _t.get("status", "")
+                            # 성공 또는 부분성공 테이블만 (실패는 건너뜀)
+                            if _name and _status in ("done", "completed", "success", ""):
+                                _migrated_tables.append(_name)
+                        elif isinstance(_t, str):
+                            _migrated_tables.append(_t)
+
+                    if _migrated_tables:
+                        from app.core.statistics_gatherer import gather_statistics as _gs
+                        _tgt_db_type = (
+                            (self.job.get("target") or {}).get("db_type")
+                            or self.job.get("target_db_type")
+                            or self.job.get("tgt_db")  # v95_p23a: 진짜 키
+                            or "mysql"
+                        )
+                        # ── v95_p23a (2026-05-03 본부장님 본질 처방): 1102 에러 해소 ──
+                        # 본부장님 환경 진단: (1102, "Incorrect database name ''") 71회
+                        # 본질: 진짜 키는 'tgt_database' (line 470, 477) 인데 통계 코드는
+                        #      'target_database' 만 봄 → 빈 값 fallback → 1102 에러
+                        # 처방: 모든 가능한 키 fallback (하드코딩 X — 키 이름 표준화 시도)
+                        _tgt_db_name = (
+                            (self.job.get("target") or {}).get("database")
+                            or self.job.get("target_database")
+                            or self.job.get("tgt_database")  # ← v95_p23a: 진짜 사용 키
+                            or ""
+                        )
+                        # 빈 값이면 통계 갱신 건너뜀 (1102 에러 71회 방지)
+                        if not _tgt_db_name:
+                            self._log(
+                                "warn",
+                                "통계 갱신 — 타겟 DB 이름 빈 값, 건너뜀 "
+                                "(job 의 tgt_database/target_database 모두 빈 상태)"
+                            )
+                        else:
+                            _result = _gs(
+                                tgt_conn, _tgt_db_type, _tgt_db_name,
+                                _migrated_tables,
+                                log_func=lambda lv, msg: self._log(lv, msg)
+                            )
+                            # 결과를 job 에 기록 (UI 에서 확인 가능)
+                            self.job["statistics_gathered"] = _result
+                    else:
+                        self._log("info", "통계 갱신 대상 테이블 없음 — 건너뜀")
+            except Exception as _stat_err:
+                # 통계 갱신 실패해도 이관은 성공으로 (본부장님 결정)
+                self._log("warn", f"통계 갱신 단계 실패 (이관은 성공으로 유지): {_stat_err}")
+
+            src_conn.close()
+            tgt_conn.close()
+
+            if not self._stop:
+                self.job["status"] = "completed"
+                self.job["phase"]  = "DONE"
+                self.job["progress"] = 100
+                self.job["current_table"] = ""
+                self._log("info", f"이관 완료 — 총 {total_done:,} rows")
+            else:
+                self.job["status"] = "aborted"
+                self.job["phase"]  = "DONE"
+                self._log("warn", "이관 중단됨")
+
+        except Exception as e:
+            import traceback as _tb
+            self.job["status"] = "error"
+            self.job["phase"]  = "DONE"
+            self.job["error_message"] = str(e)
+            self._log("error", f"치명 오류: {e}\n{_tb.format_exc()}")
+        finally:
+            # v9 패치 #23: MSSQL 튜닝 복원
+            try:
+                if tgt_is_mssql and _mssql_tuning_applied:
+                    _db = self.job.get("tgt_database","")
+                    # 인덱스 REBUILD
+                    if _mssql_disabled_indexes:
+                        _gc = tgt_conn.cursor()
+                        _ok = 0
+                        for _tname, _iname in _mssql_disabled_indexes:
+                            try:
+                                _gc.execute(f"ALTER INDEX [{_iname}] ON [{_tname}] REBUILD")
+                                _ok += 1
+                            except Exception as _re:
+                                self._log("warn", f"인덱스 REBUILD 실패 [{_tname}.{_iname}]: {_re}")
+                        try: tgt_conn.commit()
+                        except: pass
+                        self._log("info",
+                            f"MSSQL 튜닝 복원: 인덱스 REBUILD {_ok}/{len(_mssql_disabled_indexes)}")
+                    # Recovery model 복원
+                    if _mssql_original_recovery and _mssql_original_recovery != "BULK_LOGGED":
+                        try:
+                            _gc = tgt_conn.cursor()
+                            _gc.execute(f"ALTER DATABASE [{_db}] SET RECOVERY {_mssql_original_recovery}")
+                            tgt_conn.commit()
+                            self._log("info",
+                                f"MSSQL 튜닝 복원: Recovery model → {_mssql_original_recovery}")
+                        except Exception as _re:
+                            self._log("warn", f"Recovery model 복원 실패 (수동 확인 필요): {_re}")
+            except Exception as _fe:
+                self._log("warn", f"MSSQL 튜닝 복원 블록 오류: {_fe}")
+
+            self.job["finished_at"] = datetime.now(_KST).isoformat()
+            self.job["speed"] = 0
+
+    def _connect_src(self):
+        j       = self.job
+        db_type = (j.get("src_db") or "mysql").lower()
+        host    = j.get("src_host", "localhost")
+        port    = int(j.get("src_port") or (1434 if db_type in ("mssql","azure","sqlserver") else 3306))
+        user    = j.get("src_username", "root")
+        pw      = j.get("src_password", "")
+        db      = j.get("src_database", "")
+        self._log("info", f"소스 연결 시도: {db_type}://{user}@{host}:{port}/{db}")
+        try:
+            if db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                import pymysql
+                return pymysql.connect(
+                    host=host, port=port, user=user, password=pw,
+                    database=db, charset="utf8mb4", connect_timeout=10,
+                    cursorclass=pymysql.cursors.DictCursor
+                )
+            elif db_type in ("mssql","azure","sqlserver"):
+                from app.core.db_conn import make_mssql_conn
+                return make_mssql_conn(host, port, user, pw, db)
+            else:
+                raise ValueError(f"지원하지 않는 소스 DB 타입: {db_type}")
+        except Exception as e:
+            self._log("error", f"소스 연결 실패: {e}")
+            return None
+
+    def _connect_tgt(self):
+        j       = self.job
+        db_type = (j.get("tgt_db") or "mssql").lower()
+        host    = j.get("tgt_host", "localhost")
+        port    = int(j.get("tgt_port") or (1434 if db_type in ("mssql","azure","sqlserver") else 3306))
+        user    = j.get("tgt_username", "sa")
+        pw      = j.get("tgt_password", "")
+        db      = j.get("tgt_database", "target_db")
+        self._log("info", f"타겟 연결 시도: {db_type}://{user}@{host}:{port}/{db}")
+        try:
+            if db_type in ("mssql","azure","sqlserver"):
+                from app.core.db_conn import make_mssql_conn
+                return make_mssql_conn(host, port, user, pw, db)
+            elif db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                import pymysql
+                return pymysql.connect(
+                    host=host, port=port, user=user, password=pw,
+                    database=db, charset="utf8mb4", connect_timeout=10,
+                    cursorclass=pymysql.cursors.DictCursor
+                )
+            else:
+                raise ValueError(f"지원하지 않는 타겟 DB 타입: {db_type}")
+        except Exception as e:
+            self._log("error", f"타겟 연결 실패: {e}")
+            return None
+    def _get_all_tables(self, src_conn) -> list:
+        """소스 DB 에서 전체 테이블 목록 반환.
+
+        v90 (2026-04-23) — STEP 2 name_map 본공사:
+          - MSSQL: TABLE_SCHEMA 까지 조회해 self._src_schema_map 자동 채움
+          - 반환값은 bare table name 만 (기존 호환). 다운스트림 코드는
+            _src_schema_map 을 통해 [schema].[table] 자동 구성.
+          - 동일 bare name 이 여러 스키마에 있으면 첫 번째 사용 + WARN 로그.
+          - dbo 만 있는 기존 DB 는 _src_schema_map = {name: 'dbo'} 로 채움
+            → 하위 호환 완전 유지.
+        """
+        src_db_type = (self.job.get("src_db") or "mysql").lower()
+        src_database = self.job.get("src_database", "")
+        cur = src_conn.cursor()
+
+        # _src_schema_map 초기화 (없으면 생성, 있으면 유지)
+        if not hasattr(self, '_src_schema_map'):
+            self._src_schema_map = {}
+
+        if src_db_type in ("mssql", "azure", "sqlserver"):
+            # v90: TABLE_SCHEMA + TABLE_NAME 조회
+            cur.execute("""
+                SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES
+                WHERE TABLE_CATALOG = ? AND TABLE_TYPE = 'BASE TABLE'
+                ORDER BY TABLE_NAME, TABLE_SCHEMA
+            """, (src_database,))
+            rows = cur.fetchall()
+
+            _result = []
+            _dup_names = {}   # {bare_name: [schema1, schema2, ...]}
+            _seen = set()
+
+            for r in rows:
+                if isinstance(r, dict):
+                    _sch = r.get("TABLE_SCHEMA", "dbo")
+                    _nm  = r.get("TABLE_NAME", "")
+                else:
+                    _sch = r[0]
+                    _nm  = r[1]
+                if not _nm:
+                    continue
+                # 첫 번째 발견만 맵에 저장, 나머지는 중복 목록
+                if _nm not in _seen:
+                    self._src_schema_map[_nm] = _sch
+                    _result.append(_nm)
+                    _seen.add(_nm)
+                    _dup_names[_nm] = [_sch]
+                else:
+                    _dup_names[_nm].append(_sch)
+
+            # 중복 스키마 경고
+            for _nm, _schemas in _dup_names.items():
+                if len(_schemas) > 1:
+                    _picked = _schemas[0]
+                    _others = _schemas[1:]
+                    self._log("warn",
+                        f"테이블 [{_nm}] 이 여러 스키마에 존재: {_schemas} "
+                        f"→ [{_picked}].{_nm} 사용 (나머지 {_others} 무시)")
+
+            _schema_summary = {}
+            for _nm, _sch in self._src_schema_map.items():
+                _schema_summary[_sch] = _schema_summary.get(_sch, 0) + 1
+            self._log("info",
+                f"MSSQL 테이블 {len(_result)}개 스캔 — 스키마별: "
+                + ", ".join(f"{_s}={_c}" for _s,_c in sorted(_schema_summary.items())))
+            return _result
+        else:
+            # MySQL / MariaDB / Aurora — 스키마 개념 없으므로 기존 동작
+            cur.execute("""
+                SELECT TABLE_NAME FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE='BASE TABLE'
+                ORDER BY TABLE_NAME
+            """)
+            return [r["TABLE_NAME"] for r in cur.fetchall()]
+
+    def _estimate_total_rows(self, src_conn, tables: list) -> int:
+        """rows 추정 — 실패 시 0 반환 (이관에 영향 없음)
+
+        v9 패치 #41: 테이블별 추정값도 self.job['_table_rows_estimate'] 에 저장
+        → pending 테이블도 프론트에서 rows 를 알 수 있음 (ETA 정확도 개선)
+
+        v90 (2026-04-23) — STEP 2 name_map 본공사:
+          - MSSQL: OBJECT_SCHEMA_NAME 추가 조회 → _src_schema_map 기준으로 정확 매칭
+          - 동일 이름 다른 스키마 혼동 방지
+          - _src_schema_map 비어있으면 (=사용자가 명시적 tables 지정 등) 기존 방식 fallback
+        """
+        src_db_type = (self.job.get("src_db") or "mysql").lower()
+        total = 0
+        name_map = {}  # key: bare_name (또는 "schema.name"), value: rows
+        try:
+            cur = src_conn.cursor()
+            if src_db_type in ("mssql", "azure", "sqlserver"):
+                # v90: 스키마까지 함께 조회 → 정확한 매칭
+                cur.execute("""
+                    SELECT OBJECT_SCHEMA_NAME(object_id) AS sch,
+                           OBJECT_NAME(object_id) AS tbl,
+                           SUM(row_count) AS cnt
+                    FROM sys.dm_db_partition_stats
+                    WHERE index_id IN (0, 1)
+                    GROUP BY object_id
+                """)
+                rows = cur.fetchall()
+                # 두 형태로 name_map 저장: bare name + "schema.name"
+                # → 다운스트림 코드가 어느 키로 조회해도 맞도록
+                for r in rows:
+                    try:
+                        if isinstance(r, dict):
+                            _sch = r.get("sch") or "dbo"
+                            _nm  = r.get("tbl") or ""
+                            _cnt = r.get("cnt") or 0
+                        else:
+                            _sch = r[0] or "dbo"
+                            _nm  = r[1] or ""
+                            _cnt = r[2] or 0
+                        if not _nm:
+                            continue
+                        # 정식 키
+                        name_map[f"{_sch}.{_nm}"] = _cnt
+                        # bare name 은 _src_schema_map 에 등록된 것만 저장
+                        # (동일 이름이 여러 스키마에 있으면 map에 등록된 스키마만)
+                        _registered_sch = getattr(self, '_src_schema_map', {}).get(_nm)
+                        if _registered_sch == _sch:
+                            name_map[_nm] = _cnt
+                        elif _registered_sch is None and _nm not in name_map:
+                            # map에 없는 경우 첫 번째만 (legacy fallback)
+                            name_map[_nm] = _cnt
+                    except Exception:
+                        pass
+
+                # total 계산 — _src_schema_map 우선 참조
+                _sch_map = getattr(self, '_src_schema_map', {})
+                for _t in tables:
+                    if _t in _sch_map:
+                        _full = f"{_sch_map[_t]}.{_t}"
+                        total += name_map.get(_full, 0)
+                    else:
+                        total += name_map.get(_t, 0)
+            else:
+                # MySQL: information_schema 한번에 조회
+                cur.execute(
+                    "SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE='BASE TABLE'"
+                )
+                rows = cur.fetchall()
+                for r in rows:
+                    try:
+                        nm  = r["TABLE_NAME"] if isinstance(r, dict) else r[0]
+                        cnt = r["TABLE_ROWS"]  if isinstance(r, dict) else r[1]
+                        name_map[nm] = cnt or 0
+                    except: pass
+                total = sum(name_map.get(t, 0) for t in tables)
+        except Exception as _e:
+            self._log("warn", f"rows 추정 실패 (0 처리): {_e}")
+            total = 0
+
+        # v9 #41: 테이블별 추정값 보관 — v90: 스키마 고려해 저장
+        _sch_map = getattr(self, '_src_schema_map', {})
+        _est = {}
+        for _t in tables:
+            if _t in _sch_map:
+                _full = f"{_sch_map[_t]}.{_t}"
+                _est[_t] = name_map.get(_full, name_map.get(_t, 0))
+            else:
+                _est[_t] = name_map.get(_t, 0)
+        self.job["_table_rows_estimate"] = _est
+        return total
+
+
+    def _create_mysql_table(self, tgt_conn, table: str, cols: list, src_db_type: str):
+        """MSSQL or MySQL 컬럼 정보 → MySQL CREATE TABLE
+
+        v10 #2 (2026-04-20) — 역방향 이관 DDL 보강:
+          A. IDENTITY 타입 보존   — bigint IDENTITY → BIGINT AUTO_INCREMENT
+          B. nvarchar(max) 처리   — CHARACTER_MAXIMUM_LENGTH=-1 → LONGTEXT
+          C. max_length 바이트→문자 변환 — nvarchar/nchar 는 /2 (MSSQL 은 UTF-16 저장)
+          D. DEFAULT 절 변환      — GETDATE→NOW, NEWID→UUID, ((0))→0 등
+        """
+        TYPE_MAP_MSSQL = {
+            "int":          "INT", "bigint":    "BIGINT",
+            "smallint":     "SMALLINT", "tinyint": "TINYINT",
+            "decimal":      "DECIMAL", "numeric": "DECIMAL",
+            "float":        "FLOAT", "real":     "FLOAT",
+            "nvarchar":     "VARCHAR", "varchar":  "VARCHAR",
+            "nchar":        "CHAR",   "char":     "CHAR",
+            "ntext":        "TEXT",   "text":     "TEXT",
+            "datetime2":    "DATETIME(6)", "datetime": "DATETIME(3)",  # MSSQL datetime은 3.33ms 정밀도 → MySQL DATETIME(3)으로 밀리초 보존
+            "date":         "DATE",   "time":     "TIME",
+            "bit":          "TINYINT(1)",
+            "uniqueidentifier": "VARCHAR(36)",
+            "varbinary":    "LONGBLOB", "binary":  "BINARY",
+            "money":        "DECIMAL(19,4)", "smallmoney": "DECIMAL(10,4)",
+            "xml":          "LONGTEXT", "image":   "LONGBLOB",
+            "datetimeoffset": "DATETIME(6)",   # ODBC -155 → UTC 변환 후 DATETIME으로
+            "rowversion":   "BIGINT",          # 8바이트 이진 → 부호없는 정수
+            "timestamp":    "BIGINT",          # rowversion과 동일
+            "hierarchyid":  "VARCHAR(500)",    # /1/2/3/ 형태 계층 경로
+            "geography":    "TEXT",            # WKT 문자열 (ST_AsText)
+            "geometry":     "TEXT",            # WKT 문자열
+            "sql_variant":  "TEXT",
+        }
+
+        # v10 #2-A: IDENTITY 컬럼용 AUTO_INCREMENT 호환 정수 타입
+        # MySQL AUTO_INCREMENT 는 INT/BIGINT/SMALLINT/TINYINT 에만 가능
+        _AI_COMPATIBLE = {"tinyint": "TINYINT", "smallint": "SMALLINT",
+                          "int": "INT", "bigint": "BIGINT"}
+
+        src_is_mssql = src_db_type in ("mssql", "azure", "sqlserver")
+        col_defs = []
+        pk_cols  = []
+        for c in cols:
+            cname    = c.get("COLUMN_NAME","col")
+            raw_type = (c.get("DATA_TYPE") or "varchar").lower().strip()
+            is_ai    = "auto_increment" in (c.get("EXTRA","") or "").lower()
+            is_pk    = (c.get("COLUMN_KEY","") == "PRI")
+            nullable = c.get("IS_NULLABLE","YES") == "YES"
+            # NULL_VIOLATION fix_action: NOT NULL 컬럼을 NULL 허용으로 강제 변환
+            _fix_actions = self.job.get("auto_fix_actions") or []
+            _null_fix_cols = set()
+            for _fa in _fix_actions:
+                if _fa.get("action") == "NULL_VIOLATION":
+                    for _at in (_fa.get("affected") or []):
+                        if _at.get("table") == table:
+                            _null_fix_cols.add(_at.get("column",""))
+            if not nullable and cname in _null_fix_cols:
+                nullable = True  # NULL_VIOLATION fix: NOT NULL → NULL
+            # ════════════════════════════════════════════════════════════
+            # v95_p28 (2026-05-04 본부장님 본질 처방): PK 컬럼 NOT NULL 강제
+            # ════════════════════════════════════════════════════════════
+            # 본질: MSSQL 은 'is_nullable=1' 인 PK 컬럼 허용 (BillOfMaterials.EndDate 등)
+            #       MySQL 은 PK 가 NULL 허용이면 1171 에러 ('All parts of a PRIMARY KEY
+            #       must be NOT NULL') 발생
+            # 처방: is_pk 면 nullable 강제 False (MSSQL 의미 보존 + MySQL 호환)
+            # 부작용 0: PK 컬럼은 어차피 데이터에 NULL 들어가지 못함 (MSSQL 도 unique 제약)
+            #          → MSSQL 메타만 nullable 이지 실제 데이터는 항상 NOT NULL 임
+            if is_pk and nullable:
+                nullable = False
+                self._log("info",
+                    f"  [{table}] PK 컬럼 '{cname}' NULL 허용 → NOT NULL 강제 "
+                    f"(v95_p28: MySQL 1171 회피)")
+            # ════════════════════════════════════════════════════════════
+            # v95_p34 본질 5 (2026-05-04 본부장님 본질 처방): _skip_cols nullable 강제 True
+            # ════════════════════════════════════════════════════════════
+            # 본질: 미지원 타입 (xml, sql_variant, image) 은 _skip_cols 처리되어
+            #       SELECT 시 'NULL AS [colname]' 으로 대체됨.
+            #       그러나 CREATE TABLE 시점 컬럼은 MSSQL 메타의 IS_NULLABLE 만 따름.
+            #       MSSQL 에서 NOT NULL XML 컬럼이면 → MySQL CREATE TABLE 도 NOT NULL
+            #       → INSERT 시 NULL 데이터 → 1048 'cannot be null' 에러
+            # 증상: DatabaseLog.XmlEvent (XML 타입, NOT NULL) 1,596행 모두 1048
+            # 처방: _skip_cols 에 등록된 컬럼은 CREATE TABLE 시 nullable=True 강제
+            # 부작용 0: SELECT 가 NULL 만 보내므로 nullable 허용은 안전, 의미 동일
+            _skip_cols_set = self._skip_cols_map.get(table, set())
+            if cname in _skip_cols_set and not nullable:
+                nullable = True
+                self._log("info",
+                    f"  [{table}] 미지원 타입 컬럼 '{cname}' NOT NULL → NULL 허용 강제 "
+                    f"(v95_p34 본질 5: SELECT NULL 대체 + MySQL 1048 회피)")
+            null_str = "NULL" if nullable else "NOT NULL"
+            length   = c.get("CHARACTER_MAXIMUM_LENGTH")
+            prec     = c.get("NUMERIC_PRECISION")
+            scale    = c.get("NUMERIC_SCALE")
+
+            # v10 #2-C: MSSQL 유니코드 길이 변환 (UTF-16 → 문자 수)
+            # sys.columns.max_length 는 바이트 단위. nvarchar/nchar 는 2바이트/문자.
+            # max 타입은 -1 (그대로 유지하여 아래에서 LONGTEXT 로 처리).
+            _char_len = length
+            if src_is_mssql and length is not None and length != -1:
+                try:
+                    ln_i = int(length)
+                    if raw_type in ("nvarchar", "nchar") and ln_i > 0:
+                        _char_len = ln_i // 2
+                    else:
+                        _char_len = ln_i
+                except (TypeError, ValueError):
+                    _char_len = length
+
+            # v10 #2-A: IDENTITY 컬럼 — 원본 정수 타입 보존
+            if is_ai:
+                ai_type = _AI_COMPATIBLE.get(raw_type, "INT")
+                col_defs.append(f"  `{cname}` {ai_type} NOT NULL AUTO_INCREMENT")
+                pk_cols.append(cname)
+                continue
+
+            if raw_type in ("decimal","numeric"):
+                p = int(prec or 18); s = int(scale or 4)
+                mtype = f"DECIMAL({p},{s})"
+            elif raw_type in ("nvarchar","varchar"):
+                # v10 #2-B: max 타입 (length=-1) → LONGTEXT
+                if _char_len is not None and int(_char_len) == -1:
+                    mtype = "LONGTEXT"
+                else:
+                    ln = int(_char_len) if _char_len and int(_char_len) > 0 else 255
+                    mtype = f"VARCHAR({min(ln,16383)})" if ln < 16384 else "LONGTEXT"
+            elif raw_type in ("nchar","char"):
+                if _char_len is not None and int(_char_len) == -1:
+                    # CHAR(max) 는 사실상 존재하지 않지만 방어
+                    mtype = "LONGTEXT"
+                else:
+                    ln = int(_char_len) if _char_len and int(_char_len) > 0 else 1
+                    mtype = f"CHAR({min(ln,255)})"
+            elif raw_type in ("varbinary", "binary"):
+                # v10 #2-B 확장: varbinary(max) (-1) → LONGBLOB (그대로), 그 외 길이 보존
+                if length is not None and int(length) == -1:
+                    mtype = "LONGBLOB"
+                elif raw_type == "binary" and length and int(length) > 0:
+                    mtype = f"BINARY({min(int(length),255)})"
+                else:
+                    mtype = "LONGBLOB"
+            else:
+                # ════════════════════════════════════════════════════════════
+                # v95_p27 (2026-05-04 본부장님 본질 처방): TEXT 폴백 안전망
+                # ════════════════════════════════════════════════════════════
+                # 본질: 알려지지 않은 raw_type (UDT 가 base type 으로 안 풀린 경우 등) 이
+                #       TYPE_MAP_MSSQL 에서 미매치 → 'TEXT' 폴백 → MySQL CREATE 시 1101/1170
+                # 처방: 미매치 시 VARCHAR(255) 폴백 (안전, default 가능, key 가능)
+                #       TEXT 폴백은 의미 정확하지만 1101/1170 에러 폭발 위험
+                # 부작용 0: 알려진 타입은 그대로, 미지의 타입만 TEXT → VARCHAR(255) 변경
+                if raw_type in TYPE_MAP_MSSQL:
+                    mtype = TYPE_MAP_MSSQL[raw_type]
+                else:
+                    # UDT 가 base type 안 풀린 경우 — v95_p26 가 이미 잡았어야 하지만
+                    # 안전망으로 VARCHAR(255) 사용 (TEXT 가 1101 에러 일으키므로)
+                    mtype = "VARCHAR(255)"
+                    self._log("warn",
+                        f"  [{table}] 알 수 없는 타입 '{raw_type}' (컬럼 '{cname}') "
+                        f"→ VARCHAR(255) 폴백 (v95_p27 안전망)")
+
+            # v10 #2-D: DEFAULT 절 변환
+            default_clause = ""
+            if src_is_mssql:
+                raw_default = c.get("COLUMN_DEFAULT")
+                default_clause = self._mssql_default_to_mysql(raw_default, mtype, raw_type)
+
+            if is_pk:
+                pk_cols.append(cname)
+            col_defs.append(f"  `{cname}` {mtype} {null_str}{default_clause}")
+
+        if pk_cols:
+            col_defs.append(f"  PRIMARY KEY ({', '.join(['`'+c+'`' for c in pk_cols])})")
+
+        # ══════════════════════════════════════════════════════════════
+        # v10 #15: AUTO_INCREMENT 자동 키 보강
+        # ──────────────────────────────────────────────────────────────
+        # MySQL 규칙: AUTO_INCREMENT 컬럼은 반드시 KEY (PK 또는 UNIQUE) 여야 하고,
+        #           그 인덱스의 '첫 번째' 컬럼이어야 함.
+        # MSSQL IDENTITY 컬럼은 위 규칙을 따르지 않아도 됨 → 변환 시 에러 (1075).
+        #
+        # 케이스별 처리:
+        #   1) IDENTITY 가 PK 면 → PK 첫 번째 컬럼인지 체크
+        #      - 첫 번째 OK → 그대로
+        #      - 첫 번째 아님 → UNIQUE KEY 별도 추가 (원래 PK 순서 보존)
+        #   2) IDENTITY 가 PK 아님 (로그용 seq 등) → UNIQUE KEY 별도 추가
+        # ══════════════════════════════════════════════════════════════
+        _ai_cols = [c.get("COLUMN_NAME","") for c in cols
+                    if "auto_increment" in (c.get("EXTRA","") or "").lower()]
+        _extra_indexes = []
+        if _ai_cols:
+            _ai_name = _ai_cols[0]  # MSSQL/MySQL 모두 테이블당 1개만 허용
+            if _ai_name in pk_cols:
+                # PK 의 멤버인데 첫 번째가 아닌 케이스
+                if pk_cols[0] != _ai_name:
+                    _uk_name = f"uk_ai_{_ai_name}"
+                    _extra_indexes.append(
+                        f"  UNIQUE KEY `{_uk_name}` (`{_ai_name}`)")
+                    self._log("info",
+                        f"  [{table}] v10 #15: AUTO_INCREMENT '{_ai_name}' 이 복합 PK 의 "
+                        f"첫 번째가 아님 → UNIQUE KEY 자동 추가 ({_uk_name})")
+            else:
+                # IDENTITY 인데 PK 에 포함 안 된 케이스
+                _uk_name = f"uk_ai_{_ai_name}"
+                _extra_indexes.append(
+                    f"  UNIQUE KEY `{_uk_name}` (`{_ai_name}`)")
+                self._log("info",
+                    f"  [{table}] v10 #15: AUTO_INCREMENT '{_ai_name}' 이 PK 가 아님 "
+                    f"→ UNIQUE KEY 자동 추가 ({_uk_name})")
+
+        if _extra_indexes:
+            col_defs.extend(_extra_indexes)
+
+        # ══════════════════════════════════════════════════════════════
+        # v10 #16: Row size 초과 자동 대응 (VARCHAR → TEXT 자동 변환)
+        # ──────────────────────────────────────────────────────────────
+        # MySQL 단일 행 크기 제한: 65,535 byte (LOB 제외).
+        # utf8mb4 는 char 당 최대 4 byte 예약 → VARCHAR(1000) = 4,000 byte.
+        # VARCHAR 컬럼이 많은 테이블은 쉽게 초과 (특히 MSSQL 레거시 테이블).
+        #
+        # 전략:
+        #   1) DDL 완성 전 행 크기 추정
+        #   2) 60,000 byte 초과 시 긴 VARCHAR 부터 TEXT 로 자동 변환
+        #   3) 인덱스 영향 없는 범위에서 변환 (길이 >= 500 인 것만)
+        #   4) 변환 내역을 로그로 명시 → 사용자가 검토 가능
+        # ══════════════════════════════════════════════════════════════
+        def _estimate_row_bytes(defs):
+            """col_defs 리스트에서 행 크기 추정 (근사치)"""
+            import re as _re
+            total = 0
+            for d in defs:
+                # PRIMARY KEY / UNIQUE KEY 라인은 제외
+                s = d.strip().upper()
+                if s.startswith("PRIMARY KEY") or s.startswith("UNIQUE KEY") or s.startswith("KEY "):
+                    continue
+                # VARCHAR(N) / CHAR(N) 매치
+                m = _re.search(r'\b(VARCHAR|CHAR|NVARCHAR|NCHAR)\s*\(\s*(\d+)\s*\)', d, _re.IGNORECASE)
+                if m:
+                    n = int(m.group(2))
+                    total += n * 4  # utf8mb4 최악의 경우
+                    continue
+                # BIGINT / DATETIME(N) 등 고정 길이
+                if _re.search(r'\bBIGINT\b', d, _re.IGNORECASE):
+                    total += 8
+                elif _re.search(r'\bINT\b', d, _re.IGNORECASE):
+                    total += 4
+                elif _re.search(r'\bSMALLINT\b', d, _re.IGNORECASE):
+                    total += 2
+                elif _re.search(r'\bTINYINT\b', d, _re.IGNORECASE):
+                    total += 1
+                elif _re.search(r'\bDATETIME', d, _re.IGNORECASE):
+                    total += 8
+                elif _re.search(r'\bDATE\b', d, _re.IGNORECASE):
+                    total += 3
+                elif _re.search(r'\bDECIMAL\b', d, _re.IGNORECASE):
+                    total += 12  # 보수적 추정
+                elif _re.search(r'\bFLOAT\b|\bDOUBLE\b', d, _re.IGNORECASE):
+                    total += 8
+                elif _re.search(r'\b(TEXT|BLOB|LONGTEXT|LONGBLOB)\b', d, _re.IGNORECASE):
+                    # LOB 는 외부 저장 — 행 크기에 미포함
+                    total += 12  # 포인터 오버헤드 정도
+                else:
+                    total += 8  # 보수적 기본값
+            return total
+
+        _row_bytes = _estimate_row_bytes(col_defs)
+        _AUTO_CONVERT_ENABLED = self.job.get("auto_convert_oversized_row", True)
+        _SAFE_LIMIT = 60000  # 65535 에서 5000 여유
+        _MIN_CONVERT_LEN = 500  # VARCHAR(N >= 500) 만 TEXT 변환 대상
+
+        if _row_bytes > _SAFE_LIMIT and _AUTO_CONVERT_ENABLED:
+            self._log("warn",
+                f"  [{table}] v10 #16: 예상 행 크기 {_row_bytes:,} bytes — "
+                f"MySQL 제한(65,535) 근접 → 긴 VARCHAR 자동 TEXT 변환 시작")
+
+            # VARCHAR 컬럼 길이 정보 수집 (원본 cols 기반)
+            import re as _re2
+            # 변환 후보: length >= _MIN_CONVERT_LEN 인 VARCHAR/NVARCHAR 컬럼, 긴 것부터
+            _candidates = []
+            for c in cols:
+                _rt = (c.get("DATA_TYPE") or "").lower().strip()
+                if _rt not in ("varchar", "nvarchar"):
+                    continue
+                _ln = c.get("CHARACTER_MAXIMUM_LENGTH")
+                if _ln is None or int(_ln) == -1:
+                    continue  # max 타입은 이미 LONGTEXT 로 처리됨
+                # 유니코드 변환 반영
+                if src_is_mssql and _rt in ("nvarchar", "nchar"):
+                    _ln_char = int(_ln) // 2
+                else:
+                    _ln_char = int(_ln)
+                if _ln_char >= _MIN_CONVERT_LEN:
+                    _candidates.append((c.get("COLUMN_NAME",""), _ln_char))
+            # 긴 것부터 변환
+            _candidates.sort(key=lambda x: -x[1])
+
+            _converted = []
+            for _cname, _clen in _candidates:
+                # col_defs 에서 해당 컬럼 라인을 찾아 TEXT 로 변환
+                for _i, _d in enumerate(col_defs):
+                    # `colname` VARCHAR(N) ... 또는 `colname` CHAR(N) ... 패턴
+                    _pattern = rf'(`{_re2.escape(_cname)}`\s+)(VARCHAR|CHAR|NVARCHAR|NCHAR)\s*\(\s*\d+\s*\)'
+                    _new_def, _n = _re2.subn(_pattern, r'\1TEXT', _d, flags=_re2.IGNORECASE)
+                    if _n > 0:
+                        col_defs[_i] = _new_def
+                        _converted.append((_cname, _clen))
+                        break
+                # 다시 추정 — 충분히 줄었으면 중단
+                _row_bytes = _estimate_row_bytes(col_defs)
+                if _row_bytes <= _SAFE_LIMIT:
+                    break
+
+            for _cname, _clen in _converted:
+                self._log("info",
+                    f"    [{table}] v10 #16: '{_cname}' VARCHAR({_clen}) → TEXT 자동 변환")
+            self._log("info",
+                f"  [{table}] v10 #16: 변환 후 예상 행 크기 {_row_bytes:,} bytes "
+                f"(변환 {len(_converted)}개 컬럼)")
+
+            if _row_bytes > 65535:
+                self._log("warn",
+                    f"  [{table}] v10 #16: 최대한 변환했으나 여전히 {_row_bytes:,} bytes "
+                    f"→ CREATE TABLE 실패 가능. 수동 DDL 조정 필요.")
+
+        ddl = (
+            f"CREATE TABLE IF NOT EXISTS `{table}` (\n"
+            + ",\n".join(col_defs)
+            + "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC"
+        )
+        self._log("info", f"테이블 [{table}] MySQL DDL:\n{ddl}")
+        try:
+            cur = tgt_conn.cursor()
+            cur.execute(ddl)
+            tgt_conn.commit()
+            self._log("info", f"테이블 [{table}] MySQL 생성 완료")
+        except Exception as e:
+            self._log("error", f"테이블 [{table}] MySQL 생성 실패: {e}")
+            raise
+
+    # ─────────────────────────────────────────────────────────────
+    # v10 #2-D: MSSQL DEFAULT → MySQL DEFAULT 변환 헬퍼
+    # ─────────────────────────────────────────────────────────────
+    def _mssql_default_to_mysql(self, raw_default, mysql_type: str, mssql_type: str) -> str:
+        """
+        MSSQL default_constraints.definition → MySQL DEFAULT 절.
+
+        입력 형식 (MSSQL 이 돌려주는 전형적 모양):
+          - ((0))                          → DEFAULT 0
+          - (N'')                          → DEFAULT ''
+          - ('hello')                      → DEFAULT 'hello'
+          - (getdate())                    → DEFAULT CURRENT_TIMESTAMP(6)
+          - (newid())                      → UUID() 는 MySQL DEFAULT 에 못 씀 → 주석만 남기고 생략
+          - (CONVERT(...))                 → 복잡 표현 → 주석 남기고 생략
+
+        반환: " DEFAULT <expr>"  (앞 공백 포함) 또는 ""  (DEFAULT 없음)
+
+        원칙
+        ----
+        - 단순·안전한 케이스만 자동 변환
+        - 함수 호출이 MySQL DEFAULT 에서 허용되지 않는 경우 (UUID 등) 는 생략
+        - 실패 시 조용히 "" 반환 — DDL 자체는 성공해야 함
+        """
+        if raw_default is None:
+            return ""
+        s = str(raw_default).strip()
+        if not s:
+            return ""
+
+        import re as _re
+        # MSSQL 은 대부분 ((expr)) 혹은 (expr) 로 감싸서 돌려줌 — 바깥 괄호 벗김
+        while len(s) >= 2 and s.startswith("(") and s.endswith(")"):
+            # 괄호 균형 확인 — 단순 strip 은 (a)+(b) 같은 경우 문제
+            depth = 0
+            balanced = True
+            for i, ch in enumerate(s):
+                if ch == "(": depth += 1
+                elif ch == ")": depth -= 1
+                if depth == 0 and i < len(s) - 1:
+                    balanced = False
+                    break
+            if balanced:
+                s = s[1:-1].strip()
+            else:
+                break
+        if not s:
+            return ""
+
+        up = s.upper()
+        mt = (mysql_type or "").upper()
+
+        # 1) 날짜/시간 함수
+        if up in ("GETDATE()", "SYSDATETIME()", "CURRENT_TIMESTAMP"):
+            if mt.startswith("DATETIME") or mt.startswith("TIMESTAMP"):
+                # MySQL 5.7+ / 8.0 은 DATETIME 에도 CURRENT_TIMESTAMP 허용
+                # 정밀도는 컬럼 타입과 맞춤: DATETIME(6) → CURRENT_TIMESTAMP(6)
+                m = _re.match(r"DATETIME\((\d)\)", mt)
+                prec = m.group(1) if m else ""
+                return f" DEFAULT CURRENT_TIMESTAMP{f'({prec})' if prec else ''}"
+            return ""  # 날짜가 아닌 컬럼에 GETDATE 는 변환 안 함
+        if up == "GETUTCDATE()":
+            self._log("info",
+                      f"  [DDL] GETUTCDATE() 는 MySQL 에 동등 함수 없음 → DEFAULT 생략")
+            return ""
+        # NEWID / NEWSEQUENTIALID — MySQL DEFAULT 에 UUID() 호출 불가 (8.0.13+ 에서 제한적 허용)
+        if up in ("NEWID()", "NEWSEQUENTIALID()"):
+            self._log("info",
+                      f"  [DDL] {up} 는 MySQL DEFAULT 에 사용 불가 → DEFAULT 생략 "
+                      f"(INSERT 시 UUID() 로 채우거나 애플리케이션에서 생성 필요)")
+            return ""
+
+        # 2) 숫자 리터럴
+        if _re.fullmatch(r"-?\d+(\.\d+)?", s):
+            return f" DEFAULT {s}"
+
+        # 3) 문자열 리터럴
+        # MSSQL: 'abc' 또는 N'abc' (유니코드 접두 N)
+        m = _re.fullmatch(r"N?'(.*)'", s, flags=_re.DOTALL)
+        if m:
+            lit = m.group(1)
+            # MSSQL 이스케이프 '' → ' 로 되돌림 → MySQL 도 '' 로 이스케이프 필요
+            lit_mysql = lit.replace("''", "''")  # 동일 규칙이라 실질 no-op
+            # MySQL 문자열 내 백슬래시 이스케이프
+            lit_mysql = lit_mysql.replace("\\", "\\\\")
+            return f" DEFAULT '{lit_mysql}'"
+
+        # 4) 비트 리터럴 — '0' / '1' 이 문자열로 들어오는 경우도 있음
+        if up in ("0", "1"):
+            return f" DEFAULT {up}"
+
+        # 5) 그 외 (CONVERT, CAST, 함수 호출, 복잡 수식) — 자동 변환 리스크 큼 → 생략
+        #    사용자는 로그에서 원본 default 확인 후 수동 보정 가능
+        self._log("info",
+                  f"  [DDL] 복잡한 DEFAULT 표현식 자동 변환 생략: {raw_default!r} "
+                  f"(타입={mssql_type})")
+        return ""
+
+
+    def _migrate_objects(self, src_conn, tgt_conn, objects: dict, do_convert: bool):
+        """소스 DB 오브젝트(프로시저/함수/트리거/뷰)를 타겟 DB에 생성
+        MySQL → MSSQL 종합 변환 후 재시도 로직 포함
+        """
+        import re as _re
+        src_db_type = self.job.get("src_db","mysql")
+        tgt_db_type = self.job.get("tgt_db","mssql")
+        src_db_name = self.job.get("src_database","")
+        cur_src = src_conn.cursor()
+
+        # ── SHOW CREATE로 완전한 DDL 가져오기 ───────────────────
+        def _get_ddl(obj_type: str, name: str) -> str:
+            try:
+                if src_db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                    # MySQL: SHOW CREATE
+                    if obj_type in ("PROCEDURE","FUNCTION"):
+                        cur_src.execute(f"SHOW CREATE {obj_type} `{name}`")
+                        row = cur_src.fetchone()
+                        if not row: return ""
+                        key = f"Create {obj_type.capitalize()}"
+                        if isinstance(row, dict):
+                            return row.get(key) or list(row.values())[2] or ""
+                        return row[2] if len(row)>2 else ""
+                    elif obj_type == "TRIGGER":
+                        cur_src.execute(f"SHOW CREATE TRIGGER `{name}`")
+                        row = cur_src.fetchone()
+                        if not row: return ""
+                        if isinstance(row, dict):
+                            return row.get("SQL Original Statement") or list(row.values())[2] or ""
+                        return row[2] if len(row)>2 else ""
+                    elif obj_type == "VIEW":
+                        cur_src.execute(f"SHOW CREATE VIEW `{name}`")
+                        row = cur_src.fetchone()
+                        if not row: return ""
+                        if isinstance(row, dict):
+                            return row.get("Create View") or list(row.values())[1] or ""
+                        return row[1] if len(row)>1 else ""
+                elif src_db_type in ("mssql","azure","sqlserver"):
+                    # v10 #30: 스키마 인식 DDL 조회
+                    # 기존: OBJECT_ID(name) — dbo 스키마만 조회 → 다른 스키마의 오브젝트는
+                    #       NULL 반환 → "DDL 없음" 에러.
+                    # 개선: sys.sql_modules + sys.objects JOIN 으로 모든 스키마 커버.
+                    #       이름이 같은 오브젝트가 여러 스키마에 있으면 첫 번째 (MSSQL 검색 순서 기본).
+                    #       트리거는 별도 처리 (sys.triggers 조인 필요).
+                    _sql = """
+                        SELECT m.definition
+                        FROM sys.sql_modules m
+                        JOIN sys.objects o ON m.object_id = o.object_id
+                        WHERE o.name = ? AND o.is_ms_shipped = 0
+                        ORDER BY o.object_id
+                    """
+                    cur_src.execute(_sql, [name])
+                    row = cur_src.fetchone()
+                    if row:
+                        val = row[0] if not isinstance(row, dict) else list(row.values())[0]
+                        if val:
+                            return val
+                    # 폴백: 기존 OBJECT_DEFINITION (dbo 스키마 전제, 하위호환)
+                    cur_src.execute("SELECT OBJECT_DEFINITION(OBJECT_ID(?))", [name])
+                    row = cur_src.fetchone()
+                    if row:
+                        val = row[0] if not isinstance(row, dict) else list(row.values())[0]
+                        return val or ""
+            except Exception as e:
+                self._log("warn", f"DDL 조회 실패 [{name}]: {e}")
+            return ""
+
+        # ── MySQL → MSSQL 종합 변환 ──────────────────────────────
+        def _common(s):
+            s = _re.sub(r'DELIMITER\s+\S+[ \t]*\n?', '', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\$\$\s*$', '', s, flags=_re.MULTILINE)
+            s = _re.sub(r'DEFINER\s*=\s*`[^`]+`@`[^`]+`\s*', '', s, flags=_re.IGNORECASE)
+            for kw in ('NOT DETERMINISTIC','CONTAINS SQL','READS SQL DATA',
+                       'MODIFIES SQL DATA','NO SQL'):
+                s = _re.sub(r'\b' + kw.replace(' ', r'\s+') + r'\b', '', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bSQL\s+SECURITY\s+\w+\b', '', s, flags=_re.IGNORECASE)
+            s = _re.sub(r"COMMENT\s+'[^']*'", '', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'`([^`]+)`', r'[\1]', s)
+            s = _re.sub(r'\bVARCHAR\b', 'NVARCHAR', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bDATETIME\b', 'DATETIME2(6)', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bTINYINT\(1\)', 'BIT', s)
+            s = _re.sub(r'\bNOW\(\)', 'GETDATE()', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bCURRENT_TIMESTAMP\b', 'GETDATE()', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bCURDATE\(\)', 'CAST(GETDATE() AS DATE)', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bIFNULL\s*\(', 'ISNULL(', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bSUBSTR\s*\(', 'SUBSTRING(', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bTO_DAYS\s*\(', "DATEDIFF(day,'0001-01-01',", s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bDATE\s*\(([^)]+)\)', r'CAST(\1 AS DATE)', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bGROUP_CONCAT\s*\((.+?)\)', lambda m: _gc(m), s, flags=_re.IGNORECASE|_re.DOTALL)
+            if src_db_name:
+                s = _re.sub(r'\b' + _re.escape(src_db_name) + r'\.\[?(\w+)\]?', r'[\1]', s, flags=_re.IGNORECASE)
+            return s
+
+        def _gc(m):
+            inner = m.group(1)
+            sep_m = _re.search(r'\bSEPARATOR\s+([\'"][^\'"]*[\'"])', inner, _re.IGNORECASE)
+            sep   = sep_m.group(1) if sep_m else "','"
+            col   = _re.sub(r'\s+SEPARATOR\s+[\'"][^\'"]*[\'"]', '', inner, flags=_re.IGNORECASE).strip()
+            col   = _re.sub(r'\bORDER\s+BY\s+.+$', '', col, flags=_re.IGNORECASE).strip()
+            return f'STRING_AGG({col},{sep})'
+
+        def _convert_view(s):
+            s = _common(s)
+            s = _re.sub(r'CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+', 'CREATE OR ALTER VIEW ', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bIF\s*\(', 'IIF(', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bLIMIT\s+\d+', '/* LIMIT removed */', s, flags=_re.IGNORECASE)
+            return s.strip()
+
+        def _convert_proc(s, is_func=False):
+            s = _common(s)
+            s = _re.sub(r'CREATE\s+(PROCEDURE|FUNCTION)\s+', r'CREATE OR ALTER \1 ', s, flags=_re.IGNORECASE)
+            def _param(m):
+                direction = m.group(1).upper(); name_ = m.group(2); typ = m.group(3)
+                return f'@{name_} {typ}{"  OUTPUT" if direction in ("OUT","INOUT") else ""}'
+            s = _re.sub(r'\b(IN|OUT|INOUT)\s+(\w+)\s+([\w()]+)', _param, s, flags=_re.IGNORECASE)
+            def _decl(m):
+                name_ = m.group(1); typ = m.group(2); defval = m.group(3)
+                return f'DECLARE @{name_} {typ}' + (f' = {defval}' if defval else '')
+            s = _re.sub(r'\bDECLARE\s+(\w+)\s+([\w()]+)(?:\s+DEFAULT\s+([^;]+))?', _decl, s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bSET\s+(?!@)(\w+)\s*=', r'SET @\1 =', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bIF\s+(.+?)\s+THEN\b', r'IF \1 BEGIN', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bELSEIF\s+(.+?)\s+THEN\b', r'END ELSE IF \1 BEGIN', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bELSE\b(?!\s+IF)', 'END ELSE BEGIN', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bEND\s+IF\b', 'END', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bWHILE\s+(.+?)\s+DO\b', r'WHILE \1 BEGIN', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bEND\s+WHILE\b', 'END', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bLEAVE\s+\w+\b', 'BREAK', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bITERATE\s+\w+\b', 'CONTINUE', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\b\w+:\s*LOOP\b', 'WHILE 1=1 BEGIN', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bEND\s+LOOP\b', 'END', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bCREATE\s+TEMPORARY\s+TABLE\s+\[?(\w+)\]?', r'CREATE TABLE #\1', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bDROP\s+TEMPORARY\s+TABLE\s+(?:IF\s+EXISTS\s+)?\[?(\w+)\]?', r'DROP TABLE IF EXISTS #\1', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bSELECT\s+(.+?)\s+INTO\s+(?!OUTFILE)(@?\w+)\s+FROM\b', r'SELECT @\2 = \1 FROM', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bCALL\s+\[?(\w+)\]?\s*\(', r'EXEC [\1] (', s, flags=_re.IGNORECASE)
+            # label: 제거 (MySQL 루프 레이블)
+            s = _re.sub(r'^\s*\w+:\s*$', '', s, flags=_re.MULTILINE)
+            s = _re.sub(r'^\s*\w+:\s*(BEGIN|LOOP|WHILE|REPEAT)\b', r'\1', s, flags=_re.IGNORECASE|_re.MULTILINE)
+            return s.strip()
+
+        def _convert_trigger(s):
+            s = _common(s)
+            s = _re.sub(r'\bNEW\.(\w+)', r'INSERTED.\1', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bOLD\.(\w+)', r'DELETED.\1', s, flags=_re.IGNORECASE)
+            def _trig_header(m):
+                name_  = m.group(1); timing = m.group(2).upper()
+                event  = m.group(3).upper(); table_ = m.group(4)
+                mssql_timing = 'AFTER' if timing == 'AFTER' else 'INSTEAD OF'
+                return (f'CREATE OR ALTER TRIGGER [{name_}]\nON [{table_}]\n'
+                        f'{mssql_timing} {event}\nAS\nBEGIN\n    SET NOCOUNT ON;')
+            s = _re.sub(
+                r'CREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+\[?(\w+)\]?\s+(BEFORE|AFTER)\s+'
+                r'(INSERT|UPDATE|DELETE)\s+ON\s+\[?(\w+)\]?\s+FOR\s+EACH\s+ROW',
+                _trig_header, s, flags=_re.IGNORECASE
+            )
+            s = _re.sub(r'\bIF\s+(.+?)\s+THEN\b', r'IF \1 BEGIN', s, flags=_re.IGNORECASE)
+            s = _re.sub(r'\bEND\s+IF\b', 'END', s, flags=_re.IGNORECASE)
+            if not s.rstrip().upper().endswith('END'):
+                s = s.rstrip() + '\nEND'
+            # v9 패치 #27: 트리거 변환 마지막에 백틱 재정리 (이중 보험)
+            # 드물게 변환 중간에 백틱이 다시 생기거나 남아있으면 MSSQL 에서 구문 오류
+            if '`' in s:
+                s = _re.sub(r'`([^`]+)`', r'[\1]', s)
+                # 여전히 짝 안 맞는 백틱이 있으면 전부 제거 (차선책)
+                s = s.replace('`', '')
+            return s.strip()
+
+        def _mssql_to_mysql_trigger(ddl: str, trig_name: str) -> str:
+            """MSSQL 트리거 DDL → MySQL 트리거로 변환"""
+            import re as _r
+
+            s = ddl.strip()
+
+            # 1. [dbo].[name] 또는 [name] → name
+            s = _r.sub(r'\[dbo\]\.\[(\w+)\]', r'\1', s)
+            s = _r.sub(r'\[(\w+)\]',           r'\1', s)
+
+            # 2. CREATE [OR ALTER] TRIGGER — 다중 이벤트 먼저 처리
+            # 다중 이벤트 패턴: TRIGGER name ON tbl AFTER INSERT, UPDATE, DELETE
+            _multi_raw = _r.search(
+                r'CREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+(\w+)\s+ON\s+(\w+)\s+'
+                r'(AFTER|FOR|INSTEAD\s+OF)\s+'
+                r'((?:INSERT|UPDATE|DELETE)(?:\s*,\s*(?:INSERT|UPDATE|DELETE))+)',
+                s, _r.IGNORECASE)
+            if _multi_raw:
+                _mn   = _multi_raw.group(1)
+                _mtbl = _multi_raw.group(2)
+                _mtim = 'AFTER' if _multi_raw.group(3).upper() in ('AFTER','FOR') else 'BEFORE'
+                _mevts = [e.strip().upper() for e in _multi_raw.group(4).split(',')]
+                # body 추출 (AS\nBEGIN 또는 BEGIN)
+                _mb_start = s.find('BEGIN', _multi_raw.end())
+                _mbody = s[_mb_start:].strip() if _mb_start >= 0 else 'BEGIN\nEND'
+                # body 정리
+                # MSSQL 전용 구문 제거
+                _mbody = _r.sub(r'\bSET\s+NOCOUNT\s+ON\s*;?', '', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bSET\s+NOCOUNT\s+OFF\s*;?', '', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bRETURN\s*;?\s*\n', '\n', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bAS\s*\n\s*BEGIN\b', 'BEGIN', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bISNULL\s*\(', 'IFNULL(', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bNVARCHAR\b', 'CHAR', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bNVARCHAR\s*\(', 'CHAR(', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bSYSTEM_USER\b', 'CURRENT_USER()', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bGETDATE\(\)', 'NOW()', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bNEWID\(\)', 'UUID()', _mbody, flags=_r.IGNORECASE)
+                # alias.col → NEW.col / OLD.col (i., d., ins., del. 패턴)
+                _mbody = _r.sub(r'\b(?:i|ins|inserted)\.(\w+)', r'NEW.\1', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\b(?:d|del|deleted)\.(\w+)', r'OLD.\1', _mbody, flags=_r.IGNORECASE)
+                # SELECT ... 절에서 FROM 없는 경우 VALUES 형태로 변환은 복잡하므로 FROM DUAL 추가
+                _mbody = _r.sub(r'\bDECLARE\s+@\w+[^;]+;?', '', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'WHEN\s+EXISTS\s*\([^)]+\)', 'TRUE', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bINSERTED\.', 'NEW.', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\bDELETED\.', 'OLD.', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'FROM\s+INSERTED\s+\w+.*?(?=SELECT|INSERT|UPDATE|WHERE|END)', '', _mbody, flags=_r.IGNORECASE|_r.DOTALL)
+                _mbody = _r.sub(r'FULL\s+OUTER\s+JOIN\s+(?:INSERTED|DELETED)\s+\w+\s+ON[^\n]*', '', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'JOIN\s+(?:INSERTED|DELETED)\s+\w+\s+ON[^\n]*', '', _mbody, flags=_r.IGNORECASE)
+                _mbody = _r.sub(r'\n{3,}', '\n\n', _mbody)
+                _op_map = {'INSERT': "'I'", 'UPDATE': "'U'", 'DELETE': "'D'"}
+                _parts = []
+                for _evt in _mevts:
+                    _tname = f"{_mn}_{_evt}"
+                    _parts.append(f"DROP TRIGGER IF EXISTS `{_tname}`;")
+                    _evt_body = _r.sub(r"@op", _op_map.get(_evt, "'U'"), _mbody)
+                    _parts.append(
+                        f"CREATE TRIGGER `{_tname}`\n{_mtim} {_evt}\n"
+                        f"ON `{_mtbl}` FOR EACH ROW\n{_evt_body}"
+                    )
+                return '\n'.join(_parts)
+
+            # 단일 이벤트 헤더 변환
+            def _hdr(m):
+                tn  = m.group(1); tbl = m.group(2)
+                tim = 'AFTER' if m.group(3).upper() in ('AFTER','FOR') else 'BEFORE'
+                evt = m.group(4).upper()
+                return f'CREATE TRIGGER `{tn}`\n{tim} {evt}\nON `{tbl}`\nFOR EACH ROW'
+            s = _r.sub(
+                r'CREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+(\w+)\s+ON\s+(\w+)\s+(AFTER|INSTEAD\s+OF|FOR)\s+(INSERT|UPDATE|DELETE)',
+                _hdr, s, flags=_r.IGNORECASE)
+
+            # 3. MSSQL 전용 구문 제거
+            s = _r.sub(r'SET\s+NOCOUNT\s+ON\s*;?', '', s, flags=_r.IGNORECASE)
+            s = _r.sub(r'IF\s+UPDATE\s*\(\w+\)',    '', s, flags=_r.IGNORECASE)
+
+            # 4. FROM INSERTED i JOIN DELETED d → 제거 (MySQL은 NEW/OLD 사용)
+            #    INSERTED.col / i.col → NEW.col
+            #    DELETED.col  / d.col → OLD.col
+            # 먼저 alias 매핑 분석
+            ins_alias = _r.search(r'FROM\s+INSERTED\s+(\w+)', s, _r.IGNORECASE)
+            del_alias = _r.search(r'JOIN\s+DELETED\s+(\w+)',  s, _r.IGNORECASE)
+            i_al = ins_alias.group(1) if ins_alias else None
+            d_al = del_alias.group(1) if del_alias else None
+
+            # alias.col → NEW.col / OLD.col
+            if i_al:
+                s = _r.sub(rf'\b{i_al}\.(\w+)', r'NEW.\1', s, flags=_r.IGNORECASE)
+            if d_al:
+                s = _r.sub(rf'\b{d_al}\.(\w+)', r'OLD.\1', s, flags=_r.IGNORECASE)
+
+            # INSERTED.col → NEW.col
+            s = _r.sub(r'\bINSERTED\.(\w+)', r'NEW.\1', s, flags=_r.IGNORECASE)
+            s = _r.sub(r'\bDELETED\.(\w+)',  r'OLD.\1', s, flags=_r.IGNORECASE)
+
+            # FROM INSERTED ... JOIN DELETED ... ON ... 절 제거
+            s = _r.sub(r'\bFROM\s+(?:INSERTED|DELETED)\s+\w+.*?(?=WHERE|BEGIN|END|INSERT|UPDATE|DELETE|$)',
+                        '', s, flags=_r.IGNORECASE|_r.DOTALL)
+            s = _r.sub(r'\bJOIN\s+(?:INSERTED|DELETED)\s+\w+\s+ON[^;]*?(?=WHERE|BEGIN|END|INSERT|UPDATE|DELETE|$)',
+                        '', s, flags=_r.IGNORECASE|_r.DOTALL)
+
+            # 5. 함수 변환
+            s = _r.sub(r'\bGETDATE\(\)',       'NOW()',           s, flags=_r.IGNORECASE)
+            s = _r.sub(r'\bGETUTCDATE\(\)',    'UTC_TIMESTAMP()', s, flags=_r.IGNORECASE)
+            s = _r.sub(r'\bISNULL\s*\(',       'IFNULL(',         s, flags=_r.IGNORECASE)
+            s = _r.sub(r'\bSYSTEM_USER\b',     'CURRENT_USER()',  s, flags=_r.IGNORECASE)
+            s = _r.sub(r'\bNVARCHAR\b',        'CHAR',            s, flags=_r.IGNORECASE)
+
+            # 6. AS\nBEGIN 구조 정리 (MySQL은 AS 없음)
+            s = _r.sub(r'\bAS\s*\n\s*BEGIN\b', 'BEGIN', s, flags=_r.IGNORECASE)
+
+            # 7. 빈 줄 정리
+            s = _r.sub(r'\n{3,}', '\n\n', s)
+
+            # 8. 다중 이벤트 분리 (MySQL은 이벤트당 하나의 트리거)
+            # 패턴1: AFTER INSERT ON tbl FOR EACH ROW, UPDATE, DELETE
+            # 패턴2: AFTER INSERT / ON tbl / FOR EACH ROW, UPDATE, DELETE
+            multi_m = _r.search(
+                r'CREATE\s+TRIGGER\s+`(\w+)`'
+                r'[\s\S]*?'
+                r'(AFTER|BEFORE)\s+'
+                r'((?:INSERT|UPDATE|DELETE)(?:\s*,\s*(?:INSERT|UPDATE|DELETE))+)'
+                r'\s+ON\s+`(\w+)`\s+FOR\s+EACH\s+ROW',
+                s, _r.IGNORECASE)
+            if multi_m:
+                base_name = multi_m.group(1)
+                timing    = multi_m.group(2).upper()
+                all_evts  = [e.strip().upper() for e in multi_m.group(3).split(',')]
+                table     = multi_m.group(4)
+                body_start = s.find('BEGIN', multi_m.end())
+                body = s[body_start:].strip() if body_start >= 0 else 'BEGIN\nEND'
+                # body 내 MSSQL 잔류 패턴 정리
+                body = _r.sub(r'\bDECLARE\s+@\w+.*?;', '', body, flags=_r.IGNORECASE|_r.DOTALL)
+                body = _r.sub(r'WHEN\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+INSERTED.*?\)', 'TRUE', body, flags=_r.IGNORECASE|_r.DOTALL)
+                body = _r.sub(r'WHEN\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+DELETED.*?\)', 'TRUE', body, flags=_r.IGNORECASE|_r.DOTALL)
+                body = _r.sub(r'\bINSERTED\.', 'NEW.', body, flags=_r.IGNORECASE)
+                body = _r.sub(r'\bDELETED\.', 'OLD.', body, flags=_r.IGNORECASE)
+                body = _r.sub(r'FROM\s+INSERTED\b[^\n]*', '', body, flags=_r.IGNORECASE)
+                body = _r.sub(r'FROM\s+DELETED\b[^\n]*', '', body, flags=_r.IGNORECASE)
+                body = _r.sub(r'JOIN\s+(?:INSERTED|DELETED)\s+\w+\s+ON[^\n]*', '', body, flags=_r.IGNORECASE)
+                body = _r.sub(r'\n{3,}', '\n\n', body)
+                parts = []
+                for evt in all_evts:
+                    tname = f"{base_name}_{evt}"
+                    parts.append(f"DROP TRIGGER IF EXISTS `{tname}`;")
+                    # AuditLog 타입: 각 이벤트별로 적절한 op_cd 설정
+                    if 'AuditLog' in base_name or 'audit' in base_name.lower():
+                        op_map = {'INSERT': "'I'", 'UPDATE': "'U'", 'DELETE': "'D'"}
+                        evt_body = _r.sub(r"@op\s+CHAR\(1\).*?END;?", '', body, flags=_r.IGNORECASE|_r.DOTALL)
+                        evt_body = _r.sub(r"\b@op\b", op_map.get(evt,"'U'"), evt_body)
+                    else:
+                        evt_body = body
+                    parts.append(
+                        f"CREATE TRIGGER `{tname}`\n{timing} {evt}\n"
+                        f"ON `{table}` FOR EACH ROW\n{evt_body}"
+                    )
+                return '\n'.join(parts)
+
+            return s.strip()
+
+        def _mssql_to_mysql_obj(ddl: str, obj_type: str) -> str:
+            """MSSQL SP/Function/View → MySQL 규칙 기반 변환"""
+            import re as _r
+
+            # 1. [dbo].[ObjectName] → `ObjectName`
+            ddl = _r.sub(r'\[dbo\]\.\[(\w+)\]', r'`\1`', ddl)
+            ddl = _r.sub(r'\[dbo\]\.(\w+)', r'\1', ddl)
+            ddl = _r.sub(r'\[(\w+)\]', r'`\1`', ddl)
+
+            # 2. @param → p_param (파라미터 선언)
+            ddl = _r.sub(r'(?<![\w`])@(\w+)(?=\s+[\w(]+)', r'p_\1', ddl)
+            # @var 사용부 → p_var
+            ddl = _r.sub(r'(?<![\w`])@(\w+)', r'p_\1', ddl)
+
+            # 3. CREATE PROCEDURE/FUNCTION 헤더 (소스의 ( 를 그대로 사용, 이중 괄호 방지)
+            if obj_type in ('PROCEDURE', 'SP'):
+                ddl = _r.sub(
+                    r'CREATE\s+(?:OR\s+ALTER\s+)?PROCEDURE\s+`?(\w+)`?',
+                    r'DROP PROCEDURE IF EXISTS `\1`;\nCREATE PROCEDURE `\1`',
+                    ddl, flags=_r.IGNORECASE
+                )
+                ddl = _r.sub(r'\bAS\s*\n\s*BEGIN\b', 'BEGIN', ddl, flags=_r.IGNORECASE)
+                ddl = _r.sub(r'\bAS\s+BEGIN\b', 'BEGIN', ddl, flags=_r.IGNORECASE)
+
+            elif obj_type == 'FUNCTION':
+                ddl = _r.sub(
+                    r'CREATE\s+(?:OR\s+ALTER\s+)?FUNCTION\s+`?(\w+)`?',
+                    r'DROP FUNCTION IF EXISTS `\1`;\nCREATE FUNCTION `\1`',
+                    ddl, flags=_r.IGNORECASE
+                )
+                ddl = _r.sub(r'\bRETURNS\s+(\S+)\s+AS\s*\n\s*BEGIN\b',
+                              r'RETURNS \1\nDETERMINISTIC\nBEGIN', ddl, flags=_r.IGNORECASE)
+                ddl = _r.sub(r'\bRETURNS\s+(\S+)\s+AS\s+BEGIN\b',
+                              r'RETURNS \1 DETERMINISTIC BEGIN', ddl, flags=_r.IGNORECASE)
+                ddl = _r.sub(r'\bAS\s*\n\s*BEGIN\b', 'BEGIN', ddl, flags=_r.IGNORECASE)
+                ddl = _r.sub(r'\bAS\s+BEGIN\b', 'BEGIN', ddl, flags=_r.IGNORECASE)
+
+            elif obj_type == 'VIEW':
+                ddl = _r.sub(
+                    r'CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+`?(\w+)`?',
+                    r'CREATE OR REPLACE VIEW `\1`',
+                    ddl, flags=_r.IGNORECASE
+                )
+                # AS 다음 SELECT
+                ddl = _r.sub(r'\bAS\s*\n\s*SELECT\b', 'AS\nSELECT', ddl, flags=_r.IGNORECASE)
+
+            # 4. MSSQL 공통 패턴 → MySQL
+            ddl = _r.sub(r'\bGETDATE\(\)', 'NOW()', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bGETUTCDATE\(\)', 'UTC_TIMESTAMP()', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bISNULL\s*\(', 'IFNULL(', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bLEN\s*\(', 'LENGTH(', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bNVARCHAR\s*\(MAX\)', 'LONGTEXT', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bNVARCHAR\s*\((\d+)\)', r'VARCHAR(\1)', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bNVARCHAR\b', 'VARCHAR(255)', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bCONVERT\s*\(\s*VARCHAR\s*\(\d+\)\s*,\s*([^,)]+)\s*(?:,\s*\d+)?\s*\)',
+                          r'CAST(\1 AS CHAR)', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bCAST\s*\(\s*([^)]+?)\s+AS\s+NVARCHAR(?:\s*\(\d+\))?\s*\)',
+                          r'CAST(\1 AS CHAR)', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bSET\s+NOCOUNT\s+ON\s*;?', '', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'WITH\s*\(NOLOCK\)', '', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'WITH\s+EXEC(?:UTE)?\s+AS\s+\w+', '', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bTOP\s+(\d+)\b', r'LIMIT \1', ddl, flags=_r.IGNORECASE)
+            # SELECT TOP n x FROM → SELECT x FROM ... LIMIT n
+            ddl = _r.sub(r'\bSELECT\s+LIMIT\s+(\d+)\s+', r'SELECT ', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bSET\s+p_(\w+)\s*=', r'SET p_\1 =', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bSTUFF\s*\(', 'INSERT(', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bCHARINDEX\s*\(([^,]+),([^,)]+)\)', r'LOCATE(\1,\2)', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bPATINDEX\s*\(([^,]+),([^)]+)\)', r'LOCATE(\1,\2)', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bRAISERROR\s*\([^)]+\)', 'SIGNAL SQLSTATE \'45000\'', ddl, flags=_r.IGNORECASE)
+            ddl = _r.sub(r'\bPRINT\s+[^;\n]+', '-- PRINT removed', ddl, flags=_r.IGNORECASE)
+            # dbo.tbl → `tbl`
+            ddl = _r.sub(r'\bdbo\.(\w+)', r'`\1`', ddl, flags=_r.IGNORECASE)
+            # DECLARE @TBL_TEMP TABLE → 임시테이블 (MySQL은 지원 안함 → DROP/CREATE TEMPORARY TABLE)
+            ddl = _r.sub(
+                r'DECLARE\s+p_(\w+)\s+TABLE\s*\([^)]+\)',
+                r'-- TABLE variable p_\1 → use temporary table in MySQL',
+                ddl, flags=_r.IGNORECASE
+            )
+            return ddl.strip()
+
+        def _smart_convert(ddl: str, obj_type: str) -> str:
+            if not do_convert:
+                return ddl
+            result = ddl
+            try:
+                # MySQL → MSSQL: 내장 변환 함수 사용
+                if src_db_type in ("mysql","mariadb","aurora") and tgt_db_type in ("mssql","azure"):
+                    if obj_type == "VIEW":     result = _convert_view(ddl)
+                    elif obj_type == "TRIGGER":  result = _convert_trigger(ddl)
+                    elif obj_type == "FUNCTION": result = _convert_proc(ddl, is_func=True)
+                    else: result = _convert_proc(ddl, is_func=False)
+                # MSSQL → MySQL: SP/Function/View/Trigger 변환
+                elif src_db_type in ("mssql","azure","sqlserver") and tgt_db_type in ("mysql","aurora","mariadb","tidb"):
+                    if obj_type == "TRIGGER":
+                        result = _mssql_to_mysql_trigger(ddl, "")
+                    else:
+                        # SP/Function/View: 내장 규칙 변환
+                        result = _mssql_to_mysql_obj(ddl, obj_type)
+            except Exception as ce:
+                self._log("warn", f"DDL 변환 경고 [{obj_type}]: {ce} — 원본 사용")
+                result = ddl
+            # v9 패치 #36: MSSQL 타겟에 백틱이 남아있으면 무조건 제거
+            # 변환 예외가 있었든 없었든 MSSQL 에 백틱이 가면 구문 오류
+            if tgt_db_type in ("mssql","azure","sqlserver") and '`' in result:
+                self._log("warn", f"DDL [{obj_type}] 에 백틱 남아있음 — 자동 정리")
+                result = _re.sub(r'`([^`]+)`', r'[\1]', result)
+                result = result.replace('`', '')
+            return result
+
+        # ── obj_mode: skip_existing 체크 ─────────────────────────
+        def _obj_exists_in_tgt(obj_type: str, name: str) -> bool:
+            """타겟 DB에 오브젝트가 이미 존재하는지 확인"""
+            try:
+                cur_tgt = tgt_conn.cursor()
+                if tgt_db_type in ("mssql","azure","sqlserver"):
+                    cur_tgt.execute("SELECT 1 FROM sys.objects WHERE name=? AND type IN ('P','FN','TR','V','IF','TF')", [name])
+                    return cur_tgt.fetchone() is not None
+                else:  # MySQL
+                    db = self.job.get("tgt_database","")
+                    cur_tgt.execute(
+                        "SELECT 1 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=%s AND ROUTINE_NAME=%s "
+                        "UNION SELECT 1 FROM information_schema.VIEWS WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s "
+                        "UNION SELECT 1 FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=%s AND TRIGGER_NAME=%s",
+                        [db, name, db, name, db, name]
+                    )
+                    return cur_tgt.fetchone() is not None
+            except Exception:
+                return False
+
+        # ── 타겟 실행 (재시도 지원) ──────────────────────────────
+        def _exec_tgt(ddl: str, obj_type: str, name: str, error_hint: str = "") -> bool:
+            if not ddl.strip() or ddl.startswith('--'):
+                self._log("warn", f"[{name}] DDL 없음 — 건너뜀")
+                return True  # 오류 아님
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p38 본질 (2026-05-05 본부장님): VIEW/TRIGGER DROP 정책 진짜 적용
+            # ════════════════════════════════════════════════════════════
+            # 본부장님 호소: "DB 초기화 안 하면 VIEW 20개 + TRIGGER 10개 모두 오류
+            #               drop 옵션 걸면 정상 수행되는거야?"
+            #
+            # 진짜 본질 (view tool 100% 확인):
+            #   1) view_mode = "drop_recreate" 설정값은 받지만 어디서도 사용 안 됨
+            #      (line 634 jobs.py 저장 + report.py readback 만)
+            #   2) obj_mode 도 "skip_existing" 만 처리, "drop_recreate" 분기 없음
+            #   3) VIEW DROP IF EXISTS 자체가 시스템 어디에도 없음
+            #      → 이미 존재하는 VIEW + CREATE VIEW 시도 → 1050 에러
+            #      → 이미 존재하는 TRIGGER + CREATE TRIGGER 시도 → 1359 에러
+            #
+            # 처방: 진짜 분기 처리 (obj_type 따라 view_mode/obj_mode 사용)
+            #   - VIEW: view_mode 사용 (drop_recreate / skip_existing / replace)
+            #   - TRIGGER/PROC/FUNC: obj_mode 사용 (drop_recreate / skip_existing)
+            #   - drop_recreate: DROP IF EXISTS 명시 실행 후 CREATE
+            #   - skip_existing: 이미 있으면 skip
+            #   - replace: VIEW 만 (CREATE OR REPLACE 자체로 처리, AI 프롬프트 측 보장)
+            #
+            # 부작용 0:
+            #   - tgt_db_type=mysql 에서만 DROP 실행 (MSSQL 타겟은 별도 본질)
+            #   - DROP 실패는 무시 (이미 없는 객체는 정상)
+            obj_mode = self.job.get("obj_mode", "drop_recreate")
+            view_mode = self.job.get("view_mode", "drop_recreate")
+            # 다중 이벤트 분리 트리거 체크: TRG02 → TRG02_INSERT/UPDATE/DELETE
+            def _trigger_exists_any(n):
+                if _obj_exists_in_tgt(obj_type, n): return True
+                if obj_type == "TRIGGER":
+                    for _evt in ("INSERT","UPDATE","DELETE"):
+                        if _obj_exists_in_tgt(obj_type, f"{n}_{_evt}"): return True
+                return False
+            # 모드 결정: VIEW 면 view_mode, 그 외(TRIGGER/PROC/FUNC) 면 obj_mode
+            _effective_mode = view_mode if obj_type.upper() == "VIEW" else obj_mode
+            # skip_existing: 이미 존재하면 skip
+            if _effective_mode == "skip_existing" and _trigger_exists_any(name):
+                self._log("info", f"[{name}] 이미 존재 — skip (mode=skip_existing)")
+                self.job["item_statuses"][name] = {
+                    "type": obj_type.lower(), "status": "done",
+                    "rows": 0, "error": None,
+                    "started_at": None, "finished_at": datetime.now(_KST).isoformat()
+                }
+                return True
+            # v95_p38 본질 (a)+(c): drop_recreate 분기 — 명시적 DROP IF EXISTS
+            if _effective_mode == "drop_recreate" and tgt_db_type in (
+                "mysql","aurora","mariadb","tidb","cloudsql"
+            ):
+                _drop_keyword = {
+                    "VIEW": "DROP VIEW IF EXISTS",
+                    "TRIGGER": "DROP TRIGGER IF EXISTS",
+                    "PROCEDURE": "DROP PROCEDURE IF EXISTS",
+                    "PROC": "DROP PROCEDURE IF EXISTS",
+                    "FUNCTION": "DROP FUNCTION IF EXISTS",
+                    "FUNC": "DROP FUNCTION IF EXISTS",
+                }.get(obj_type.upper())
+                if _drop_keyword:
+                    try:
+                        _drop_cur = tgt_conn.cursor()
+                        _drop_cur.execute(f"{_drop_keyword} `{name}`")
+                        # TRIGGER 다중 이벤트 분리 케이스도 모두 DROP
+                        if obj_type.upper() == "TRIGGER":
+                            for _evt in ("INSERT","UPDATE","DELETE"):
+                                try:
+                                    _drop_cur.execute(f"{_drop_keyword} `{name}_{_evt}`")
+                                except Exception:
+                                    pass  # 분리 형태 아니면 그냥 통과
+                        tgt_conn.commit()
+                        self._log("info",
+                            f"[v95_p38 본질] {_drop_keyword} `{name}` 실행 (mode=drop_recreate)")
+                    except Exception as _de:
+                        # DROP 실패는 치명 아님 (이미 없을 수 있음)
+                        self._log("warn",
+                            f"[v95_p38 본질] {_drop_keyword} `{name}` 실패 (무시 — 신규일 가능성): {_de}")
+
+            # v90.25: 객체 처리 시작 → status='running' 으로 즉시 변경
+            #   본부장님 지적: "현재 작업 — 표시되고 트리거가 '대기' 로 보임"
+            #   원인: _exec_tgt 는 결과만 done/failed 로 표시, 진행 중 표시 없었음
+            #   해결: AI 호출 등 시간 걸리는 작업 전 미리 'running' 마킹
+            _existing_status = self.job["item_statuses"].get(name) or {}
+            self.job["item_statuses"][name] = {
+                "type": obj_type.lower(),
+                "status": "running",
+                "rows": 0,
+                "error": None,
+                "started_at": datetime.now(_KST).isoformat(),
+                "finished_at": None,
+                # 추가 정보 보존
+                **{k: v for k, v in _existing_status.items() 
+                   if k in ("retry_count", "ai_attempts")},
+            }
+
+            # 방향 확인 로그
+            self._log("info", f"[{name}] 변환 방향: {src_db_type} → {tgt_db_type}")
+
+            # obj_engine 설정 확인
+            _obj_engine = self.job.get("obj_engine", "auto")
+            statements = []
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p107 hotfix_013 (2026-05-10 본부장님 본질 처방):
+            #   변환 경로 추적 — 각 단계마다 _conversion_path 에 append
+            #   끝에서 item_statuses[name]["conversion_path"] 에 저장 → UI 표시
+            #
+            # 단계 라벨:
+            #   "rule"           Rule-based 변환 시도
+            #   "rule_ok"        Rule 성공
+            #   "rule_fail"      Rule 실패 (DB 송신 후 1064/1054 등)
+            #   "kb_match"       KB 매칭으로 즉시 성공 (AI 호출 우회)
+            #   "ai_<provider>"  AI 시도 (provider 는 anthropic/ollama 등 동적)
+            #   "ai_<provider>_ok"   AI 성공
+            #   "ai_<provider>_fail" AI 실패
+            # ════════════════════════════════════════════════════════════
+            self._conversion_path = []
+
+            # ── AI 이관 ──────────────────────────────────────────
+            if _obj_engine in ("ai", "claude"):
+                # v95_p107 hotfix_013: 변환 경로 기록 (사용자가 처음부터 AI 선택)
+                self._conversion_path.append("ai_initial")
+                # API 키 확인 (anthropic_api_key 우선)
+                try:
+                    from app.api.routes.settings import _cfg as _chk_cfg
+                    _api_key = _chk_cfg().get("anthropic_api_key", "").strip()
+                    if not _api_key:
+                        from app.core.store import Store as _ChkStore
+                        _api_key = (_ChkStore("settings").get("claude_api_key") or {}).get("value", "")
+                except: _api_key = ""
+
+                if not _api_key:
+                    # API 키 없음 — 즉시 오류로 처리
+                    err_msg = "Claude API 키가 설정되지 않았습니다. 시스템 설정 → Claude AI 설정에서 API 키를 입력하세요."
+                    self._log("error", f"[{name}] {err_msg}")
+                    self.job["item_statuses"][name] = {
+                        "type": obj_type.lower(), "status": "error",
+                        "rows": 0, "error": err_msg,
+                        "started_at": None, "finished_at": datetime.now(_KST).isoformat()
+                    }
+                    return False
+                try:
+                    from app.api.routes.schema import _ai_convert_ddl
+                    self._log("info", f"[{name}] AI 변환 요청 중...")
+                    
+                    # ════════════════════════════════════════════════════════════
+                    # v95_p90_schemactx_006 (2026-05-08 본부장님 진짜 본질):
+                    # migration_engine 의 _ai_convert_ddl 호출 직전 _conns 채우기
+                    # ════════════════════════════════════════════════════════════
+                    # 본부장님 검증 (2026-05-08 09:59~10:01):
+                    #   AI-TRACE 01b-preflight-applied 직후 → 'host 비어있음'
+                    #   → migration_engine.py 안에서 _ai_convert_ddl 직접 호출됨!
+                    #   → jobs.py 의 v004/v005 처방 우회됨 (remig 경로 안 씀)
+                    #
+                    # 본부장님 운영 메모리:
+                    #   "재이관 경로(jobs.py:903 remig_object) 가 _ai_convert_ddl
+                    #    결과를 직접 실행 → post_process 우회"
+                    #   → schema_ctx 도 같은 함정 (다른 경로!)
+                    #
+                    # 처방:
+                    #   self.job 의 tgt_host 등으로 _conns["target"] 자동 채움
+                    #   → _ai_convert_ddl 안의 _discover_target_schemas 작동
+                    # ════════════════════════════════════════════════════════════
+                    try:
+                        from app.api.routes.schema import _conns as _schema_conns
+                        _schema_conns["target"] = {
+                            "db_type":  self.job.get("tgt_db", "mysql"),
+                            "host":     self.job.get("tgt_host", ""),
+                            "port":     self.job.get("tgt_port", 3306),
+                            "username": self.job.get("tgt_username", ""),
+                            "password": self.job.get("tgt_password", ""),
+                            "database": self.job.get("tgt_database", ""),
+                        }
+                        self._log(
+                            "info",
+                            f"[v95_p90_schemactx_006] _conns[target] 채움: "
+                            f"host={self.job.get('tgt_host')} db={self.job.get('tgt_database')}"
+                        )
+                    except Exception as _ce:
+                        self._log("warn",
+                            f"[v95_p90_schemactx_006] _conns 채우기 실패 (무시): {_ce}")
+                    
+                    result = _ai_convert_ddl(
+                        ddl, obj_type, name,
+                        src_db_type, tgt_db_type,
+                        error_hint  # 이전 오류 포함
+                    )
+                    stmts = result.get("statements", [])
+                    notes = result.get("notes", "")
+                    # v95_p107 hotfix_013: KB 매칭으로 즉시 성공한 경우 path 갱신
+                    if result.get("path_marker") == "kb_match":
+                        # 사용자가 처음부터 AI 선택했고 KB 가 매칭됨
+                        # path 의 마지막 ai_initial 을 kb_match 로 교체
+                        if self._conversion_path and self._conversion_path[-1] == "ai_initial":
+                            self._conversion_path[-1] = "kb_match"
+                        else:
+                            self._conversion_path.append("kb_match")
+                    
+                    # v90.34: 자기학습 SQL 보정 + DDL 완성도 검증
+                    #   본부장님 모토: "지금은 발생해도 앞으로 똑같은건 발생 시키지 않는다"
+                    #   적용 룰: R-001(빈 ;), R-002(DDL 시작 ;), R-003(;;), R-004(BEGIN;), R-005(END 직전 ;)
+                    if stmts:
+                        try:
+                            from app.core.sql_post_processor import (
+                                post_process_statements, validate_ddl_complete,
+                                log_failure_to_kb,
+                            )
+                            stmts, _fixes = post_process_statements(stmts, name)
+                            if _fixes:
+                                self._log("info", 
+                                    f"[{name}] AI 결과 자동 보정 적용: {', '.join(_fixes)} "
+                                    f"(자기학습 룰)")
+                            
+                            # MySQL 타겟 PROCEDURE/FUNCTION 잘림 사전 검증
+                            if tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql") \
+                               and obj_type in ("PROCEDURE", "FUNCTION", "TRIGGER"):
+                                # CREATE 문장만 검증 (DROP 은 단순)
+                                for _s in stmts:
+                                    if _s.upper().lstrip().startswith("CREATE"):
+                                        _ok, _reason = validate_ddl_complete(_s, obj_type, name)
+                                        if not _ok:
+                                            # ════════════════════════════════════════════
+                                            # v95_p89_gemma_002 (2026-05-07 본부장님):
+                                            # 폐기 → 1회 재시도 본질 처방
+                                            # ════════════════════════════════════════════
+                                            # 본부장님 빨간불 발견:
+                                            #   - Gemma 응답이 max_tokens 부족으로 잘림
+                                            #   - 즉시 폐기 → 룰 폴백 → 1064 (백틱 잔재)
+                                            # 처방: 1회 재시도 (max_tokens 2배)
+                                            # 재시도도 실패 시에만 룰 폴백
+                                            # ════════════════════════════════════════════
+                                            self._log("warn",
+                                                f"[{name}] ⚠ AI 응답 미완성 검출: {_reason}\n"
+                                                f"  → max_tokens 2배로 1회 재시도 (v95_p89_gemma_002)")
+                                            try:
+                                                from app.api.routes.schema import _ai_convert_ddl as _retry_ai
+                                                _retry_result = _retry_ai(
+                                                    ddl, obj_type, name,
+                                                    src_db_type, tgt_db_type,
+                                                    error_hint,
+                                                    max_tokens=16384,  # 2배 (8192 → 16384)
+                                                )
+                                                _retry_stmts = _retry_result.get("statements", []) or []
+                                                # 재시도 결과 다시 검증
+                                                _retry_ok = True
+                                                for _rs in _retry_stmts:
+                                                    if _rs.upper().lstrip().startswith("CREATE"):
+                                                        _rok, _rreason = validate_ddl_complete(_rs, obj_type, name)
+                                                        if not _rok:
+                                                            _retry_ok = False
+                                                            self._log("warn",
+                                                                f"[{name}] 재시도도 미완성: {_rreason}")
+                                                            break
+                                                if _retry_ok and _retry_stmts:
+                                                    self._log("info",
+                                                        f"[{name}] ✅ 재시도 성공 — Gemma 가 끝까지 응답 (v95_p89_gemma_002)")
+                                                    # 재시도 결과로 stmts 교체 + post_process 다시 적용
+                                                    stmts, _retry_fixes = post_process_statements(_retry_stmts, name)
+                                                    if _retry_fixes:
+                                                        self._log("info",
+                                                            f"[{name}] 재시도 결과 보정: {', '.join(_retry_fixes)}")
+                                                else:
+                                                    self._log("warn",
+                                                        f"[{name}] 재시도 실패 — 룰 폴백 진행")
+                                                    stmts = []
+                                            except Exception as _retry_e:
+                                                self._log("warn",
+                                                    f"[{name}] 재시도 자체 실패: {_retry_e} — 룰 폴백 진행")
+                                                stmts = []
+                                            break
+                        except ImportError:
+                            pass  # 모듈 없으면 보정 skip (호환성)
+                        except Exception as _ppe:
+                            self._log("warn", f"[{name}] 사후 보정 실패 (무시): {_ppe}")
+                    
+                    if stmts:
+                        statements = stmts
+                        self._log("info", f"[{name}] AI 변환 완료 — {notes}")
+                        # v9 패치 #44: AI 변환 결과에도 백틱 제거 (MSSQL 타겟)
+                        # AI 가 MySQL 원본을 그대로 반환하거나, DROP 문만 원본을 재사용하는
+                        # 경우가 있어 여기서 최종 정리
+                        if tgt_db_type in ("mssql","azure","sqlserver"):
+                            import re as _re_ai
+                            for _i, _st in enumerate(statements):
+                                if '`' in _st:
+                                    self._log("warn", f"[{name}] AI 변환 결과에 백틱 발견 — 자동 정리")
+                                    _cleaned = _re_ai.sub(r'`([^`]+)`', r'[\1]', _st)
+                                    _cleaned = _cleaned.replace('`', '')
+                                    statements[_i] = _cleaned
+                                # DROP 문이 MySQL 문법이면 MSSQL 문법으로 교체
+                                _up = _st.upper().strip()
+                                if _up.startswith('DROP TRIGGER IF EXISTS') and obj_type == 'TRIGGER':
+                                    _trig_name_m = _re_ai.search(r'DROP\s+TRIGGER\s+IF\s+EXISTS\s+\[?`?(\w+)`?\]?',
+                                                                  _st, _re_ai.IGNORECASE)
+                                    if _trig_name_m:
+                                        _tn = _trig_name_m.group(1)
+                                        statements[_i] = (f"IF OBJECT_ID(N'[dbo].[{_tn}]', N'TR') IS NOT NULL "
+                                                          f"DROP TRIGGER [{_tn}]")
+
+                        # v9 패치 #45: AI 결과 품질 검증 — MSSQL 타겟인데
+                        # MySQL 전용 문법이 남아있으면 rule-based 로 다시 시도
+                        if tgt_db_type in ("mssql","azure","sqlserver") and obj_type == "TRIGGER":
+                            _joined = '\n'.join(statements).upper()
+                            _mysql_markers = [
+                                'FOR EACH ROW',      # MySQL 트리거 핵심 키워드
+                                'NEW.',              # (DELETED/INSERTED 로 바뀌었어야 함)
+                                'OLD.',
+                                'IFNULL(',           # (ISNULL 이어야 함)
+                                'SIGNAL SQLSTATE',   # (RAISERROR 이어야 함)
+                                'COLLATE UTF8',      # (MySQL 전용)
+                            ]
+                            _found = [m for m in _mysql_markers if m in _joined]
+                            if _found:
+                                self._log("warn", f"[{name}] AI 결과에 MySQL 전용 문법 잔류 {_found} "
+                                                  f"— rule-based 로 재시도")
+                                statements = []   # rule-based 로 폴백 트리거
+
+                        # v9 패치 #46: MSSQL 타겟 — 중복 @변수 선언 자동 제거
+                        # AI 가 원본 MySQL 컬럼명의 대소문자 표기 (rec_system_code / REC_SYSTEM_CODE)
+                        # 를 각각 별도 변수로 선언하는 경우 MSSQL 은 대소문자 무관하게 같은
+                        # 변수로 인식 → "variable already declared" 오류
+                        if statements and tgt_db_type in ("mssql","azure","sqlserver") and obj_type == "TRIGGER":
+                            import re as _re_dup
+                            for _i, _st in enumerate(statements):
+                                # DECLARE 안의 @var 들을 추출해서 대소문자 무시 중복 제거
+                                def _dedupe_decl(m):
+                                    _body = m.group(1)
+                                    # 각 변수 선언을 쉼표로 분리 (단순 파싱)
+                                    _parts = [p.strip() for p in _body.split(',')]
+                                    _seen = set()
+                                    _keep = []
+                                    for _p in _parts:
+                                        # "@var TYPE" 또는 "@var TYPE = default"
+                                        _mm = _re_dup.match(r'(@\w+)', _p)
+                                        if _mm:
+                                            _vname = _mm.group(1).lower()
+                                            if _vname in _seen:
+                                                continue  # 중복 건너뜀
+                                            _seen.add(_vname)
+                                        _keep.append(_p)
+                                    return 'DECLARE ' + ', '.join(_keep)
+                                _new = _re_dup.sub(
+                                    r'DECLARE\s+((?:@\w+[^;,]*(?:,\s*)?)+)',
+                                    _dedupe_decl, _st, flags=_re_dup.IGNORECASE
+                                )
+                                if _new != _st:
+                                    self._log("info", f"[{name}] 중복 @변수 선언 자동 제거됨")
+                                    statements[_i] = _new
+                    else:
+                        self._log("warn", f"[{name}] AI 변환 결과 없음 — rule-based로 폴백")
+                except Exception as ae:
+                    self._log("warn", f"[{name}] AI 변환 실패: {ae} — rule-based로 폴백")
+
+            # ── rule-based / smart_convert ────────────────────────
+            if not statements:
+                converted_ddl = _smart_convert(ddl, obj_type)
+                if converted_ddl != ddl:
+                    self._log("info", f"[{name}] _smart_convert 적용됨")
+
+                # 다중 트리거 분리 결과 감지 (DROP TRIGGER + CREATE TRIGGER 여러 개)
+                import re as _stmtre
+                _sub_stmts = [s.strip() for s in _stmtre.split(';', converted_ddl) if s.strip() and ('DROP TRIGGER' in s or 'CREATE TRIGGER' in s)]
+                if len(_sub_stmts) > 1:
+                    statements = _sub_stmts
+                    self._log("info", f"[{name}] 다중 이벤트 분리 완료 — {len(_sub_stmts)}개 트리거")
+                else:
+                    try:
+                        from app.api.routes.schema import _rule_based_ddl_convert
+                        result = _rule_based_ddl_convert(converted_ddl, obj_type, name, src_db_type, tgt_db_type)
+                        stmts = result.get("statements", [])
+                        notes = result.get("notes", "")
+                        if stmts and not (len(stmts)==1 and stmts[0].strip()==converted_ddl.strip()):
+                            statements = stmts
+                            self._log("info", f"[{name}] rule-based 변환 완료 ({len(stmts)}문장) — {notes}")
+                        else:
+                            statements = [converted_ddl]
+                    except Exception as ce:
+                        self._log("warn", f"[{name}] 변환 실패: {ce} — 원본 사용")
+                        statements = [converted_ddl]
+                    
+                    # ════════════════════════════════════════════════════════════
+                    # v95_p89_gemma_002 (2026-05-07 본부장님 본질 처방):
+                    # 룰 폴백 결과에도 post_process 강제 적용
+                    # ════════════════════════════════════════════════════════════
+                    # 본부장님 운영 메모리 핵심 함정:
+                    #   "재이관 경로가 _ai_convert_ddl 결과를 직접 실행 → post_process 우회"
+                    # 본부장님 빨간불 발견:
+                    #   - AI 응답 미완성 → 룰 폴백 → 결과: p_StartProductID `int`
+                    #   - 룰 폴백이 R-014 (백틱 제거) 적용 안 함 → 1064
+                    # 처방: 룰 폴백 직후 post_process_statements 강제 호출
+                    # ════════════════════════════════════════════════════════════
+                    if statements and tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                        try:
+                            from app.core.sql_post_processor import post_process_statements as _pps_fb
+                            _orig_stmts = list(statements)
+                            statements, _fb_fixes = _pps_fb(statements, name)
+                            if _fb_fixes:
+                                self._log("info",
+                                    f"[{name}] 룰 폴백 결과 post_process 적용 (v95_p89_gemma_002): "
+                                    f"{', '.join(_fb_fixes)}")
+                        except ImportError:
+                            pass
+                        except Exception as _fbe:
+                            self._log("warn",
+                                f"[{name}] 룰 폴백 post_process 실패 (무시): {_fbe}")
+                    
+                    # v9 패치 #40: rule-based 변환 후에도 백틱 최종 제거 (MSSQL 타겟 한정)
+                    if tgt_db_type in ("mssql","azure","sqlserver"):
+                        for _i, _stmt in enumerate(statements):
+                            if '`' in _stmt:
+                                self._log("warn", f"[{name}] rule-based 결과에 백틱 발견 — 자동 정리")
+                                _cleaned = _re.sub(r'`([^`]+)`', r'[\1]', _stmt)
+                                _cleaned = _cleaned.replace('`', '')
+                                statements[_i] = _cleaned
+
+            self._log("debug", f"[{name}] 실행 DDL:\n{statements[-1][:300]}")
+            # ── MSSQL 잔류 패턴 검증 (트리거) ──────────────────────
+            if obj_type == "TRIGGER" and statements:
+                _MSSQL_PATTERNS = [
+                    # MSSQL 전용 테이블/키워드
+                    r'\bFROM\s+INSERTED\b', r'\bFROM\s+DELETED\b',
+                    r'\bJOIN\s+INSERTED\b', r'\bJOIN\s+DELETED\b',
+                    r'\bINSERTED\.\w+',      r'\bDELETED\.\w+',
+                    r'\bNEWID\s*\(\)',       r"\bN'",
+                    r'\[dbo\]\.',             r'\[\w+\]',
+                    r'\bRAISERROR\b',          r'\bSET\s+NOCOUNT\s+ON\b',
+                    # MySQL 아키텍처 제약
+                    r'UPDATE\s+\w+\s+SET[^;]+FROM\s+\w+',  # UPDATE...FROM (MSSQL 문법)
+                    r'\bIF\s+UPDATE\s*\(',   # IF UPDATE(col)
+                    r'\bSELECT\s+.*FROM\s+INSERTED',  # SELECT FROM INSERTED
+                    r'\bDECLARE\s+@',          # MSSQL 변수 선언
+                    r'\bSET\s+@\w+',           # MSSQL 변수 할당
+                ]
+                # MySQL 자기 테이블 UPDATE 패턴 — 트리거 대상 테이블명 추출
+                import re as _rv2
+                _trig_tbl_m = _rv2.search(
+                    r'ON\s+`?(\w+)`?\s+FOR\s+EACH\s+ROW', statements[-1], _rv2.IGNORECASE)
+                if _trig_tbl_m:
+                    _trig_tbl = _trig_tbl_m.group(1).lower()
+                    # 트리거 본문에서 자기 테이블 UPDATE 감지
+                    _self_update = _rv2.search(
+                        rf'UPDATE\s+`?{_trig_tbl}`?\s+SET', statements[-1], _rv2.IGNORECASE)
+                    if _self_update:
+                        _MSSQL_PATTERNS.append(rf'UPDATE\s+`?{_trig_tbl}`?\s+SET')
+                import re as _rv
+                _last_stmt = statements[-1]
+                _found = [p for p in _MSSQL_PATTERNS if _rv.search(p, _last_stmt, _rv.IGNORECASE)]
+                if _found:
+                    self._log("warn", f"[{name}] MSSQL 잔류 패턴 감지: {_found[:3]} — AI 재변환 시도")
+                    try:
+                        from app.api.routes.schema import _ai_convert_ddl
+                        from app.api.routes.settings import _cfg as _v_cfg
+                        if _v_cfg().get("anthropic_api_key", ""):
+                            _vr = _ai_convert_ddl(
+                                ddl, obj_type, name, src_db_type, tgt_db_type,
+                                f"이전 변환 오류: {_found[:3]}\n"
+                                        f"MySQL 트리거 제약사항:\n"
+                                        f"1. UPDATE table SET ... FROM table 불가 → JOIN 방식으로 변환\n"
+                                        f"2. 트리거 대상 테이블 자체를 트리거 내에서 UPDATE 불가\n"
+                                        f"3. INSERTED/DELETED 테이블 없음 → NEW/OLD 사용\n"
+                                        f"4. DECLARE @var 없음 → SET @var := val 또는 제거\n"
+                                        f"반드시 순수 MySQL 8.0 문법만 사용하세요."
+                            )
+                            if _vr.get("statements"):
+                                statements = _vr["statements"]
+                                self._log("info", f"[{name}] AI 재변환 완료")
+                    except Exception as _ve:
+                        self._log("warn", f"[{name}] AI 재변환 실패: {_ve}")
+
+            try:
+                if tgt_db_type in ("mssql","azure","sqlserver"):
+                    # MSSQL 타겟: pyodbc cursor로 순서대로 실행
+                    cur_tgt = tgt_conn.cursor()
+                    for stmt in statements:
+                        stmt = stmt.strip()
+                        if not stmt: continue
+                        self._log("info", f"  실행: {stmt[:80]}...")
+                        cur_tgt.execute(stmt)
+                        tgt_conn.commit()
+                        self._log("info", f"  ✓ 완료")
+
+                elif tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql"):
+                    # MySQL 타겟: 각 statement를 개별 커넥션으로 실행
+                    # (MULTI_STATEMENTS 대신 statement별 독립 실행으로 안정성 확보)
+                    import re as _re, pymysql
+                    from pymysql.constants import CLIENT
+                    j2 = self.job
+                    conn_args = dict(
+                        host=j2.get("tgt_host","localhost"),
+                        port=int(j2.get("tgt_port") or 3306),
+                        user=j2.get("tgt_username","root"),
+                        password=j2.get("tgt_password",""),
+                        database=j2.get("tgt_database",""),
+                        charset="utf8mb4", connect_timeout=10,
+                    )
+                    full_ddl = "\n".join(s.strip() for s in statements if s.strip())
+                    from app.core.obj_executor import deploy_mysql_object
+                    result = deploy_mysql_object(
+                        ddl       = full_ddl,
+                        conn_info = {
+                            "host":     j2.get("tgt_host",""),
+                            "port":     j2.get("tgt_port", 3306),
+                            "username": j2.get("tgt_username",""),
+                            "password": j2.get("tgt_password",""),
+                            "database": j2.get("tgt_database",""),
+                        },
+                        obj_type  = obj_type,
+                        obj_name  = name,
+                    )
+                    if result["success"]:
+                        self._log("info", f"  ✓ {name} 배포 완료")
+                    else:
+                        raise Exception(result["error"])
+                else:
+                    # 기타 DB: 기본 cursor 실행
+                    cur_tgt = tgt_conn.cursor()
+                    for stmt in statements:
+                        stmt = stmt.strip()
+                        if stmt:
+                            self._log("info", f"  실행: {stmt[:80]}...")
+                            cur_tgt.execute(stmt)
+                            tgt_conn.commit()
+
+                self._log("info", f"✓ {obj_type} [{name}] 생성 완료")
+                # v90.67 (2026-04-28): had_error / attempts 누적 (이전 시도 흔적 보존)
+                # 본부장님 호소: "AI 재이관으로 성공한 건 별도 라벨로 보고싶다"
+                _prev = self.job["item_statuses"].get(name) or {}
+                _prev_had_error = bool(_prev.get("had_error") or _prev.get("status") == "error")
+                _prev_attempts  = int(_prev.get("attempts") or 0)
+                # v95_p107 hotfix_013: conversion_path 도 함께 저장
+                # path 가 비어있으면 단순 rule 성공 (1차에 통과)
+                _final_path = list(getattr(self, "_conversion_path", []) or [])
+                if not _final_path:
+                    _final_path = ["rule_ok"]
+                self.job["item_statuses"][name] = {
+                    "type": obj_type.lower(),
+                    "status": "done",
+                    "rows": 0,
+                    "error": None,
+                    "started_at": None,
+                    "finished_at": datetime.now(_KST).isoformat(),
+                    # v90.67: 이전에 실패한 적 있으면 마킹 — UI 의 "재시도 후 성공" 라벨용
+                    "had_error": _prev_had_error,
+                    "attempts": _prev_attempts + 1,
+                    # v95_p107 hotfix_013: 변환 경로 (UI 라벨용)
+                    "conversion_path": _final_path,
+                }
+                return True
+            except Exception as e:
+                # v9 패치 #48: AI 자동 재시도 — 오류 메시지를 AI 에 피드백해서 다시 변환
+                # MSSQL 타겟 TRIGGER 에 한해, AI 경로로 변환했는데 실패했으면 최대 2회 재시도.
+                # 매번 이전 실패 DDL + 오류 메시지를 AI 에 전달 → AI 가 수정해서 재생성.
+                # ════════════════════════════════════════════════════════════
+                # v95_p107 hotfix_011 (2026-05-10 본부장님 본질 처방):
+                #   AI 자동 재시도 게이트 — 하드코딩 0%
+                #
+                # 이전 (hotfix_010): provider 이름 ("anthropic", "ollama") 하드코딩
+                #   → 새 provider 추가될 때마다 이 코드 손대야 함 (부채)
+                #
+                # 본질: 게이트는 "어떤 provider 인지" 알 필요 없음.
+                #       "AI 변환 호출이 가능한 환경인가?" 한 가지만 알면 됨.
+                #       provider 분기 책임은 schema.is_ai_conversion_available() 가 짐.
+                #
+                # 효과: 미래 OpenAI/vLLM/Cohere/자체 호스팅 LLM 추가되어도
+                #       이 게이트는 영구 무관 (수정 0줄).
+                # ════════════════════════════════════════════════════════════
+                # _obj_engine 이 명시적 "rule" / "rule_only" 가 아닌 모든 경우 AI 시도 가능
+                # (사용자가 UI 에서 "rule_only" 를 명시적으로 선택했을 때만 AI 비활성)
+                _engine_allows_ai = str(_obj_engine or "").lower() not in ("rule", "rule_only", "disable", "disabled", "off", "none")
+                _can_retry = (
+                    tgt_db_type in ("mysql","mariadb","mssql","azure","sqlserver","postgresql","pg")
+                    and obj_type in ("TRIGGER","FUNCTION","PROCEDURE","VIEW","FUNC","PROC")
+                    and _engine_allows_ai
+                )
+                _max_retries = int(self.job.get("ai_retry_count", 2))  # 기본 2회
+                # error_hint 파라미터가 이미 값이 있으면 이건 이미 재시도 중인 호출
+                _current_retry = int(getattr(self, '_ai_retry_depth', 0))
+                if _can_retry and _current_retry < _max_retries:
+                    try:
+                        from app.api.routes.schema import _ai_convert_ddl, is_ai_conversion_available
+                        # ─── v95_p107 hotfix_011: provider 무관 가용성 체크 ──
+                        # 본부장님 모토 "하드코딩 0%" — 게이트는 provider 종류를 모른다
+                        # provider 분기는 is_ai_conversion_available 가 책임진다
+                        if is_ai_conversion_available():
+                            # v95_p107 hotfix_013: 변환 경로 기록
+                            # provider 이름은 settings 에서 동적으로 가져옴 (하드코딩 0%)
+                            try:
+                                from app.api.routes.settings import _cfg as _path_cfg
+                                _path_provider = (_path_cfg().get("ai_provider", "anthropic") or "anthropic").strip().lower()
+                            except Exception:
+                                _path_provider = "ai"
+                            # rule 실패 후 ai 재시도 진입 — 첫 진입이면 rule_fail 도 누적
+                            if not self._conversion_path:
+                                self._conversion_path.append("rule_fail")
+                            elif self._conversion_path and not self._conversion_path[-1].startswith("rule_fail") \
+                                 and not self._conversion_path[-1].startswith("ai_"):
+                                self._conversion_path.append("rule_fail")
+                            self._conversion_path.append(f"ai_{_path_provider}")
+
+                            self._log("info",
+                                f"[{name}] AI 자동 재시도 {_current_retry+1}/{_max_retries} — "
+                                f"오류 컨텍스트를 AI 에 피드백")
+                            _fail_ddl = '\n;\n'.join(statements)[:2500] if statements else ddl[:2500]
+                            _retry_hint = (
+                                f"Previous conversion failed with MSSQL error:\n"
+                                f"{str(e)[:500]}\n\n"
+                                f"Previously generated DDL that failed:\n"
+                                f"{_fail_ddl}\n\n"
+                                f"Please fix the above error. Common issues:\n"
+                                f"- Column names must exactly match the target table schema\n"
+                                f"- MSSQL variable names are case-insensitive — don't declare both "
+                                f"  @var and @VAR (they conflict)\n"
+                                f"- Use SELECT ... FROM INSERTED (MSSQL), not NEW.col directly\n"
+                                f"- For multi-row logic, use CURSOR or JOIN with INSERTED\n"
+                            )
+                            _retry_result = _ai_convert_ddl(
+                                ddl, obj_type, name,
+                                src_db_type, tgt_db_type,
+                                _retry_hint
+                            )
+                            _retry_stmts = _retry_result.get("statements", [])
+                            if _retry_stmts:
+                                # v95_p107 hotfix_013: 재시도 성공 — path 에 _ok 마커
+                                if self._conversion_path and self._conversion_path[-1].startswith("ai_") \
+                                   and not self._conversion_path[-1].endswith(("_ok", "_fail")):
+                                    self._conversion_path[-1] = self._conversion_path[-1] + "_ok"
+                                # 재시도 호출 전 depth 증가 (무한 루프 방지)
+                                self._ai_retry_depth = _current_retry + 1
+                                try:
+                                    # 재귀 호출 — 새 statements 로 다시 실행 시도
+                                    # 가장 쉬운 방법: _exec_tgt 재귀 호출하되, AI 결과를 직접 주입
+                                    # 하지만 현재 _exec_tgt 구조상 AI 경로를 다시 타게 됨 →
+                                    # 대신 statements 만 교체 후 실행 블록만 재실행
+                                    statements = _retry_stmts
+                                    # v9 #44 후처리 (백틱, DROP 문 변환) 다시 적용
+                                    import re as _re_rty
+                                    for _i, _st in enumerate(statements):
+                                        if '`' in _st:
+                                            _st = _re_rty.sub(r'`([^`]+)`', r'[\1]', _st)
+                                            _st = _st.replace('`', '')
+                                            statements[_i] = _st
+                                        _up = _st.upper().strip()
+                                        if _up.startswith('DROP TRIGGER IF EXISTS'):
+                                            _m = _re_rty.search(r'DROP\s+TRIGGER\s+IF\s+EXISTS\s+\[?`?(\w+)`?\]?',
+                                                                _st, _re_rty.IGNORECASE)
+                                            if _m:
+                                                _tn = _m.group(1)
+                                                statements[_i] = (f"IF OBJECT_ID(N'[dbo].[{_tn}]', N'TR') IS NOT NULL "
+                                                                  f"DROP TRIGGER [{_tn}]")
+                                    # v9 #46 중복 @변수 자동 제거
+                                    def _dedupe_retry(m2):
+                                        _body = m2.group(1)
+                                        _parts = [p.strip() for p in _body.split(',')]
+                                        _seen = set(); _keep = []
+                                        for _p in _parts:
+                                            _mm = _re_rty.match(r'(@\w+)', _p)
+                                            if _mm:
+                                                _vn = _mm.group(1).lower()
+                                                if _vn in _seen: continue
+                                                _seen.add(_vn)
+                                            _keep.append(_p)
+                                        return 'DECLARE ' + ', '.join(_keep)
+                                    for _i, _st in enumerate(statements):
+                                        _new = _re_rty.sub(
+                                            r'DECLARE\s+((?:@\w+[^;,]*(?:,\s*)?)+)',
+                                            _dedupe_retry, _st, flags=_re_rty.IGNORECASE)
+                                        statements[_i] = _new
+
+                                    # 실행 재시도 (MSSQL 타겟만 처리)
+                                    cur_tgt = tgt_conn.cursor()
+                                    for stmt in statements:
+                                        stmt = stmt.strip()
+                                        if not stmt: continue
+                                        self._log("info", f"  (재시도) 실행: {stmt[:80]}...")
+                                        cur_tgt.execute(stmt)
+                                        tgt_conn.commit()
+                                        self._log("info", f"  ✓ 완료")
+                                    self._log("info", f"✓ {obj_type} [{name}] AI 재시도 {_current_retry+1}회로 생성 완료")
+                                    self.job["item_statuses"][name] = {
+                                        "type":obj_type.lower(),"status":"done","rows":0,"error":None,
+                                        "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                                    }
+                                    self._ai_retry_depth = 0  # 성공 시 리셋
+                                    return True
+                                except Exception as _re_err:
+                                    self._log("warn",
+                                        f"[{name}] 재시도 {_current_retry+1} 도 실패: {str(_re_err)[:200]}")
+                                    # depth 는 유지 — 다음 재시도 가능
+                                    # 현재 함수 재귀 호출은 피하고, 실패 처리로 자연스럽게 이어지게 함
+                                    e = _re_err  # 마지막 오류로 교체
+                    except Exception as _retry_err:
+                        self._log("warn", f"[{name}] AI 재시도 준비 실패: {_retry_err}")
+                # (AI 재시도 안 했거나 모두 실패) — 기존 실패 처리
+                self._ai_retry_depth = 0  # 리셋 (다음 오브젝트 영향 없게)
+                self._log("error", f"✗ {obj_type} [{name}] 생성 실패: {e}")
+                # v9 패치 #36: 실패 시 변환된 DDL 전체를 로그로 남김 (진단용)
+                try:
+                    if 'statements' in dir() and statements:
+                        _ddl_preview = '\n;\n'.join(statements)[:2000]
+                        self._log("error", f"  실패한 DDL (처음 2000자):\n{_ddl_preview}")
+                except Exception:
+                    pass
+                # v90.34: 자기학습 KB 자동 등록 (본부장님 모토)
+                try:
+                    from app.core.sql_post_processor import log_failure_to_kb
+                    log_failure_to_kb(
+                        obj_name=name,
+                        obj_type=obj_type,
+                        src_db=self.job.get("src_db", "mssql"),
+                        tgt_db=self.job.get("tgt_db", "mysql"),
+                        error_msg=str(e),
+                        failed_ddl='\n'.join(statements) if 'statements' in dir() and statements else "",
+                    )
+                except Exception:
+                    pass
+                # v95_p107 hotfix_013: 최종 실패 — path 마지막 ai_X 가 있으면 _fail 마커
+                _err_path = list(getattr(self, "_conversion_path", []) or [])
+                if _err_path and _err_path[-1].startswith("ai_") \
+                   and not _err_path[-1].endswith(("_ok", "_fail")):
+                    _err_path[-1] = _err_path[-1] + "_fail"
+                if not _err_path:
+                    _err_path = ["rule_fail"]
+                self.job["item_statuses"][name] = {"type":obj_type.lower(),"status":"error","rows":0,"error":str(e)[:200],"started_at":None,"finished_at":datetime.now(_KST).isoformat(),
+                    # v90.67: 실패해도 attempts 누적 + had_error 마킹
+                    "had_error": True,
+                    "attempts": int((self.job["item_statuses"].get(name) or {}).get("attempts") or 0) + 1,
+                    # v95_p107 hotfix_013: 변환 경로
+                    "conversion_path": _err_path,
+                }
+                self.job["rows_error"] += 1
+                # ── 오류 자동 누적 ──────────────────────────────────
+                try:
+                    from app.core.obj_executor import _record_error_case
+                    _record_error_case(
+                        src_db=self.job.get("src_db", "mssql"),
+                        tgt_db=self.job.get("tgt_db", "mysql"),
+                        obj_name=name, obj_type=obj_type,
+                        error_msg=str(e),
+                        cause="오브젝트 이관 중 실행 오류",
+                        solution="AI 재이관 또는 DDL 수동 수정 필요"
+                    )
+                except Exception: pass
+                return False
+
+        # ── 이관 실행 — 함수 먼저(의존성), 실패 시 1회 재시도 ────
+        failed = []
+
+        # 오브젝트 pending 초기화
+        for _ot, _olist in [("FUNCTION", objects.get("functions") or []),
+                             ("PROCEDURE", objects.get("procedures") or []),
+                             ("VIEW", objects.get("views") or []),
+                             ("TRIGGER", objects.get("triggers") or [])]:
+            for _on in _olist:
+                if _on not in self.job["item_statuses"]:
+                    self.job["item_statuses"][_on] = {"type":_ot.lower(),"status":"pending","rows":0,"error":None,"started_at":None,"finished_at":None}
+
+        # ═══════════════════════════════════════════════════════════════
+        # v90.23 → v90.27: 객체 처리 - 응급 안전 모드 (완전 직렬)
+        # ═══════════════════════════════════════════════════════════════
+        # 본부장님 보고: "crec_recfile_upd 트리거 처리 중 시스템 hang"
+        # 
+        # v90.27 응급 조치:
+        #   - obj_parallel_workers 기본값 1 (완전 직렬)
+        #   - obj_parallel_workers >= 2 명시 시에만 병렬
+        #   - 병렬도 AI lock 으로 1개씩만 변환
+        # 
+        # 향후 (Phase E): 진단 후 안전한 병렬 다시 활성화
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading as _th
+        
+        OBJ_PARALLEL_WORKERS = int(self.job.get("obj_parallel_workers", 1))   # v90.27: 2 → 1
+        OBJ_AI_SERIAL = bool(self.job.get("obj_ai_serial", True))
+        _ai_lock = _th.Lock() if OBJ_AI_SERIAL else None
+        
+        def _process_obj_group(obj_type_str, names_list):
+            """객체 그룹 처리. 반환: 실패 항목 리스트"""
+            if not names_list or self._stop:
+                return []
+            local_failed = []
+            
+            # v90.27: 워커 1개면 완전 직렬 - 안전 우선
+            if OBJ_PARALLEL_WORKERS <= 1 or len(names_list) == 1:
+                for name in names_list:
+                    if self._stop:
+                        break
+                    try:
+                        ddl = _get_ddl(obj_type_str, name)
+                        if not _exec_tgt(ddl, obj_type_str, name):
+                            err_info = (self.job.get("item_statuses", {}).get(name) or {}).get("error", "")
+                            local_failed.append((obj_type_str, name, ddl, err_info))
+                    except Exception as e:
+                        self._log("error", f"  [{name}] 처리 예외: {e}")
+                        local_failed.append((obj_type_str, name, "", str(e)))
+                return local_failed
+            
+            # 병렬 처리 (워커 2개 이상 명시 시만)
+            self._log("info", f"{obj_type_str} {len(names_list)}개 병렬 처리 시작 (워커 {OBJ_PARALLEL_WORKERS}개)")
+            
+            def _process_one(name):
+                if self._stop:
+                    return None
+                try:
+                    if _ai_lock:
+                        with _ai_lock:
+                            ddl = _get_ddl(obj_type_str, name)
+                    else:
+                        ddl = _get_ddl(obj_type_str, name)
+                    if self._stop:
+                        return None
+                    success = _exec_tgt(ddl, obj_type_str, name)
+                    if not success:
+                        err_info = (self.job.get("item_statuses", {}).get(name) or {}).get("error", "")
+                        return (obj_type_str, name, ddl, err_info)
+                    return None
+                except Exception as e:
+                    self._log("error", f"  [{name}] 병렬 처리 예외: {e}")
+                    return (obj_type_str, name, "", str(e))
+            
+            with ThreadPoolExecutor(max_workers=OBJ_PARALLEL_WORKERS,
+                                     thread_name_prefix=f"obj-{obj_type_str.lower()}") as executor:
+                future_to_name = {executor.submit(_process_one, n): n for n in names_list}
+                for future in as_completed(future_to_name):
+                    if self._stop:
+                        break
+                    result = future.result()
+                    if result:
+                        local_failed.append(result)
+            
+            return local_failed
+        
+        # 1. 함수 (다른 오브젝트가 참조할 수 있음 → 가장 먼저)
+        failed.extend(_process_obj_group("FUNCTION", objects.get("functions") or []))
+        
+        # 2. 프로시저
+        if not self._stop:
+            failed.extend(_process_obj_group("PROCEDURE", objects.get("procedures") or []))
+        
+        # 3. 뷰
+        if not self._stop:
+            failed.extend(_process_obj_group("VIEW", objects.get("views") or []))
+
+        # 4. 트리거 (마지막 — 테이블 필요)
+        # MySQL 타겟: 데이터 이관 시 백업→복원이 이미 됐으므로 존재하면 skip
+        _tgt_is_mysql_obj = tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
+        # v90.32: 트리거 안전 옵션
+        #   skip_triggers: 트리거 전체 skip (운영 환경에서 위험할 때)
+        #   trigger_timeout: 단일 트리거 처리 timeout (기본 120초)
+        _skip_triggers = bool(self.job.get("skip_triggers", False))
+        _trigger_timeout = int(self.job.get("trigger_timeout", 120))
+        
+        if _skip_triggers and (objects.get("triggers") or []):
+            for _tn in (objects.get("triggers") or []):
+                self._log("warn", f"[{_tn}] 트리거 skip (skip_triggers=True)")
+                self.job["item_statuses"][_tn] = {
+                    "type":"trigger","status":"skipped","rows":0,
+                    "error":"사용자가 skip_triggers 옵션 사용",
+                    "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                }
+        else:
+            import threading as _trig_th
+            for name in (objects.get("triggers") or []):
+                if self._stop: break
+                if _tgt_is_mysql_obj and _obj_exists_in_tgt("TRIGGER", name):
+                    self._log("info", f"[{name}] 트리거 이미 존재 (이관 중 복원됨) — skip")
+                    self.job["item_statuses"][name] = {
+                        "type":"trigger","status":"done","rows":0,"error":None,
+                        "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                    }
+                    continue
+                
+                # v90.32: 단일 트리거 처리에 timeout (별도 스레드로 분리)
+                _result_holder = {"done": False, "ddl": None, "success": False, "error": None}
+                
+                def _process_trigger():
+                    try:
+                        _result_holder["ddl"] = _get_ddl("TRIGGER", name)
+                        _result_holder["success"] = _exec_tgt(_result_holder["ddl"], "TRIGGER", name)
+                    except Exception as e:
+                        _result_holder["error"] = str(e)
+                    finally:
+                        _result_holder["done"] = True
+                
+                _t = _trig_th.Thread(target=_process_trigger, daemon=True, 
+                                      name=f"trigger-{name[:30]}")
+                _t.start()
+                _t.join(timeout=_trigger_timeout)
+                
+                if not _result_holder["done"]:
+                    # timeout - 트리거 처리 영원히 안 끝남
+                    self._log("error", 
+                        f"[{name}] ⏱ 트리거 처리 timeout ({_trigger_timeout}초) — 강제 skip\n"
+                        f"  원인 추정: AI 응답 잘림 또는 MySQL DDL hang\n"
+                        f"  해결: 1) skip_triggers=True 옵션 사용\n"
+                        f"        2) 트리거 수동으로 변환하여 직접 실행\n"
+                        f"        3) trigger_timeout 늘리기 (기본 120초)")
+                    self.job["item_statuses"][name] = {
+                        "type":"trigger","status":"error","rows":0,
+                        "error":f"timeout ({_trigger_timeout}초) - 강제 skip",
+                        "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                    }
+                    failed.append(("TRIGGER", name, _result_holder.get("ddl") or "", "timeout"))
+                    # 스레드는 daemon 이라 백엔드 종료 시 같이 죽음
+                    # 하지만 살아있는 동안은 DB 커넥션 점유 가능 → 다음 객체로 진행
+                    continue
+                
+                if not _result_holder["success"]:
+                    err_info = _result_holder.get("error") or \
+                               (self.job.get("item_statuses", {}).get(name) or {}).get("error", "")
+                    failed.append(("TRIGGER", name, _result_holder.get("ddl") or "", err_info))
+
+        # 5. 실패 오브젝트 1회 재시도 (의존성 순서 문제 해결)
+        if failed:
+            self._log("info", f"재시도: {len(failed)}개 오브젝트")
+            still_failed = []
+            for item_f in failed:
+                obj_type_r, name, ddl = item_f[0], item_f[1], item_f[2]
+                prev_err = item_f[3] if len(item_f) > 3 else ""
+                if self._stop: break
+                if not _exec_tgt(ddl, obj_type_r, name, error_hint=prev_err):
+                    still_failed.append(name)
+            if still_failed:
+                self._log("warn", f"최종 실패 오브젝트: {still_failed}")
+
+
+    _UNSUPPORTED_ODBC_TYPES = {-151, -155, -152, -153}  # geography, geometry, hierarchyid 등
+
+    def _build_mysql_converters(self, cols: list, col_names: list) -> list:
+        """
+        v10 #6: 컬럼별 MSSQL→MySQL 변환 함수를 사전 컴파일.
+
+        기존 _conv() 는 per-cell 마다:
+          1. dict lookup (_col_types.get(col))
+          2. 7개 if ct in (...) / == 체크
+          3. hasattr/isinstance
+        를 반복 — 500만행×21컬럼 = 1억 호출 시 치명적.
+
+        여기서는 컬럼별로 **한 번만** 타입을 보고, 해당 타입에 특화된 변환 함수를
+        바인딩한다. per-cell 에서는 `converter(value)` 호출만 하면 됨.
+
+        Args:
+            cols: [{'COLUMN_NAME': ..., 'DATA_TYPE': ...}, ...] (소스 컬럼 메타)
+            col_names: 컬럼명 리스트 (순서 중요)
+
+        Returns:
+            col_names 와 같은 순서의 변환 함수 리스트
+        """
+        from decimal import Decimal as _Decimal
+        # 컬럼명 → 타입 맵 (한 번만 빌드)
+        _col_types = {c["COLUMN_NAME"]: c["DATA_TYPE"].lower() for c in cols}
+
+        converters = []
+        for name in col_names:
+            ct = _col_types.get(name, "")
+
+            if ct in ("rowversion", "timestamp"):
+                def f(v, _bytes=bytes, _isinstance=isinstance,
+                      _ba=(bytes, bytearray)):
+                    if v is None:
+                        return None
+                    return _bytes(v).hex() if _isinstance(v, _ba) else None
+
+            elif ct in ("binary", "varbinary", "image"):
+                def f(v, _bytes=bytes, _isinstance=isinstance,
+                      _ba=(bytes, bytearray)):
+                    if v is None:
+                        return None
+                    return _bytes(v) if _isinstance(v, _ba) else v
+
+            elif ct in ("geography", "geometry", "hierarchyid",
+                        "sql_variant", "xml"):
+                def f(v, _str=str):
+                    return None if v is None else _str(v)
+
+            elif ct == "uniqueidentifier":
+                def f(v, _str=str):
+                    return None if v is None else _str(v)
+
+            elif ct == "datetimeoffset":
+                def f(v, _str=str, _has=hasattr):
+                    if v is None:
+                        return None
+                    return v.isoformat() if _has(v, "isoformat") else _str(v)
+
+            elif ct in ("datetime", "datetime2", "smalldatetime"):
+                # 밀리초 보존 (MySQL DATETIME(3/6) 대응)
+                def f(v, _has=hasattr):
+                    if v is None:
+                        return None
+                    if _has(v, "strftime"):
+                        if v.microsecond:
+                            return v.strftime("%Y-%m-%d %H:%M:%S") + \
+                                   f".{v.microsecond // 1000:03d}"
+                        return v.strftime("%Y-%m-%d %H:%M:%S")
+                    return v
+
+            elif ct in ("decimal", "numeric", "money", "smallmoney"):
+                def f(v, _float=float, _Dec=_Decimal, _is=isinstance):
+                    if v is None:
+                        return None
+                    return _float(v) if _is(v, _Dec) else v
+
+            else:
+                # 일반 타입 (char/varchar/int/bigint/date/bit/...) — 그대로 반환
+                def f(v):
+                    return v
+
+            converters.append(f)
+        return converters
+
+    # ──────────────────────────────────────────────────────────────
+    # v10 #9: 청크 분할 병렬 이관 지원
+    # ──────────────────────────────────────────────────────────────
+
+    def _maybe_decide_chunk_parallel(
+        self, *, table: str, row_count: int,
+        src_db_type: str, tgt_db_type: str, src_conn
+    ):
+        """
+        청크 분할 발동 여부 판정.
+
+        조건이 맞지 않으면 ChunkDecision(enabled=False) 반환 → 호출자가 단일 스레드 fallback.
+        모든 조건 충족 시 ChunkDecision(enabled=True, workers=N, ranges=[...]) 반환.
+        """
+        try:
+            from app.engine.dialects import get_dialect
+            from app.engine.chunk_parallel import decide_chunk_parallel
+        except Exception as e:
+            self._log("warn",
+                f"  [{table}] 청크 분할 모듈 import 실패 — 단일 스레드 진행: {e}")
+            from app.engine.chunk_parallel import ChunkDecision
+            return ChunkDecision(False, f"module import failed: {e}")
+
+        src_dialect = get_dialect(src_db_type)
+        tgt_dialect = get_dialect(tgt_db_type)
+
+        # PK 정보 조회
+        pk_info = None
+        try:
+            pk_info = src_dialect.get_pk_info(src_conn, table)
+        except NotImplementedError:
+            from app.engine.chunk_parallel import ChunkDecision
+            return ChunkDecision(False, f"src dialect {src_db_type} PK 조회 미지원")
+        except Exception as e:
+            self._log("warn", f"  [{table}] PK 정보 조회 실패: {e}")
+            from app.engine.chunk_parallel import ChunkDecision
+            return ChunkDecision(False, f"PK 조회 실패: {e}")
+
+        decision = decide_chunk_parallel(
+            row_count=row_count,
+            src_dialect=src_dialect,
+            tgt_dialect=tgt_dialect,
+            pk_info=pk_info,
+            job_config=self.job,
+            src_conn=src_conn,
+            table=table,
+        )
+        return decision
+
+    def _run_chunked_migration(
+        self, *, table: str, decision, col_names: list, cols: list,
+        select_expr: str, insert_sql: str, src_db_type: str, tgt_db_type: str,
+        tgt_is_mysql: bool, tgt_is_mssql: bool, has_identity: bool,
+        batch_size: int, row_count: int,
+    ) -> int:
+        """
+        청크 병렬 이관 실행.
+
+        각 워커는 독립 src/tgt 연결을 개설하고, 자기 청크의 PK 범위에 해당하는
+        행을 SELECT → CONVERT → LOAD 한다.
+
+        인덱스 지연생성과 결합됨 — 상위 호출자에서 with defer_indexes(...) 블록 안에서 호출.
+        """
+        from app.engine.chunk_parallel import (
+            run_chunked_migration, ChunkProgress
+        )
+        from app.engine.dialects import get_dialect
+        from app.core.db_conn import make_mssql_conn, make_mysql_conn
+
+        src_dialect = get_dialect(src_db_type)
+        progress = ChunkProgress(total_rows=row_count)
+
+        # ── 각 워커용 연결 팩토리 ─────────────────────────────
+        def _make_src():
+            if src_db_type in ("mysql", "mariadb", "aurora", "tidb", "cloudsql"):
+                return make_mysql_conn(
+                    host=self.job.get("src_host",""),
+                    port=int(self.job.get("src_port") or 3306),
+                    username=self.job.get("src_username",""),
+                    password=self.job.get("src_password",""),
+                    database=self.job.get("src_database",""),
+                    timeout=int(self.job.get("connect_timeout") or 60),
+                    dict_cursor=True,
+                )
+            else:
+                return make_mssql_conn(
+                    host=self.job.get("src_host",""),
+                    port=int(self.job.get("src_port") or 1433),
+                    username=self.job.get("src_username",""),
+                    password=self.job.get("src_password",""),
+                    database=self.job.get("src_database",""),
+                    timeout=int(self.job.get("connect_timeout") or 60),
+                )
+
+        def _make_tgt():
+            if tgt_db_type in ("mysql", "mariadb", "aurora", "tidb", "cloudsql"):
+                return make_mysql_conn(
+                    host=self.job.get("tgt_host",""),
+                    port=int(self.job.get("tgt_port") or 3306),
+                    username=self.job.get("tgt_username",""),
+                    password=self.job.get("tgt_password",""),
+                    database=self.job.get("tgt_database",""),
+                    timeout=int(self.job.get("connect_timeout") or 60),
+                )
+            else:
+                return make_mssql_conn(
+                    host=self.job.get("tgt_host",""),
+                    port=int(self.job.get("tgt_port") or 1433),
+                    username=self.job.get("tgt_username",""),
+                    password=self.job.get("tgt_password",""),
+                    database=self.job.get("tgt_database",""),
+                    timeout=int(self.job.get("connect_timeout") or 60),
+                )
+
+        # ── 각 워커가 실행할 run_chunk 클로저 ─────────────────
+        # 기존 _migrate_table 루프 내부의 핵심 로직(SELECT + CONVERT + LOAD)을
+        # 여기서 청크별 WHERE 조건을 붙여 재현한다.
+        #
+        # 핵심: src_is_mssql + tgt_is_mysql 조합만 Phase 2 범위.
+        # (cus_m 시나리오 — MSSQL → MySQL 역방향 이관)
+        src_is_mssql = src_db_type in ("mssql", "azure", "sqlserver")
+
+        def _run_chunk(src_conn_w, tgt_conn_w, where_clause: str) -> int:
+            """
+            단일 청크 실행 (한 워커가 호출).
+
+            이관: SELECT [cols] FROM [table] WHERE {where_clause} ORDER BY pk
+                 → 변환 → bulk load
+            """
+            import time as _t
+
+            # 워커 전용 bulk loader 생성 (독립 tgt_conn 사용)
+            from app.engine.bulk_loader import create_loader
+            loader = create_loader(
+                mode=self.job.get("loader_mode", "auto"),
+                table=table, col_names=col_names, tgt_conn=tgt_conn_w,
+                tgt_is_mssql=tgt_is_mssql, tgt_is_mysql=tgt_is_mysql,
+                insert_sql=insert_sql,
+                log=lambda lv, msg: self._log(lv, msg),
+                job=self.job,
+                row_count=row_count,
+                stop_check=lambda: self._stop,
+            )
+            try:
+                loader.open()
+            except Exception as e:
+                self._log("error", f"  [{table}] 워커 loader open 실패: {e}")
+                raise
+
+            # converters 미리 빌드 (v10 #6)
+            converters = None
+            if tgt_is_mysql and src_is_mssql:
+                converters = self._build_mysql_converters(cols, col_names)
+
+            src_cur = src_conn_w.cursor()
+            # arraysize 튜닝 (v10 #8)
+            if src_is_mssql:
+                try: src_cur.arraysize = batch_size
+                except: pass
+
+            # SELECT 전체 (WHERE + ORDER BY PK)
+            pk_col = decision.ranges[0].pk_column  # 모든 청크 동일 PK
+            if src_is_mssql:
+                # ════════════════════════════════════════════════════════════
+                # v95_p23f (2026-05-03 본부장님 본질 처방): 키 불일치 수정
+                # ════════════════════════════════════════════════════════════
+                # 본부장님 진단 (22:06 SQL-FAIL):
+                #   ('42S02', "Invalid object name 'Document'. (208)")
+                #
+                # 진짜 본질:
+                #   - _migrate_table 진입 시 table='Production_Document' (결합 형태)
+                #   - line 3145: src_bare = 'Document' (분해된 bare name)
+                #   - line 3155: table = tgt_table = 'Production_Document'
+                #   - _src_schema_map 의 키는 'Document' (bare name)
+                #
+                # 기존 코드 (잘못):
+                #   _src_schema_map.get(table)  ← 'Production_Document' 키 lookup
+                #                                 → None! (실제 키는 'Document')
+                #   _tbl_ref = '[Production_Document]'  ← schema 힌트 없음
+                #   → MSSQL: Invalid object name 'Document'
+                #
+                # v95_p23f 처방 (다른 6자리 line 3238/3342/3445/3709 와 일관):
+                #   _src_schema_map.get(src_bare)  ← 'Document' 키 lookup
+                #                                    → 'Production' 매치!
+                #   _tbl_ref = '[Production].[Document]'  ← 정상!
+                #
+                # 부작용 0:
+                #   - schema 등록 안 된 테이블 → fallback '[src_bare]' (안전)
+                #   - 모든 다른 자리 (line 3238/3342/3445/3709) 와 동일 패턴
+                _sch_hint = getattr(self, '_src_schema_map', {}).get(src_bare)
+                _tbl_ref = f"[{_sch_hint}].[{src_bare}]" if _sch_hint else f"[{src_bare}]"
+                sql = (f"SELECT {select_expr} FROM {_tbl_ref} "
+                       f"WHERE {where_clause} ORDER BY [{pk_col}] ASC")
+            else:
+                sql = (f"SELECT {select_expr} FROM `{table}` "
+                       f"WHERE {where_clause} ORDER BY `{pk_col}` ASC")
+
+            # v10 #9 hotfix2+: SQL execute 단독 측정
+            # (MSSQL 동시 쿼리 경합 여부 판별 — 4 워커가 동시에 execute 호출 시 대기 발생 가능)
+            _w_t_execute = 0.0
+            _t_exec_start = time.monotonic()
+            try:
+                src_cur.execute(sql)
+            except Exception as e:
+                self._log("error", f"  [{table}] 워커 SELECT 실패: {str(e)[:200]}")
+                try: loader.close()
+                except: pass
+                raise
+            _w_t_execute = time.monotonic() - _t_exec_start
+            self._log("debug",
+                f"  [{table}] Worker execute ({where_clause[:50]}...): {_w_t_execute:.2f}s")
+
+            inserted_total = 0
+            # v10 #9 hotfix2: 워커별 병목 측정
+            _w_t_select  = 0.0   # fetchmany 대기 시간
+            _w_t_convert = 0.0   # converter 변환 시간
+            _w_t_load    = 0.0   # loader.load() 시간
+            try:
+                while True:
+                    if self._stop:
+                        break
+                    _t0 = time.monotonic()
+                    rows = src_cur.fetchmany(batch_size)
+                    _w_t_select += time.monotonic() - _t0
+                    if not rows:
+                        break
+
+                    # 변환 (v10 #6 converters 사용)
+                    _t0 = time.monotonic()
+                    if converters is not None:
+                        batch_data = [
+                            tuple(conv(v) for conv, v in zip(converters, r))
+                            for r in rows
+                        ]
+                    else:
+                        batch_data = [tuple(r) for r in rows]
+                    _w_t_convert += time.monotonic() - _t0
+
+                    # 로드
+                    _t0 = time.monotonic()
+                    inserted = loader.load(batch_data)
+                    _w_t_load += time.monotonic() - _t0
+                    inserted_total += inserted
+
+                    # 진행률 누적
+                    progress.add_batch(
+                        worker_id=0,  # 실제 워커 ID 는 상위에서 덮어씀
+                        inserted=inserted)
+
+                    # v10 #9 hotfix: UI가 읽는 모든 필드를 스레드-safe 하게 갱신
+                    # (기존 단일 스레드 경로와 동일한 필드 세트)
+                    #
+                    # UI 표시:
+                    #   - item_statuses[table].rows_tgt      → KPI "처리 행"
+                    #   - item_statuses[table].rows_src      → 소스 읽기 카운트
+                    #   - item_statuses[table].rows_total    → 분모
+                    #   - item_statuses[table].speed         → 테이블별 속도
+                    #   - self.job["speed"]                  → KPI "처리 속도"
+                    #   - self.job["current_table_rows_done"] → 현재 테이블 진행
+                    #   - self.job["current_table_rows_total"] → 현재 테이블 전체
+                    #   - self.job["progress"]               → 전체 진행률
+                    try:
+                        import time as _ti
+                        with self._chunk_progress_lock:
+                            _done_now = progress.total_done
+
+                            # 현재 테이블 진행 (JobMonitor 테이블 카드)
+                            self.job["current_table_rows_done"]  = _done_now
+                            self.job["current_table_rows_total"] = row_count
+
+                            # item_statuses 업데이트 (KPI/상단 카드)
+                            _st = self.job.setdefault("item_statuses", {}).get(table, {})
+                            _engine_elapsed = _ti.monotonic() - getattr(
+                                self, "_engine_start_t", _ti.monotonic())
+                            _tbl_speed = (int(_done_now / _engine_elapsed)
+                                          if _engine_elapsed > 0 else 0)
+                            self.job["item_statuses"][table] = {
+                                **_st,
+                                "rows_src":        _done_now,
+                                "rows_tgt":        _done_now,
+                                "rows_total":      row_count,
+                                "rows_tgt_final":  False,
+                                "speed":           _tbl_speed,
+                                "type":            _st.get("type", "table"),
+                                "status":          _st.get("status", "running"),
+                            }
+
+                            # 전체 Job 속도 (KPI "처리 속도")
+                            if _engine_elapsed > 0:
+                                _total_all = (self.job.get("rows_processed", 0)
+                                              + _done_now)
+                                self.job["speed"] = int(_total_all / _engine_elapsed)
+
+                            # 전체 진행률
+                            _rows_total = self.job.get("rows_total", 0)
+                            if _rows_total > 0:
+                                self.job["progress"] = min(99.9, round(
+                                    (self.job.get("rows_processed", 0) + _done_now)
+                                    / _rows_total * 100, 1))
+                            elif row_count and row_count > 0:
+                                # 단일 테이블 이관 또는 rows_total 미정 시
+                                self.job["progress"] = min(99.9, round(
+                                    _done_now / row_count * 100, 1))
+                    except Exception as _pe:
+                        # 진행률 업데이트 실패해도 이관 자체는 계속
+                        pass
+            finally:
+                try: src_cur.close()
+                except: pass
+                try: loader.close()
+                except: pass
+
+            # v10 #9 hotfix2: 워커 완료 시 병목분석 로그
+            # 워커마다 5개 지표를 독립 측정 → 후속 튜닝 시 어느 단계 개선할지 결정 근거
+            _w_total = _w_t_execute + _w_t_select + _w_t_convert + _w_t_load
+            if _w_total > 0 and inserted_total > 0:
+                _pct = lambda x: int(x / _w_total * 100) if _w_total > 0 else 0
+                self._log("info",
+                    f"  [{table}] 워커 병목: "
+                    f"EXECUTE {_w_t_execute:.1f}s ({_pct(_w_t_execute)}%) · "
+                    f"SELECT {_w_t_select:.1f}s ({_pct(_w_t_select)}%) · "
+                    f"CONVERT {_w_t_convert:.1f}s ({_pct(_w_t_convert)}%) · "
+                    f"LOAD {_w_t_load:.1f}s ({_pct(_w_t_load)}%) · "
+                    f"전체 {_w_total:.1f}s")
+
+            return inserted_total
+
+        # ── 진행률 Lock 초기화 (워커간 공유) ────────────────────
+        if not hasattr(self, '_chunk_progress_lock'):
+            import threading as _th
+            self._chunk_progress_lock = _th.Lock()
+
+        # ── 청크 병렬 실행 ────────────────────────────────────
+        on_err = self.job.get("on_error", "abort")
+        total_inserted, total_failed = run_chunked_migration(
+            table=table,
+            decision=decision,
+            src_conn_factory=_make_src,
+            tgt_conn_factory=_make_tgt,
+            run_chunk=_run_chunk,
+            progress=progress,
+            stop_flag=lambda: self._stop,
+            logger=lambda lv, msg: self._log(lv, msg),
+            src_dialect=src_dialect,
+            on_error=on_err,
+        )
+
+        if total_failed > 0:
+            self._log("warn",
+                f"  [{table}] 청크 실패 {total_failed:,} rows — "
+                f"일부 데이터 손실 가능")
+
+        # 진행률 100% 마킹 (성공 완료 시)
+        try:
+            self.job["current_table_rows_done"] = total_inserted
+        except Exception:
+            pass
+
+        return total_inserted
+
+    # ──────────────────────────────────────────────────────────────
+    # v11 #1 (Phase 3a Step 1): ProcessPool 기반 청크 병렬 이관
+    # ──────────────────────────────────────────────────────────────
+    def _run_chunked_migration_mp(
+        self, *, table: str, decision, col_names: list, cols: list,
+        select_expr: str, insert_sql: str, src_db_type: str, tgt_db_type: str,
+        tgt_is_mysql: bool, tgt_is_mssql: bool, has_identity: bool,
+        batch_size: int, row_count: int,
+    ) -> int:
+        """
+        Phase 3a: ProcessPoolExecutor 기반 청크 병렬 이관.
+
+        Thread 버전 (_run_chunked_migration) 과 달리:
+        - 각 워커가 독립 Python 프로세스 → GIL 해제
+        - 워커 간 통신은 mp.Queue (pickle)
+        - self/logger 등 인스턴스 참조 전달 불가 → pickle-safe config dict 만 전달
+        """
+        try:
+            from app.engine.chunk_parallel_mp import (
+                run_chunked_migration_mp, build_worker_configs
+            )
+        except Exception as e:
+            self._log("error",
+                f"  [{table}] [MP] chunk_parallel_mp 모듈 import 실패: {e}")
+            self._log("warn",
+                f"  [{table}] [MP] Thread 버전으로 fallback")
+            return self._run_chunked_migration(
+                table=table, decision=decision, col_names=col_names, cols=cols,
+                select_expr=select_expr, insert_sql=insert_sql,
+                src_db_type=src_db_type, tgt_db_type=tgt_db_type,
+                tgt_is_mysql=tgt_is_mysql, tgt_is_mssql=tgt_is_mssql,
+                has_identity=has_identity, batch_size=batch_size, row_count=row_count,
+            )
+
+        src_is_mssql = src_db_type in ("mssql", "azure", "sqlserver")
+
+        # ── 워커 설정 생성 (pickle-safe) ────────────────────────
+        worker_configs = build_worker_configs(
+            table=table, decision=decision,
+            col_names=col_names,
+            cols_meta=[dict(c) for c in cols],   # pyodbc.Row 등 → dict 변환
+            select_expr=select_expr, insert_sql=insert_sql,
+            batch_size=batch_size, row_count=row_count,
+            src_db_type=src_db_type, tgt_db_type=tgt_db_type,
+            tgt_is_mysql=tgt_is_mysql, tgt_is_mssql=tgt_is_mssql,
+            src_is_mssql=src_is_mssql,
+            job=self.job,
+        )
+
+        # ── 진행률 Lock 초기화 (ThreadPool 과 공용) ──────────────
+        if not hasattr(self, '_chunk_progress_lock'):
+            import threading as _th
+            self._chunk_progress_lock = _th.Lock()
+
+        # ── ProcessPool 실행 ────────────────────────────────────
+        # 주의: run_chunked_migration_mp 내부에서 MpProgressCollector 가
+        # 별도 스레드로 Queue 를 소비하여 self.job 을 갱신한다
+        total_inserted, total_failed = run_chunked_migration_mp(
+            table=table,
+            decision=decision,
+            worker_configs=worker_configs,
+            job=self.job,
+            engine_start_t=getattr(self, "_engine_start_t", time.monotonic()),
+            logger=lambda lv, msg: self._log(lv, msg),
+            on_error=self.job.get("on_error", "abort"),
+        )
+
+        if total_failed > 0:
+            self._log("warn",
+                f"  [{table}] [MP] 청크 실패 {total_failed:,} rows — 일부 데이터 손실 가능")
+
+        try:
+            self.job["current_table_rows_done"] = total_inserted
+        except Exception:
+            pass
+
+        return total_inserted
+
+    def _migrate_table(self, src_conn, tgt_conn, table: str) -> int:
+        """소스 DB 타입에 따라 분기 — MySQL/MSSQL 양방향 지원
+
+        v38 (2026-04-22): 입력 table 이 "schema.table" 형식이면 자동 분해.
+          - 소스가 MSSQL 이고 멀티 스키마인 경우 (예: "collection.activity")
+            프론트가 표시용 이름을 그대로 보내올 수 있음.
+          - 내부 변수 `table` 은 bare name 만 보유하고, 스키마는
+            `self._src_schema_map[table]` 에 저장해 쿼리 시 활용.
+          - bare name 만 들어오면 기존 동작 그대로 유지 (하위 호환).
+          - STEP 2 의 name_map 본공사 전 임시 방어 로직. TEMP-GUARD-V34C.
+        """
+        # TEMP-GUARD-V34C: 진입부 정규화 + 스키마 힌트 저장
+        if not hasattr(self, '_src_schema_map'): self._src_schema_map = {}
+        _orig_input = table
+        if "." in table:
+            _sch_hint, _bare = table.split(".", 1)
+            # 소스가 MSSQL 인 경우에만 스키마 분리 의미 있음.
+            # MySQL/Aurora 는 DB=스키마라 점 포함된 이름 자체가 비정상.
+            _src_db_type = (self.job.get("src_db") or "mysql").lower()
+            if _src_db_type in ("mssql", "azure", "sqlserver"):
+                self._src_schema_map[_bare] = _sch_hint
+                table = _bare
+                self._log("info",
+                    f"[{_orig_input}] 입력 정규화 → schema=[{_sch_hint}], table=[{_bare}]")
+            # MySQL 소스에서 점 포함 이름은 비정상이지만 일단 bare 만 사용
+            elif "." in _orig_input:
+                table = _bare
+                self._log("warn",
+                    f"[{_orig_input}] MySQL 소스에 점 포함 이름 — bare name [{_bare}] 로 진행")
+
+        # ── 테이블별 컬럼 처리맵 무조건 초기화 (잔상 방지) ──
+        if not hasattr(self, '_skip_cols_map'): self._skip_cols_map = {}
+        if not hasattr(self, '_cast_cols_map'): self._cast_cols_map = {}
+        if not hasattr(self, '_rowver_cols'):   self._rowver_cols   = {}
+        if not hasattr(self, '_dto_cols'):      self._dto_cols      = {}
+        if not hasattr(self, '_geo_cols'):      self._geo_cols      = {}
+        if not hasattr(self, '_bin_cols'):      self._bin_cols      = {}
+        self._skip_cols_map[table] = set()
+        self._cast_cols_map[table] = set()
+        self._rowver_cols[table]   = set()
+        self._dto_cols[table]      = set()
+        self._geo_cols[table]      = set()
+        self._bin_cols[table]      = set()
+
+        # ════════════════════════════════════════════════════════════
+        # v90.48: 소스 bare → 타겟 변환 (schema 정책 일관성)
+        # ════════════════════════════════════════════════════════════
+        # 본부장님 결정 (2026-04-27): underscore 정공법 채택.
+        #   - 소스 [customer].[profile]  → 타겟 customer_profile
+        #   - 소스 [credit].[contract]   → 타겟 credit_contract
+        #   - 소스 [dbo].[tag]           → 타겟 tag (default schema 결합 안 함)
+        # 
+        # 이전엔 테이블 이름 그대로 (profile) 평탄화 → 객체 변환 결과
+        # (customer_profile)와 불일치 → 1146 187회.
+        # 이 swap 한 줄로 메서드 내부 모든 ` `{table}` ` 가 자동으로 타겟 이름 사용.
+        # 소스 측 SELECT 만 src_bare 명시 사용.
+        src_bare = table
+        try:
+            tgt_table = self._target_table_name(table)
+        except Exception as _ne:
+            self._log("warn", f"[{table}] 타겟 이름 변환 실패, 소스 이름 그대로 사용: {_ne}")
+            tgt_table = table
+        if tgt_table != src_bare:
+            self._log("info",
+                f"[{src_bare}] 타겟 이름 매핑 → [{tgt_table}] (정책: {self._schema_strategy})")
+        # 메서드 내부 모든 SQL 에서 사용할 table 변수는 이제 타겟 이름.
+        table = tgt_table
+
+        # ════════════════════════════════════════════════════════════
+        # v95_p31 (a) (2026-05-04 본부장님 본질 처방): swap 후 dict 재등록 안전망
+        # ════════════════════════════════════════════════════════════
+        # 본질: line 3181~3186 의 6개 dict 는 swap 전 'src_bare' 키로 초기화됨.
+        #       그러나 line 3210 swap 후 모든 후속 코드가 'tgt_table' 키로 접근.
+        #       'src_bare' != 'tgt_table' 인 경우 (예: 'Document' → 'Production_Document')
+        #       → 후속 self._XXX_cols[table='Production_Document'] 접근이 KeyError
+        # 증상: Document, ProductPhoto 등 hierarchyid + varbinary(max) 보유 테이블이
+        #       'Production_Document', 'Production_ProductPhoto' KeyError 로 0초 실패
+        # 처방: swap 후에도 동일 dict 키로 set() 등록 (이중 등록 = 안전망)
+        # 부작용 0: 다른 테이블 (이미 정상 작동) 은 같은 set 두 번 set 만 되는 효과,
+        #          기능 변경 없음. swap 안 일어난 경우 (src_bare == tgt_table) 는 영향 없음.
+        if table != src_bare:
+            self._skip_cols_map.setdefault(table, set())
+            self._cast_cols_map.setdefault(table, set())
+            self._rowver_cols.setdefault(table, set())
+            self._dto_cols.setdefault(table, set())
+            self._geo_cols.setdefault(table, set())
+            self._bin_cols.setdefault(table, set())
+            self._log("debug",
+                f"  [v95_p31-a] [{table}] swap 후 dict 6개 재등록 (src_bare={src_bare})")
+
+        src_db_type = (self.job.get("src_db") or "mysql").lower()
+        tgt_db_type = (self.job.get("tgt_db") or "mssql").lower()
+        src_is_mysql = src_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
+
+        # ── drop_table: 테이블 DROP 후 재생성 ────────────────────
+        # v90.18: FK 제약 + Deadlock 대응 (운영급 성능)
+        #   DROP 실패 시 TRUNCATE fallback (DELETE 는 대용량에서 매우 느려서 금지)
+        #   순서: SET FK=0 → DROP → 실패 시 TRUNCATE → 그래도 실패 시 ERROR
+        if self.job.get("drop_table", False):
+            tgt_is_mysql_local = tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
+            _drop_succeeded = False
+
+            # ── 1차: DROP 시도 (FK 무시) ──
+            try:
+                _dc = tgt_conn.cursor()
+                if tgt_db_type in ("mssql","azure","sqlserver"):
+                    _dc.execute(f"IF OBJECT_ID(N'[dbo].[{table}]', N'U') IS NOT NULL DROP TABLE [dbo].[{table}]")
+                else:
+                    # v90.18: MySQL FK 제약 우회를 위해 세션 단위 OFF
+                    _dc.execute("SET FOREIGN_KEY_CHECKS=0")
+                    _dc.execute(f"DROP TABLE IF EXISTS `{table}`")
+                tgt_conn.commit()
+                _drop_succeeded = True
+                self._log("info", f"  [{table}] DROP 완료 → 새 DDL로 재생성")
+            except Exception as _de:
+                self._log("warn", f"  [{table}] DROP 실패: {_de}")
+                try: tgt_conn.rollback()
+                except: pass
+
+            # ── 2차: TRUNCATE fallback (대용량에서도 빠름) ──
+            if not _drop_succeeded and tgt_is_mysql_local:
+                self._log("info", f"  [{table}] TRUNCATE fallback 시도 (FK 무시)")
+                try:
+                    _dc2 = tgt_conn.cursor()
+                    _dc2.execute("SET FOREIGN_KEY_CHECKS=0")
+                    _dc2.execute(f"TRUNCATE TABLE `{table}`")
+                    tgt_conn.commit()
+                    _drop_succeeded = True
+                    self._log("info", f"  [{table}] TRUNCATE fallback 성공 (DROP 대신)")
+                    # TRUNCATE 성공 후 → 한번 더 DROP 시도 (이번엔 자식 테이블 비었으니 가능할 수 있음)
+                    try:
+                        _dc3 = tgt_conn.cursor()
+                        _dc3.execute("SET FOREIGN_KEY_CHECKS=0")
+                        _dc3.execute(f"DROP TABLE IF EXISTS `{table}`")
+                        tgt_conn.commit()
+                        self._log("info", f"  [{table}] TRUNCATE 후 DROP 재시도 성공 → 새 DDL 재생성")
+                    except Exception as _de3:
+                        # DROP 재시도 실패해도 TRUNCATE 는 됐으니 계속 진행
+                        self._log("info", f"  [{table}] TRUNCATE 만 적용 (DDL 재생성 X — 기존 구조 유지)")
+                except Exception as _de2:
+                    # TRUNCATE 도 실패 → 명확히 ERROR
+                    self._log("error", f"  [{table}] DROP/TRUNCATE 모두 실패: {_de2} — Duplicate Key 발생 가능!")
+                    self._log("error", f"  [{table}] 해결책: docker exec ... mysql -e 'TRUNCATE TABLE {table}' 수동 실행 필요")
+                    try: tgt_conn.rollback()
+                    except: pass
+            elif not _drop_succeeded:
+                # MSSQL 등 - DROP 실패 시 그대로 ERROR
+                self._log("error", f"  [{table}] DROP 실패 — Duplicate Key 발생 가능")
+        src_is_mssql = src_db_type in ("mssql","azure","sqlserver")
+        tgt_is_mssql = tgt_db_type in ("mssql","azure","sqlserver")
+        tgt_is_mysql = tgt_db_type in ("mysql","aurora","mariadb","tidb","cloudsql")
+        db = self.job.get("src_database","")
+
+        # ── 1. 컬럼 정보 조회 ─────────────────────────────────
+        if src_is_mysql:
+            src_cur = src_conn.cursor()
+            src_cur.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE,
+                       CHARACTER_MAXIMUM_LENGTH,
+                       NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE,
+                       COLUMN_DEFAULT, COLUMN_KEY, EXTRA
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s
+                ORDER BY ORDINAL_POSITION
+            """, (db, src_bare))  # v90.48-hotfix: 소스 카탈로그 조회라 src_bare 사용
+            cols = src_cur.fetchall()
+            col_names = [c["COLUMN_NAME"] for c in cols]
+        elif src_is_mssql:
+            src_cur = src_conn.cursor()
+            # TEMP-GUARD-V34C: 스키마 힌트가 있으면 정확한 스키마 컬럼 반환.
+            # 없으면 기존 동작 (sys.tables 전역 조회) — 멀티 스키마면 첫 번째 매칭.
+            _sch_hint = getattr(self, '_src_schema_map', {}).get(src_bare)  # v90.48: swap 후 lookup 위해 src_bare 사용
+            if _sch_hint:
+                src_cur.execute("""
+                    SELECT c.name AS COLUMN_NAME,
+                           tp.name AS DATA_TYPE,
+                           tp.name AS COLUMN_TYPE,
+                           c.max_length AS CHARACTER_MAXIMUM_LENGTH,
+                           c.precision AS NUMERIC_PRECISION,
+                           c.scale AS NUMERIC_SCALE,
+                           CASE WHEN c.is_nullable=1 THEN 'YES' ELSE 'NO' END AS IS_NULLABLE,
+                           dc.definition AS COLUMN_DEFAULT,
+                           CASE WHEN ic.column_id IS NOT NULL THEN 'PRI' ELSE '' END AS COLUMN_KEY,
+                           CASE WHEN c.is_identity=1 THEN 'auto_increment' ELSE '' END AS EXTRA
+                    FROM sys.columns c
+                    -- v95_p26 (2026-05-04 본부장님 본질 처방): UDT → base type 진짜 해소
+                    -- 본질: c.user_type_id 는 UDT 면 UDT 자체의 type_id 반환
+                    --       → tp.name = 'NameStyle', 'Phone', 'Flag' (UDT 이름!)
+                    --       → MSSQL → MySQL TYPE_MAP 에서 미매치 → TEXT 폴백
+                    --       → CREATE TABLE 시 1101 (BLOB default) / 1170 (BLOB key) 발생
+                    -- 처방: c.system_type_id 사용 → 항상 base type id 반환
+                    --       AND tp.user_type_id = tp.system_type_id (base type 만 필터)
+                    --       → 'NameStyle' (UDT) → 'bit' (base) 정상 변환
+                    --       → 'Phone' (UDT) → 'nvarchar' (base) 정상 변환
+                    -- v95_p57 (2026-05-05 본부장님): CLR 시스템 타입 매핑 보강
+                    --   본질: hierarchyid/geometry/geography 는 system_type_id=240 공유
+                    --         tp.user_type_id != tp.system_type_id (각각 128/129/130)
+                    --         기존 필터 (tp.user_type_id = tp.system_type_id) 로 JOIN 실패
+                    --         → cols 메타 누락 → 1364 NOT NULL 위반
+                    --   처방: CROSS APPLY (TOP 1) 로 각 컬럼당 1개 base type 만 매치
+                    --         CLR 타입은 자기 user_type_id 로 매치 허용
+                    JOIN sys.types tp ON tp.user_type_id = (
+                        -- 각 컬럼의 base type 우선순위:
+                        -- 1순위: system_type_id == user_type_id (정통 base type)
+                        -- 2순위: 가장 작은 user_type_id (CLR 타입의 첫 번째)
+                        SELECT TOP 1 tp2.user_type_id
+                        FROM sys.types tp2
+                        WHERE tp2.system_type_id = c.system_type_id
+                        ORDER BY
+                            CASE WHEN tp2.user_type_id = tp2.system_type_id THEN 0 ELSE 1 END,
+                            tp2.user_type_id
+                    )
+                    JOIN sys.tables t ON c.object_id = t.object_id
+                    JOIN sys.schemas s ON t.schema_id = s.schema_id
+                    LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+                    -- v95_p34 (2026-05-04 본부장님 본질 처방): PK 진짜 식별
+                    -- 본질: index_id=1 은 'clustered index' 일 뿐 PK 가 아닐 수 있음
+                    --       (MSSQL 은 PK 없이 unique clustered index 만 있는 테이블 허용)
+                    --       BillOfMaterials 의 clustered index 는 (ProductAssemblyID, ComponentID, StartDate)
+                    --       이지만 PK 는 BillOfMaterialsID. ProductAssemblyID 가 PK 로 잘못 식별됨
+                    --       → v95_p28 NOT NULL 강제 적용 → MSSQL 의 NULL 데이터 → 1048 에러
+                    --       같은 본질: DatabaseLog.XmlEvent (XML 컬럼이 PK 로 잘못 인식)
+                    -- 처방: sys.indexes 에 is_primary_key=1 조건 추가하여 진짜 PK 만 식별
+                    LEFT JOIN sys.indexes idx
+                        ON idx.object_id=c.object_id AND idx.index_id=1 AND idx.is_primary_key=1
+                    LEFT JOIN sys.index_columns ic
+                        ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                       AND ic.index_id=idx.index_id
+                    WHERE t.name = ? AND s.name = ?
+                    ORDER BY c.column_id
+                """, [src_bare, _sch_hint])  # v90.48-hotfix: 소스 카탈로그 조회라 src_bare 사용
+            else:
+                src_cur.execute("""
+                    SELECT c.name AS COLUMN_NAME,
+                           tp.name AS DATA_TYPE,
+                           tp.name AS COLUMN_TYPE,
+                           c.max_length AS CHARACTER_MAXIMUM_LENGTH,
+                           c.precision AS NUMERIC_PRECISION,
+                           c.scale AS NUMERIC_SCALE,
+                           CASE WHEN c.is_nullable=1 THEN 'YES' ELSE 'NO' END AS IS_NULLABLE,
+                           dc.definition AS COLUMN_DEFAULT,
+                           CASE WHEN ic.column_id IS NOT NULL THEN 'PRI' ELSE '' END AS COLUMN_KEY,
+                           CASE WHEN c.is_identity=1 THEN 'auto_increment' ELSE '' END AS EXTRA
+                    FROM sys.columns c
+                    -- v95_p26 (2026-05-04 본부장님 본질 처방): UDT → base type 진짜 해소
+                    -- (위와 동일한 본질 — schema_hint 없는 fallback 경로)
+                    -- v95_p57 (2026-05-05 본부장님): CLR 타입 매핑 보강 (위와 동일)
+                    JOIN sys.types tp ON tp.user_type_id = (
+                        SELECT TOP 1 tp2.user_type_id
+                        FROM sys.types tp2
+                        WHERE tp2.system_type_id = c.system_type_id
+                        ORDER BY
+                            CASE WHEN tp2.user_type_id = tp2.system_type_id THEN 0 ELSE 1 END,
+                            tp2.user_type_id
+                    )
+                    JOIN sys.tables t ON c.object_id = t.object_id
+                    LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+                    -- v95_p34 (2026-05-04 본부장님 본질 처방): PK 진짜 식별 (위와 동일 본질)
+                    LEFT JOIN sys.indexes idx
+                        ON idx.object_id=c.object_id AND idx.index_id=1 AND idx.is_primary_key=1
+                    LEFT JOIN sys.index_columns ic
+                        ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+                       AND ic.index_id=idx.index_id
+                    WHERE t.name = ?
+                    ORDER BY c.column_id
+                """, [src_bare])  # v90.48-hotfix: 소스 카탈로그 조회라 src_bare 사용
+            raw = src_cur.fetchall()
+            keys = [d[0] for d in src_cur.description]
+            cols = [dict(zip(keys, r)) for r in raw]
+            col_names = [c["COLUMN_NAME"] for c in cols]
+
+            # ── MSSQL 미지원 타입 컬럼 식별 ──────────────────────
+            # 1단계: 타입 이름으로 명백한 미지원 타입 스킵
+            _UNSUPPORTED_TYPES = {"sql_variant", "image", "xml"}  # hierarchyid는 별도 처리
+            _HIER_TYPES        = {"hierarchyid"}
+            _GEO_TYPES         = {"geography", "geometry"}
+            _BINARY_TYPES = {"binary", "varbinary"}
+            _skip_cols    = set()
+            # _bin_cols는 _migrate_table 시작에서 이미 초기화됨 — 여기서 재초기화 금지
+
+            for c in cols:
+                dt = (c.get("DATA_TYPE") or "").lower()
+                cn = c["COLUMN_NAME"]
+                if dt in _HIER_TYPES:
+                    # hierarchyid → ToString()으로 경로 문자열 변환 (/1/2/3/ 형태)
+                    if not hasattr(self, '_hier_cols'): self._hier_cols = {}
+                    self._hier_cols.setdefault(table, set()).add(cn)
+                    self._cast_cols_map[table].add(cn)
+                    self._log("info", f"  [{table}] hierarchyid 컬럼 '{cn}' → ToString() 변환")
+                elif dt in _GEO_TYPES:
+                    self._geo_cols[table].add(cn)
+                    self._cast_cols_map[table].add(cn)
+                    self._log("info", f"  [{table}] {dt} 컬럼 '{cn}' → STAsText() WKT 변환")
+                elif dt in ("timestamp", "rowversion"):
+                    self._rowver_cols[table].add(cn)
+                    self._cast_cols_map[table].add(cn)
+                    self._log("info", f"  [{table}] rowversion 컬럼 '{cn}' → BIGINT 변환")
+                elif dt == "datetimeoffset":
+                    self._dto_cols[table].add(cn)
+                    self._cast_cols_map[table].add(cn)
+                    self._log("info", f"  [{table}] datetimeoffset 컬럼 '{cn}' → DATETIME(6) 변환")
+                elif dt in _BINARY_TYPES:
+                    # binary/varbinary → Python에서 bytes로 변환 (특별 처리 불필요)
+                    self._bin_cols[table].add(cn)
+                    self._log("debug", f"  [{table}] {dt} 컬럼 '{cn}' → bytes 변환")
+                elif dt in _UNSUPPORTED_TYPES:
+                    _skip_cols.add(cn)
+                    self._log("warn", f"  [{table}] 미지원 타입 컬럼 '{cn}' ({dt}) → NULL로 대체")
+
+            # 2단계: error_hint에서 ODBC 오류 컬럼 인덱스 모두 추출
+            import re as _re2
+            _error_hint = getattr(self, '_remig_error_hint', '')
+            if _error_hint and 'column-index=' in _error_hint:
+                for _m in _re2.finditer(r'column-index=(\d+)', _error_hint):
+                    _idx = int(_m.group(1))
+                    if 0 <= _idx < len(cols):
+                        _col_name = cols[_idx]["COLUMN_NAME"]
+                        _skip_cols.add(_col_name)
+                        self._log("warn", f"  [{table}] ODBC 오류 컬럼 [{_col_name}] (index={_idx}) → NULL로 대체")
+
+            # 3단계: pyodbc description으로 실제 ODBC 타입 코드 확인
+            # SELECT TOP 0으로 컬럼별 타입 코드를 미리 검사
+            _UNSUPPORTED_ODBC_CODES = {-151, -155, -152, -153, -154, -150}
+            try:
+                _probe_cur = src_conn.cursor()
+                # TEMP-GUARD-V34C: 스키마 힌트 있으면 [schema].[table]
+                _sch_hint = getattr(self, '_src_schema_map', {}).get(src_bare)  # v90.48: swap 후 lookup 위해 src_bare 사용
+                _probe_ref = f"[{_sch_hint}].[{src_bare}]" if _sch_hint else f"[{src_bare}]"  # v90.48-hotfix: 소스 측이라 src_bare 사용
+                _probe_cur.execute(f"SELECT TOP 0 * FROM {_probe_ref}")
+                self._log("debug", f"  [{table}] ODBC 사전 검사 — 컬럼 {len(_probe_cur.description)}개")
+
+                # ════════════════════════════════════════════════════════════
+                # v95_p55 (2026-05-05 본부장님): cols 메타 누락 컬럼 진단 + 보강
+                # ════════════════════════════════════════════════════════════
+                # 본부장님 강조: "이번에 끝내자", "하드코딩 0%"
+                #
+                # 진짜 본질 (view tool 로 100% 추적):
+                #   sys.types JOIN 의 (tp.user_type_id = tp.system_type_id) 필터로
+                #   hierarchyid (CLR 시스템 타입, user_type_id != system_type_id) 가
+                #   sys.types JOIN 에서 빠짐 → cols 메타에 컬럼 자체 없음
+                #
+                # 본부장님 환경 결정적 증거 (로그 19:47:30):
+                #   - bulk loader cols=2 (ProductID + ModifiedDate 만)
+                #   - PRIMARY KEY (ProductID) 단일 PK
+                #   - DocumentNode 자체가 cols 에 없음 → SELECT 에서도 누락
+                #   - 32행 동일 ProductID → 1062 PK 중복
+                #
+                # 일반화 처방 (하드코딩 0%):
+                #   probe_cur.description = MSSQL 의 진짜 컬럼 목록 (모든 타입 포함)
+                #   cols = sys.types JOIN 결과 (CLR 타입 제외)
+                #   → description 에 있는데 cols 에 없는 컬럼 = 메타 누락
+                #   → bytearray 면 hierarchyid 후보로 cols 에 추가 (안전)
+                #
+                # 부작용 0:
+                #   - 정상 cols 영향 0 (없는 컬럼만 추가)
+                #   - 운영 DB hierarchyid 거의 없음 → 발동 0건
+                #   - v95_p26 (UDT 처방) 100% 보존 (sys.types JOIN 그대로)
+                _existing_col_names = set(c["COLUMN_NAME"] for c in cols)
+                _missing_cols = []
+                for _desc in (_probe_cur.description or []):
+                    _dn = _desc[0]
+                    if _dn not in _existing_col_names:
+                        _missing_cols.append(_dn)
+                if _missing_cols:
+                    self._log("warn",
+                        f"  [v95_p55] [{table}] cols 메타 누락 컬럼 발견: {_missing_cols} "
+                        f"(probe_cur 에는 있음 — sys.types JOIN 에서 빠진 CLR 타입 가능성)")
+                    # 누락 컬럼을 cols 에 보강 (hierarchyid 추정)
+                    # PK 인지 별도 조회로 확인 (sys.indexes + sys.index_columns)
+                    try:
+                        _pk_cur = src_conn.cursor()
+                        _pk_query_sch = _sch_hint if _sch_hint else "dbo"
+                        _pk_cur.execute("""
+                            SELECT c.name AS COLUMN_NAME
+                            FROM sys.indexes idx
+                            JOIN sys.index_columns ic
+                              ON ic.object_id = idx.object_id
+                             AND ic.index_id = idx.index_id
+                            JOIN sys.columns c
+                              ON c.object_id = ic.object_id
+                             AND c.column_id = ic.column_id
+                            JOIN sys.tables t ON t.object_id = idx.object_id
+                            JOIN sys.schemas s ON s.schema_id = t.schema_id
+                            WHERE t.name = ? AND s.name = ?
+                              AND idx.is_primary_key = 1
+                        """, [src_bare, _pk_query_sch])
+                        _pk_cols_real = set(r[0] for r in _pk_cur.fetchall())
+                        _pk_cur.close()
+                    except Exception as _pe:
+                        self._log("warn", f"  [{table}] PK 별도 조회 실패: {_pe}")
+                        _pk_cols_real = set()
+                    
+                    for _mc in _missing_cols:
+                        _is_pk_real = _mc in _pk_cols_real
+                        # cols 에 보강 추가 — hierarchyid 가정 (CLR 시스템 타입 대부분)
+                        cols.append({
+                            "COLUMN_NAME": _mc,
+                            "DATA_TYPE": "hierarchyid",  # 추정 (CLR 시스템 타입)
+                            "COLUMN_TYPE": "hierarchyid",
+                            "CHARACTER_MAXIMUM_LENGTH": None,
+                            "NUMERIC_PRECISION": None,
+                            "NUMERIC_SCALE": None,
+                            "IS_NULLABLE": "YES",
+                            "COLUMN_DEFAULT": None,
+                            "COLUMN_KEY": "PRI" if _is_pk_real else "",
+                            "EXTRA": "",
+                            "_v95_p55_recovered": True,  # 마커 (디버깅용)
+                        })
+                        self._log("warn",
+                            f"  [v95_p55] [{table}] 컬럼 [{_mc}] cols 에 보강 추가 "
+                            f"(PK={_is_pk_real}, dt='hierarchyid' 추정)")
+                # ════════════════════════════════════════════════════════════
+
+                for _i, _desc in enumerate(_probe_cur.description or []):
+                    _col_name  = _desc[0]
+                    _odbc_type = _desc[1]
+                    # pyodbc type_code는 type 객체 — str/repr로 코드 추출
+                    _type_str  = str(_odbc_type)
+                    _type_int  = 0
+                    if hasattr(_odbc_type, 'code'):
+                        _type_int = int(_odbc_type.code)
+                    elif isinstance(_odbc_type, int):
+                        _type_int = _odbc_type
+                    else:
+                        # repr에서 숫자 추출 시도
+                        import re as _re3
+                        _m3 = _re3.search(r'-?\d+', _type_str)
+                        if _m3:
+                            _type_int = int(_m3.group())
+                    self._log("debug", f"    col[{_i}] {_col_name}: odbc_type={_type_str} code={_type_int}")
+
+                    _is_bytearray = (_type_str == "<class 'bytearray'>")
+                    _is_unsupported = _type_int in _UNSUPPORTED_ODBC_CODES
+
+                    if _is_bytearray:
+                        # bytearray = binary/varbinary/datetimeoffset/rowversion 모두 포함
+                        # 반드시 실제 타입 확인 후 처리
+                        _real_dt = ""
+                        for _c in cols:
+                            if _c.get("COLUMN_NAME") == _col_name:
+                                _real_dt = (_c.get("DATA_TYPE") or "").lower()
+                                break
+
+                        if _real_dt in ("binary", "varbinary", "image"):
+                            # binary → 그냥 읽기 (bytes), _bin_cols에 추가
+                            self._bin_cols[table].add(_col_name)
+                            self._log("debug", f"  [{table}] binary [{_col_name}] → bytes 처리")
+                        elif _real_dt in ("timestamp", "rowversion"):
+                            # rowversion → BIGINT
+                            self._cast_cols_map[table].add(_col_name)
+                            self._rowver_cols[table].add(_col_name)
+                            self._log("warn", f"  [{table}] rowversion [{_col_name}] → BIGINT 처리")
+                        elif _real_dt == "hierarchyid":
+                            # hierarchyid → ToString() 경로 문자열
+                            # ════════════════════════════════════════════════════════════
+                            # v95_p30 (2026-05-04 본부장님 본질 처방): KeyError 방지
+                            # ════════════════════════════════════════════════════════════
+                            # 본질: 이 코드 경로 (ODBC 사전검사) 는 line 3367 의
+                            #       'if dt in _HIER_TYPES' 분기 (line 3369 _hier_cols 초기화) 를
+                            #       거치지 않고 도달 가능. 따라서 self._hier_cols 자체가 없거나
+                            #       self._hier_cols[table] 키가 없으면 KeyError 발생.
+                            # 증상: AdventureWorks Document.DocumentNode (hierarchyid) 처리 시
+                            #       'KeyError: Production_Document' (또는 'Production_ProductPhoto')
+                            # 처방: setdefault 로 안전 초기화 (line 3370 과 동일 패턴)
+                            if not hasattr(self, '_hier_cols'): self._hier_cols = {}
+                            self._hier_cols.setdefault(table, set()).add(_col_name)
+                            self._cast_cols_map[table].add(_col_name)
+                            self._log("warn", f"  [{table}] hierarchyid [{_col_name}] → ToString() 처리")
+                        elif _real_dt == "sql_variant":
+                            _skip_cols.add(_col_name)
+                            self._log("warn", f"  [{table}] [{_col_name}] (sql_variant) → NULL 처리")
+                        elif _real_dt == "datetimeoffset":
+                            # datetimeoffset → SWITCHOFFSET UTC
+                            self._cast_cols_map[table].add(_col_name)
+                            self._dto_cols[table].add(_col_name)
+                            self._log("warn", f"  [{table}] datetimeoffset [{_col_name}] → SWITCHOFFSET 처리")
+                        else:
+                            # ════════════════════════════════════════════════════════════
+                            # v95_p53 (2026-05-05 본부장님): dt='' + PK 컬럼 → hier 후보
+                            # ════════════════════════════════════════════════════════════
+                            # 본부장님 강조: "이번에 끝내자", "하드코딩 0%"
+                            #
+                            # 본부장님 환경 진단:
+                            #   Production_ProductDocument PK = (ProductID, DocumentNode)
+                            #   DocumentNode 가 hierarchyid 인데
+                            #   MSSQL INFORMATION_SCHEMA 가 dt='' 반환 (비표준 타입)
+                            #   → '알 수 없는 bytearray' 분기 진입 → _bin_cols 만 등록
+                            #   → _hier_cols 누락 → v95_p51 PK 진단 보강 발동 안 됨
+                            #   → 1062 PK 중복 → 31/32 행만 성공
+                            #
+                            # 일반화 본질 (하드코딩 0%):
+                            #   bytearray + dt='' + PK 컬럼 = hierarchyid 가능성 99%
+                            #   (binary/image 가 PK 인 경우 거의 없음 — 운영 DB 영향 0)
+                            #   → hier_cols 등록 → v95_p51 PK UPSERT 발동
+                            #   → 1062 회피 (32/32 모두 INSERT)
+                            #
+                            # 부작용 0:
+                            #   - PK 컬럼 (COLUMN_KEY='PRI') 인 경우만 hier 추정
+                            #   - dt='' 도 추가 조건 (정상 binary 영향 0)
+                            #   - 운영 DB hierarchyid 거의 없음 → 발동 0건
+                            _is_pk_col = False
+                            for _cc in cols:
+                                if _cc.get("COLUMN_NAME") == _col_name:
+                                    if (_cc.get("COLUMN_KEY") or "").upper() == "PRI":
+                                        _is_pk_col = True
+                                    break
+                            if _is_pk_col and not _real_dt:
+                                # PK 컬럼 + dt='' + bytearray → hierarchyid 후보
+                                if not hasattr(self, '_hier_cols'): self._hier_cols = {}
+                                self._hier_cols.setdefault(table, set()).add(_col_name)
+                                self._cast_cols_map[table].add(_col_name)
+                                self._log("warn",
+                                    f"  [v95_p53] [{table}] PK bytearray [{_col_name}] (dt='') "
+                                    f"→ hierarchyid 후보로 등록 (PK UPSERT 진단용)")
+                                # 추가로 binary 처리도 함께 (안전망)
+                                self._bin_cols[table].add(_col_name)
+                            else:
+                                # 타입 불명 bytearray → 안전하게 bytes로 (기존 동작)
+                                self._bin_cols[table].add(_col_name)
+                                self._log("warn", f"  [{table}] 알 수 없는 bytearray [{_col_name}] (dt={_real_dt}) → bytes 처리")
+                    elif _is_unsupported:
+                        _skip_cols.add(_col_name)
+                        self._log("warn", f"  [{table}] ODBC type {_type_int} 컬럼 [{_col_name}] (index={_i}) → NULL로 대체")
+                _probe_cur.close()
+            except Exception as _pe:
+                self._log("warn", f"  [{table}] ODBC 타입 사전 검사 실패: {_pe}")
+
+            # 최종 skip_cols를 맵에 저장 (SELECT 쿼리 생성 시 사용)
+            self._skip_cols_map[table] = _skip_cols
+            if _skip_cols:
+                self._log("info", f"  [{table}] 총 {len(_skip_cols)}개 컬럼 NULL 대체: {sorted(_skip_cols)}")
+            if self._cast_cols_map.get(table):
+                self._log("info", f"  [{table}] CAST 컬럼: {sorted(self._cast_cols_map[table])}")
+        else:
+            raise Exception(f"지원하지 않는 소스 DB: {src_db_type}")
+
+        if not cols:
+            raise Exception(f"테이블 [{table}] 컬럼 정보 없음")
+        # ── 테이블별 컬럼 처리 맵 — 매 호출마다 해당 테이블 초기화 ──
+        # (초기화는 _migrate_table 시작에서 처리)
+
+        # ── 2. 타겟 테이블 생성 ────────────────────────────────
+        if self.job.get("create_table", True):
+            try:
+                # ── v95_p23a: CREATE TABLE 모듈 직렬화 (Deadlock 방지) ──
+                # 같은 schema 에 동시 CREATE 시 InnoDB metadata lock 충돌.
+                # CREATE 단계만 직렬화 → INSERT 병렬 유지 (성능 영향 최소).
+                with _create_table_lock:
+                    if tgt_is_mssql:
+                        self._create_mssql_table(tgt_conn, table, cols)
+                    elif tgt_is_mysql:
+                        self._create_mysql_table(tgt_conn, table, cols, src_db_type)
+            except Exception as ce:
+                self._log("error", f"테이블 [{table}] 생성 실패: {ce}")
+                raise RuntimeError(f"CREATE TABLE [{table}] 실패: {ce}") from ce
+
+        # ── 3. 소스 row 수 ────────────────────────────────────
+        if src_is_mysql:
+            src_cur.execute(f"SELECT COUNT(*) AS cnt FROM `{src_bare}`")
+            r = src_cur.fetchone()
+            row_count = r["cnt"] if isinstance(r, dict) else r[0]
+        else:
+            # TEMP-GUARD-V34C: 스키마 힌트 있으면 [schema].[table]
+            _sch_hint = getattr(self, '_src_schema_map', {}).get(src_bare)  # v90.48: swap 후 lookup 위해 src_bare 사용
+            _tbl_ref = f"[{_sch_hint}].[{src_bare}]" if _sch_hint else f"[{src_bare}]"  # v90.48-hotfix: 소스 측이라 src_bare
+            src_cur.execute(f"SELECT COUNT(*) FROM {_tbl_ref}")
+            r = src_cur.fetchone()
+            row_count = r[0] if r else 0
+
+        self.job["current_table_rows_total"] = row_count
+        if row_count == 0:
+            return 0
+
+        # ── v90.50: table_mode == 'schema_only' 처리 ───────────────
+        # 본부장님 보고 (2026-04-27): "스키마만 이관" 선택했는데 데이터까지 이관됨.
+        # 원인: 엔진이 table_mode 를 안 봄 (기존 버그). jobs.py 에선 받기만 함.
+        # 해결: 여기까지 오면 CREATE TABLE 은 이미 완료됨. 데이터 INSERT 단계만 skip.
+        _table_mode = (self.job.get("table_mode") or "schema_data").lower()
+        if _table_mode == "schema_only":
+            self._log("info", f"  [{table}] table_mode='schema_only' — 스키마만 생성, 데이터 이관 건너뜀 ({row_count:,} rows skip)")
+            self.job["current_table_rows_total"] = 0  # 진행률 계산에 영향 없게
+            return 0
+
+        # ── 4. TRUNCATE ────────────────────────────────────────
+        # (FK/트리거 비활성화는 run()에서 전역으로 처리됨)
+        #
+        # v10 #13: MySQL 의 TRUNCATE 는 FK 로 참조되는 테이블에서 실패.
+        # FOREIGN_KEY_CHECKS=0 은 INSERT/UPDATE/DELETE 에만 효과 있고 TRUNCATE 에는
+        # 효과 없음 (MySQL 설계상 제약).
+        # → 실패 시 DELETE + AUTO_INCREMENT 리셋으로 fallback (FK 무시 + PK 1부터 재시작)
+
+        if self.job.get("truncate_target", False):
+            _truncated_via = None
+            try:
+                tc = tgt_conn.cursor()
+                if tgt_is_mssql:
+                    tc.execute(f"TRUNCATE TABLE [{table}]")
+                    _truncated_via = "TRUNCATE"
+                else:
+                    tc.execute(f"TRUNCATE TABLE `{table}`")
+                    _truncated_via = "TRUNCATE"
+                tgt_conn.commit()
+                self._log("info", f"  [{table}] TRUNCATE 완료")
+            except Exception as te:
+                # v10 #13: MySQL FK 참조 테이블의 TRUNCATE 실패 대응
+                # 에러 메시지에 'foreign key' 또는 MySQL 1701 이 있으면 DELETE fallback
+                _te_str = str(te).lower()
+                _is_fk_error = (
+                    "foreign key" in _te_str
+                    or "1701" in _te_str
+                    or "cannot truncate" in _te_str
+                )
+                if tgt_is_mysql and _is_fk_error:
+                    # v90.18: 대용량 테이블은 DELETE 가 매우 느림 (수 시간) - 경고
+                    self._log("warn",
+                        f"  [{table}] TRUNCATE 실패 (FK 참조) — DELETE fallback 시도")
+                    self._log("warn",
+                        f"  [{table}] ⚠️  대용량 테이블의 경우 DELETE 는 매우 느립니다. "
+                        f"가능하면 자식 테이블 (FK 가 참조하는) 부터 먼저 처리하거나, "
+                        f"이관 옵션에서 DROP 사용 권장 (FK 우회 자동 처리됨)")
+                    try:
+                        tc = tgt_conn.cursor()
+                        # FK 체크 비활성화 (이 세션 한정)
+                        # 주의: 엔진이 run() 시작부터 이 세션에 FOREIGN_KEY_CHECKS=0 을 설정해둠.
+                        # 아래 SET 은 확실성을 위한 재세팅. 복원은 절대 하지 말 것 —
+                        # 이후 다른 자식 테이블 INSERT 에서 FK 참조 실패 유발.
+                        tc.execute("SET FOREIGN_KEY_CHECKS=0")
+                        # DELETE 로 전체 제거 (FK 무시됨)
+                        tc.execute(f"DELETE FROM `{table}`")
+                        _deleted_rows = tc.rowcount
+                        # AUTO_INCREMENT 를 1로 리셋 (TRUNCATE 와 동일 효과)
+                        tc.execute(f"ALTER TABLE `{table}` AUTO_INCREMENT=1")
+                        # v10 #13 hotfix1: FK 체크 복원 안 함 (엔진의 전역 OFF 를 덮어쓰지 않기 위해)
+                        # 엔진은 이관 종료 시점에 run() 의 finally 블록에서
+                        # FOREIGN_KEY_CHECKS=1, UNIQUE_CHECKS=1 로 복원하므로 여기선 건드리지 않음.
+                        tgt_conn.commit()
+                        _truncated_via = "DELETE+AUTO_INCREMENT=1"
+                        self._log("info",
+                            f"  [{table}] DELETE fallback 성공 — {_deleted_rows:,} rows 제거, AUTO_INCREMENT 리셋")
+                    except Exception as de:
+                        self._log("error",
+                            f"  [{table}] DELETE fallback 도 실패: {de} — 중복 INSERT 발생 가능")
+                        try: tgt_conn.rollback()
+                        except: pass
+                else:
+                    # FK 외 다른 원인 — 기존 동작 유지 (무시 + warn)
+                    self._log("warn", f"  [{table}] TRUNCATE 실패 (무시): {te}")
+
+        # ── 5. INSERT SQL 준비 ────────────────────────────────
+        has_identity = any("auto_increment" in (c.get("EXTRA","") or "").lower() for c in cols)
+        tgt_cur = tgt_conn.cursor()
+
+        # v9 패치 #13: pyodbc fast_executemany 활성화 (MSSQL 전용)
+        # 기본 executemany 는 한 행씩 별도 RPC 호출 → 수십 배 느림.
+        # fast_executemany=True 하면 TDS 7.4 bulk-param 사용 → 10~100배 빨라짐.
+        if tgt_is_mssql:
+            try:
+                tgt_cur.fast_executemany = True
+            except Exception:
+                pass  # pyodbc < 4.0.19 또는 드라이버 미지원 시 무시
+
+        if tgt_is_mssql:
+            if has_identity:
+                try: tgt_cur.execute(f"SET IDENTITY_INSERT [{table}] ON")
+                except: pass
+            cols_str     = ", ".join([f"[{c}]" for c in col_names])
+            placeholders = ", ".join(["?" for _ in col_names])
+            insert_sql   = f"INSERT INTO [{table}] ({cols_str}) VALUES ({placeholders})"
+        else:
+            cols_str     = ", ".join([f"`{c}`" for c in col_names])
+            placeholders = ", ".join(["%s" for _ in col_names])
+            # DROP/TRUNCATE 후 이관이면 중복 없음 → 일반 INSERT
+            # 그 외(append 등)는 ON DUPLICATE KEY UPDATE 로 upsert
+            _is_clean = (self.job.get("drop_table") or self.job.get("truncate_target"))
+
+            # ════════════════════════════════════════════════════════════
+            # v95_p45 (2026-05-05 본부장님): PK 일부 컬럼 스킵 시 자동 UPSERT
+            # ════════════════════════════════════════════════════════════
+            # 본부장님 강조: "이번만 어떻게 안 됨, 다음 두번째 DB 이관 일반화"
+            #
+            # 진단 (본부장님 환경 Production_ProductDocument 1062):
+            #   - PK = (ProductID, DocumentNode 'hierarchyid')
+            #   - DocumentNode 가 dt='' 로 인식 실패 → bytearray 처리 → 스킵
+            #   - 남은 PK = ProductID 만 → 32행 중 동일 ProductID 다수 → 1062 충돌
+            #
+            # 일반 본질 처방:
+            #   메타데이터에서 PK 컬럼 추출 → 스킵/cast 셋에 있는지 검사 →
+            #   PK 일부가 변환됐으면 (특히 hier/dto/geo) 자동 UPSERT 적용
+            #
+            # 부작용 0:
+            #   - 정상 PK (모두 단순 INT/VARCHAR): 영향 0
+            #   - hierarchyid PK 만 발동 (AdventureWorks ProductDocument, ProductPhoto 등)
+            #   - 운영 DB (hierarchyid 거의 없음): 발동 안 함
+            #   - 사용자 옵션 upsert_on_pk_partial=False 로 끌 수 있음 (안전망)
+            #
+            # v95_p51 (2026-05-05 본부장님): PK 진단 보강
+            #   본부장님 환경 진단:
+            #     Production_ProductDocument PK = (ProductID, DocumentNode hierarchyid)
+            #     DocumentNode 가 cols 에서 빠지거나 COLUMN_KEY='PRI' 인식 실패
+            #     → _pk_names_meta 에 ProductID 만 (1개) → len()>=2 불만족 → UPSERT 안 됨
+            #
+            #   본질: PK 메타 추출 시 cols 만 보지 말고
+            #         _hier_cols/_dto_cols/_geo_cols/_skip_cols 도 PK 후보로 합산
+            #         (hierarchyid 같은 PK 일부 컬럼이 메타에서 누락된 경우 보강)
+            #
+            #   부작용 0: PK 후보 합산 후에도 진짜 손실 (hier/skip) 있어야 UPSERT 발동
+            _pk_partial_skipped = False
+            if not self.job.get("upsert_on_pk_partial_disabled", False):
+                # 메타데이터에서 PK 컬럼 추출
+                _pk_names_meta = set()
+                for _c in cols:
+                    if (_c.get("COLUMN_KEY") or "").upper() == "PRI":
+                        _pk_names_meta.add(_c["COLUMN_NAME"])
+                # PK 가 col_names 에서 빠진 (=스킵된) 경우 확인
+                _pk_in_select = _pk_names_meta & set(col_names)
+                _pk_dropped = _pk_names_meta - _pk_in_select
+                # PK 가 cast 변환 대상 (hier/dto/geo 등) 인 경우도 확인
+                _hier = getattr(self, '_hier_cols', {}).get(table, set())
+                _dto  = getattr(self, '_dto_cols', {}).get(table, set())
+                _geo  = getattr(self, '_geo_cols', {}).get(table, set())
+                _skip = getattr(self, '_skip_cols_map', {}).get(table, set())
+                _pk_lossy = _pk_names_meta & (_hier | _dto | _geo)
+                # 복합 PK 의 일부가 사라지거나 변환됐으면 자동 UPSERT
+                if (len(_pk_names_meta) >= 2) and (_pk_dropped or _pk_lossy):
+                    _pk_partial_skipped = True
+                    self._log("warn",
+                        f"  [v95_p45] [{table}] 복합 PK {sorted(_pk_names_meta)} 중 "
+                        f"스킵={sorted(_pk_dropped)} 변환={sorted(_pk_lossy)} "
+                        f"→ 자동 UPSERT 적용 (1062 PK 중복 회피)")
+                # v95_p51: PK 후보 가 hier/skip 셋에 있는데 _pk_names_meta 에 없는 경우
+                #         (= 메타 인식 실패로 PK 후보가 누락됨)
+                #         _pk_names_meta 단일이지만 hier/skip 컬럼도 PK 일부 가능성
+                elif len(_pk_names_meta) <= 1 and (_hier | _skip):
+                    # 손실 컬럼이 있으면 안전 측면에서 UPSERT 발동
+                    # (단일 PK + hierarchyid 손실 → 1062 발생 가능)
+                    _pk_lossy_extended = _hier | (_skip & set(_c["COLUMN_NAME"] for _c in cols))
+                    if _pk_lossy_extended:
+                        _pk_partial_skipped = True
+                        self._log("warn",
+                            f"  [v95_p51] [{table}] PK 진단 보강: 메타 PK={sorted(_pk_names_meta)} "
+                            f"+ 손실 컬럼 {sorted(_pk_lossy_extended)} (hier/skip) "
+                            f"→ 자동 UPSERT 적용 (1062 회피)")
+
+            if tgt_is_mysql:
+                if _is_clean and not _pk_partial_skipped:
+                    insert_sql = f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders})"
+                else:
+                    # 중복 시 모든 컬럼 UPDATE (upsert)
+                    # v95_p45: clean 이라도 _pk_partial_skipped 면 강제 UPSERT
+                    _upd = ", ".join([f"`{c}`=VALUES(`{c}`)" for c in col_names])
+                    insert_sql = (f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders})"
+                                  f" ON DUPLICATE KEY UPDATE {_upd}")
+            else:
+                insert_sql = f"INSERT INTO `{table}` ({cols_str}) VALUES ({placeholders})"
+
+        # v9 패치 #20: bulk loader 생성 (대용량 테이블 가속)
+        # - 기본은 executemany (기존과 동일 동작)
+        # - 대용량(>= bulk_threshold_rows) + MSSQL 타겟 + bulk_mode=auto 면 BCP/pymssql 시도
+        # - bulk_mode: "auto" | "executemany" | "bcp" | "pymssql"
+        from app.engine.bulk_loader import (
+            create_loader as _bl_create,
+            BulkLoadError as _BulkLoadError,
+        )
+        _bulk_mode = (self.job.get("bulk_mode") or "auto").lower()
+        try:
+            _bulk_loader = _bl_create(
+                mode=_bulk_mode,
+                table=table, col_names=col_names, tgt_conn=tgt_conn,
+                tgt_is_mssql=tgt_is_mssql,
+                tgt_is_mysql=tgt_is_mysql,            # v10 #1: MySQL LOAD DATA 분기용
+                insert_sql=insert_sql,
+                log=lambda lv, m: self._log(lv, m),
+                job=self.job,
+                row_count=row_count,
+                stop_check=lambda: self._stop,   # v9 #33: BCP/로더가 중단 체크
+            )
+            self._log("info",
+                f"  [{table}] bulk loader = {_bulk_loader.name} "
+                f"(rows={row_count:,}, cols={len(col_names)})")
+        except _BulkLoadError as _be:
+            self._log("warn", f"  [{table}] bulk loader 생성 실패: {_be} — executemany 로 폴백")
+            from app.engine.bulk_loader import ExecutemanyLoader as _Ex
+            _bulk_loader = _Ex(
+                table=table, col_names=col_names, tgt_conn=tgt_conn,
+                log=lambda lv, m: self._log(lv, m),
+                insert_sql=insert_sql, tgt_is_mssql=tgt_is_mssql, job_opts=self.job,
+            )
+            _bulk_loader.open()
+
+        # 기존 tgt_cur 은 IDENTITY_INSERT / SET 옵션용으로 보존
+
+        # ── 6. 배치 이관 ──────────────────────────────────────
+        batch_size = self.job.get("batch_size", 5000)
+        offset, done = 0, 0   # offset은 로그/진행률 표시용으로만 유지 (Keyset에서는 rows_done과 동일)
+        start_t = time.monotonic()
+        # v9 패치 #29: 병목 측정 — 단계별 누적 시간
+        _t_select = 0.0   # 소스 SELECT + fetchall
+        _t_load   = 0.0   # bulk_loader.load (INSERT)
+        _t_convert= 0.0   # MSSQL→MySQL 값 변환 등
+        # v10 #6: MSSQL→MySQL 컬럼별 변환 함수 (첫 배치 때 빌드, 이후 재사용)
+        _converters = None
+
+        # v9 패치 #23: 넓은 테이블 주의 — pyodbc fast_executemany 는 파라미터 2100개 제한
+        # batch_size * col_count > 2100 이면 자동으로 작은 배치로 조정
+        if _bulk_loader.name == "executemany" and tgt_is_mssql:
+            _max_rows_per_batch = max(1, 2000 // max(1, len(col_names)))
+            if batch_size > _max_rows_per_batch:
+                self._log("warn",
+                    f"  [{table}] 넓은 테이블 ({len(col_names)}컬럼) — "
+                    f"executemany 배치 크기 {batch_size:,} → {_max_rows_per_batch:,} 로 자동 조정 "
+                    f"(pyodbc 파라미터 2100 제한)")
+                batch_size = _max_rows_per_batch
+
+        # v9 패치 #31: BCP/pymssql 로더 — 배치 크기 자동 확대 (단 사용자가 명시적으로 큰 값이면 존중)
+        # BCP 는 배치 크기가 클수록 유리 (파일 생성/전송 오버헤드 상각).
+        # 사용자가 5000 이하로 두었으면 자동으로 50,000 으로 키움.
+        # 작은 테이블 (batch 보다 작은 행수) 은 어차피 1회에 끝나므로 영향 없음.
+        if _bulk_loader.name in ("bcp", "pymssql_bulk") and batch_size <= 5000:
+            _new_batch = 50000
+            # 넓은 테이블은 메모리 고려해 약간 낮춤
+            if len(col_names) >= 50:
+                _new_batch = 20000
+            elif len(col_names) >= 20:
+                _new_batch = 30000
+            self._log("info",
+                f"  [{table}] {_bulk_loader.name} 로더 — 배치 크기 자동 조정: "
+                f"{batch_size:,} → {_new_batch:,} (컬럼 {len(col_names)}개)")
+            batch_size = _new_batch
+
+        # ── 페이지네이션 전략 자동 선택 ───────────────────────
+        # PK 기반 Keyset이 가능하면 그걸 쓰고, 아니면 OFFSET fallback.
+        # 여기서 SELECT 표현식을 만들지 않고 "메타정보"만 pagination에 넘긴다.
+        # 실제 SELECT 구절은 MySQL/MSSQL 분기 내에서 호출 시점에 작성.
+        from app.core.pagination import plan_pagination as _plan_pagination
+
+        # PK 후보 추출 — 이미 위에서 읽어둔 cols 사용
+        _pk_meta = []
+        for c in cols:
+            # MySQL: COLUMN_KEY == 'PRI'
+            # MSSQL: COLUMN_KEY 필드를 위에서 'PRI'로 채워줌
+            if (c.get("COLUMN_KEY") or "").upper() == "PRI":
+                _pk_meta.append({
+                    "name": c["COLUMN_NAME"],
+                    "data_type": (c.get("DATA_TYPE") or "").lower(),
+                })
+
+        # SELECT expression 준비
+        if src_is_mysql:
+            _select_expr = ", ".join([f"`{c}`" for c in col_names])
+            _fallback_order = f"`{col_names[0]}`" if col_names else "1"
+        else:
+            # MSSQL — 기존 코드의 타입별 변환 SELECT를 재현
+            _skip   = getattr(self, '_skip_cols_map', {}).get(table, set())
+            _cast   = getattr(self, '_cast_cols_map', {}).get(table, set())
+            _rowver = getattr(self, '_rowver_cols',   {}).get(table, set())
+            _dto    = getattr(self, '_dto_cols',      {}).get(table, set())
+            _geo    = getattr(self, '_geo_cols',      {}).get(table, set())
+            _bin    = getattr(self, '_bin_cols',      {}).get(table, set())
+            _hier   = getattr(self, '_hier_cols',     {}).get(table, set())
+            sel_parts = []
+            for c in col_names:
+                if c in _hier:
+                    sel_parts.append(f"[{c}].ToString() AS [{c}]")
+                elif c in _skip:
+                    sel_parts.append(f"NULL AS [{c}]")
+                elif c in _rowver:
+                    sel_parts.append(f"CONVERT(BIGINT, CONVERT(VARBINARY(8), [{c}])) AS [{c}]")
+                elif c in _dto:
+                    sel_parts.append(f"CONVERT(NVARCHAR(30), SWITCHOFFSET([{c}], '+00:00'), 120) AS [{c}]")
+                elif c in _geo:
+                    sel_parts.append(f"[{c}].STAsText() AS [{c}]")
+                elif c in _bin:
+                    sel_parts.append(f"[{c}]")
+                elif c in _cast:
+                    sel_parts.append(f"CONVERT(NVARCHAR(100), [{c}]) AS [{c}]")
+                else:
+                    sel_parts.append(f"[{c}]")
+            _select_expr = ", ".join(sel_parts)
+            if _pk_meta:
+                _fallback_order = ", ".join(f"[{c['name']}]" for c in _pk_meta)
+            elif col_names:
+                _fallback_order = f"[{col_names[0]}], (SELECT 1)"
+            else:
+                _fallback_order = "1"
+
+        # Keyset 호환성 체크: PK가 선택된 SELECT에서 원본값 그대로 보장되는지 확인.
+        # MSSQL의 경우 위에서 _cast 대상이면 CONVERT(NVARCHAR,..)로 감싸지므로
+        # 해당 PK는 Keyset 비교가 불가능 — Keyset 제거하고 OFFSET fallback.
+        if not src_is_mysql and _pk_meta:
+            _mssql_unsafe_pks = (_skip | _cast | _rowver | _dto | _geo | _hier)
+            if any(pk["name"] in _mssql_unsafe_pks for pk in _pk_meta):
+                self._log("warn",
+                    f"  [{table}] PK 컬럼이 타입 변환 대상 — Keyset 비활성, OFFSET fallback")
+                _pk_meta = []  # 강제 OFFSET
+
+        # TEMP-GUARD-V34C: 스키마 힌트 있으면 완전 식별자로 변환해 paginator 에 넘김
+        # (_quote_id 의 "점 있으면 통과" 룰 활용)
+        _sch_hint = getattr(self, '_src_schema_map', {}).get(src_bare)  # v90.48: swap 후 lookup 위해 src_bare 사용
+        if _sch_hint and not src_is_mysql:
+            _table_for_paginator = f"[{_sch_hint}].[{src_bare}]"  # v90.48-hotfix: 소스 SELECT 용이라 src_bare
+        else:
+            _table_for_paginator = src_bare  # v90.48-hotfix: MySQL 소스도 src_bare 로 보내야 함
+
+        _plan = _plan_pagination(
+            table=_table_for_paginator, dialect=src_db_type, batch_size=batch_size,
+            select_expr=_select_expr,
+            pk_candidates=_pk_meta,
+            fallback_order_by=_fallback_order,
+            total_rows=row_count,
+        )
+        _paginator = _plan.paginator
+        self._log("info", f"  [{table}] 페이지네이션: {_plan.strategy} — {_plan.reason}")
+
+        # ── Resume 체크포인트 복원 ────────────────────────────
+        # self.job에 resume_from_checkpoint 플래그가 있고 item_statuses[table].checkpoint가
+        # 있으면 Paginator 상태를 복원 — 이전 중단 지점부터 이어서 이관.
+        if self.job.get("resume_from_checkpoint", False):
+            _prev_cp = (self.job.get("item_statuses", {}).get(table, {}) or {}).get("checkpoint")
+            if _prev_cp and _prev_cp.get("strategy") == _plan.strategy:
+                try:
+                    from app.core.pagination import PaginatorState as _PS
+                    _state = _PS(
+                        strategy=_prev_cp["strategy"],
+                        last_key=tuple(_prev_cp["last_key"]) if _prev_cp.get("last_key") else None,
+                        offset=_prev_cp.get("offset", 0),
+                        rows_done=_prev_cp.get("rows_done", 0),
+                        table=table,
+                    )
+                    _paginator.restore(_state)
+                    done = _state.rows_done   # 이미 처리된 건수 반영
+                    offset = _state.offset if _state.strategy == "offset" else _state.rows_done
+                    self._log("info",
+                        f"  [{table}] Resume 체크포인트에서 재개 — 기존 {done:,}행 스킵")
+                except Exception as _rre:
+                    self._log("warn", f"  [{table}] 체크포인트 복원 실패 (처음부터 재시작): {_rre}")
+
+        # 컬럼명 → 결과 인덱스 맵 (Keyset advance에 필수)
+        _col_index_map = {name: i for i, name in enumerate(col_names)}
+
+        # ─────────────────────────────────────────────────────
+        # v9 패치 #21: MySQL 스트리밍 모드 (PK 없는 대용량 테이블용)
+        # ─────────────────────────────────────────────────────
+        # 조건: MySQL 소스 + OFFSET pagination 선택됨 + 대용량 (임계값 이상)
+        # 이유: PK 없는 테이블에서 OFFSET 은 O(N²). 500만 행이면 몇 시간.
+        #       SSCursor 로 서버에서 한 번에 스트리밍하면 O(N) 선형 시간.
+        _stream_mode = (
+            src_is_mysql
+            and _plan.strategy == "offset"
+            and (row_count or 0) >= int(self.job.get("stream_threshold_rows", 50000))
+            and not self.job.get("resume_from_checkpoint", False)  # resume 중엔 OFFSET 유지
+        )
+        if _stream_mode:
+            # v9 패치 #22: 스트리밍 + bulk loader 조합 최적화
+            # 사용자가 명시적으로 batch_size 를 줄이지 않았다면 자동으로 크게
+            _stream_batch = batch_size
+            if batch_size <= 5000:
+                # BCP/pymssql 은 배치 크기 클수록 유리 (임시 CSV 생성/전송 오버헤드 상각)
+                _stream_batch = 50000
+                self._log("info",
+                    f"  [{table}] 스트리밍 배치 크기 자동 조정: {batch_size:,} → {_stream_batch:,} "
+                    f"(bulk loader 최적화)")
+            self._log("info",
+                f"  [{table}] 스트리밍 모드 활성 — 서버 사이드 커서로 단일 SELECT 스트리밍 "
+                f"(OFFSET 우회, O(N) 선형)")
+            rows_inserted_total = self._migrate_table_streaming(
+                src_conn=src_conn, tgt_conn=tgt_conn, table=table,
+                col_names=col_names, select_expr=_select_expr,
+                batch_size=_stream_batch,
+                bulk_loader=_bulk_loader, insert_sql=insert_sql,
+                tgt_is_mssql=tgt_is_mssql, start_t=start_t, row_count=row_count,
+            )
+            done = rows_inserted_total
+            # 스트리밍 모드는 자체 while 루프 내부에서 rows_tgt/progress 를 반영했음
+            # 테이블 정리로 넘어감
+            if tgt_is_mssql and has_identity:
+                try: tgt_cur.execute(f"SET IDENTITY_INSERT [{table}] OFF")
+                except: pass
+            try: _bulk_loader.close()
+            except: pass
+            return done
+
+        # v10 #8: MSSQL 소스 — pyodbc cursor.arraysize 튜닝
+        # ────────────────────────────────────────────────────────────────
+        # pyodbc 기본 arraysize 는 1 (DB-API 표준). fetchall() 이 내부적으로
+        # arraysize 단위로 ODBC SQLFetch 를 호출하므로, 5000행 배치 SELECT 시
+        # 사실상 5000번의 드라이버 왕복이 발생할 수 있음.
+        # arraysize 를 배치 크기만큼 올려서 왕복 감소 → SELECT 시간 단축.
+        #
+        # 메모리 영향:
+        #   arraysize × 평균_행_크기 만큼 pyodbc 내부 버퍼 할당
+        #   5000행 × 500byte = 2.5MB (안전)
+        #   5000행 × 75KB(대용량 note)  = 375MB (위험) — 단, note 대부분 NULL 이므로 실제는 훨씬 적음
+        #
+        # 적용 조건: MSSQL 소스만 (pymysql 은 pyodbc 와 메커니즘 다름)
+        if src_is_mssql:
+            try:
+                _prev_arraysize = src_cur.arraysize
+                src_cur.arraysize = batch_size
+                self._log("debug",
+                    f"  [{table}] pyodbc arraysize: {_prev_arraysize} → {batch_size:,}")
+            except Exception as _ae:
+                self._log("warn", f"  [{table}] arraysize 설정 실패 (무시): {_ae}")
+
+        # ────────────────────────────────────────────────────────────────
+        # v10 #9: 청크 분할 병렬 이관 판정
+        # ────────────────────────────────────────────────────────────────
+        # 조건 모두 충족 시 청크 병렬 경로로 분기.
+        # 미충족 시 조용히 이하 단일 스레드 keyset 루프로 fallback.
+        #
+        # 판정 조건 (chunk_parallel.decide_chunk_parallel):
+        #   - chunk_parallel_enabled (Job 설정, 기본 True)
+        #   - row_count >= large_table_threshold_rows (기본 100만)
+        #   - 단일 정수 PK (BIGINT/INT/SMALLINT)
+        #   - src/tgt dialect 모두 지원 (MSSQL/MySQL Phase 2 범위)
+        #
+        # 인덱스 지연생성(defer_indexes)은 청크 경로에서만 연동
+        # (단일 스레드 경로는 v10 #9 범위 외 — Phase 3b 에서 검토).
+        _chunk_decision = self._maybe_decide_chunk_parallel(
+            table=table, row_count=row_count,
+            src_db_type=src_db_type, tgt_db_type=tgt_db_type,
+            src_conn=src_conn,
+        )
+        if _chunk_decision.enabled:
+            self._log("info",
+                f"  [{table}] 청크 분할 발동 — {_chunk_decision.reason}")
+            # 인덱스 지연생성 with 블록 안에서 청크 병렬 실행
+            from app.engine.dialects import get_dialect as _get_dialect
+            from app.engine.index_manager import defer_indexes as _defer_indexes
+            _tgt_dialect = _get_dialect(tgt_db_type)
+
+            _defer_enabled = bool(self.job.get("defer_indexes_enabled", True))
+
+            # v11 #1: 실행 모드 결정 — thread (Phase 2) vs process (Phase 3a)
+            # 우선순위:
+            #   1) Job 설정 chunk_execution_mode ('thread' | 'process')
+            #   2) 환경변수 DATABRIDGE_CHUNK_MODE
+            #   3) 기본값 'thread' (안전 — 검증된 경로)
+            import os as _os
+            _chunk_mode = (
+                self.job.get("chunk_execution_mode")
+                or _os.environ.get("DATABRIDGE_CHUNK_MODE", "")
+                or "thread"
+            ).strip().lower()
+            if _chunk_mode not in ("thread", "process"):
+                self._log("warn",
+                    f"  [{table}] 알 수 없는 chunk_execution_mode={_chunk_mode} → 'thread' 로 대체")
+                _chunk_mode = "thread"
+            self._log("info",
+                f"  [{table}] 청크 실행 모드: {_chunk_mode} "
+                f"{'(Phase 3a MP)' if _chunk_mode == 'process' else '(Phase 2 Thread)'}")
+
+            def _invoke_chunk_runner():
+                if _chunk_mode == "process":
+                    return self._run_chunked_migration_mp(
+                        table=table, decision=_chunk_decision,
+                        col_names=col_names, cols=cols,
+                        select_expr=_select_expr, insert_sql=insert_sql,
+                        src_db_type=src_db_type, tgt_db_type=tgt_db_type,
+                        tgt_is_mysql=tgt_is_mysql, tgt_is_mssql=tgt_is_mssql,
+                        has_identity=has_identity,
+                        batch_size=batch_size, row_count=row_count,
+                    )
+                else:
+                    return self._run_chunked_migration(
+                        table=table, decision=_chunk_decision,
+                        col_names=col_names, cols=cols,
+                        select_expr=_select_expr, insert_sql=insert_sql,
+                        src_db_type=src_db_type, tgt_db_type=tgt_db_type,
+                        tgt_is_mysql=tgt_is_mysql, tgt_is_mssql=tgt_is_mssql,
+                        has_identity=has_identity,
+                        batch_size=batch_size, row_count=row_count,
+                    )
+
+            # 예외 발생 시에도 return 경로 보장
+            def _run_with_optional_defer():
+                if _defer_enabled:
+                    with _defer_indexes(tgt_conn, _tgt_dialect, table,
+                                         logger=lambda lv, m: self._log(lv, m)):
+                        return _invoke_chunk_runner()
+                else:
+                    return _invoke_chunk_runner()
+
+            done = _run_with_optional_defer()
+
+            # IDENTITY_INSERT 정리 (MSSQL 타겟)
+            if tgt_is_mssql and has_identity:
+                try: tgt_cur.execute(f"SET IDENTITY_INSERT [{table}] OFF")
+                except: pass
+
+            # bulk_loader 정리 (메인 연결용 루프 진입 안 했으므로 사용 안 된 상태이나 안전 차원)
+            try: _bulk_loader.close()
+            except: pass
+
+            # 병목분석은 청크 병렬 경로에서는 워커별이라 정확한 SELECT/LOAD/CONVERT 분해가
+            # 없음 → 총 소요 시간만 출력
+            _total_t = time.monotonic() - start_t
+            self._log("info",
+                f"  [{table}] 청크 병렬 완료 — 총 {_total_t:.1f}s, "
+                f"{int(done/max(_total_t,0.001)):,} rows/s")
+            return done
+        else:
+            # 디버그 레벨로 단일 스레드 선택 이유 기록 (운영 시 노이즈 방지)
+            self._log("debug",
+                f"  [{table}] 청크 분할 미사용 — {_chunk_decision.reason}")
+
+        # ── 이하 기존 단일 스레드 keyset 루프 (v10 #9 이전과 동일) ──
+
+        while not _paginator.done():
+            if self._stop: break
+            while self._pause: time.sleep(0.3)
+
+            _qb = _paginator.next_query()
+            if _qb is None:
+                break
+
+            if src_is_mysql:
+                # pymysql cursor는 dict/tuple 모두 지원
+                _t0 = time.monotonic()
+                if _qb.params:
+                    src_cur.execute(_qb.sql, _qb.params)
+                else:
+                    src_cur.execute(_qb.sql)
+                rows = src_cur.fetchall()
+                _t_select += time.monotonic() - _t0
+                # 기존 코드는 dict cursor를 쓰고 있었음 → 튜플 변환
+                _t0 = time.monotonic()
+                if rows and isinstance(rows[0], dict):
+                    batch_data = [tuple(r[c] for c in col_names) for r in rows]
+                    # advance에는 인덱스 접근 가능한 형태를 넘겨야 함
+                    _rows_for_advance = batch_data
+                else:
+                    batch_data = [tuple(r) for r in rows]
+                    _rows_for_advance = batch_data
+                _t_convert += time.monotonic() - _t0
+            else:
+                # MSSQL
+                if offset == 0:
+                    self._log("debug", f"  [{table}] 첫 SELECT:\n{_qb.sql[:500]}")
+                _t0 = time.monotonic()
+                if _qb.params:
+                    src_cur.execute(_qb.sql, list(_qb.params))
+                else:
+                    src_cur.execute(_qb.sql)
+                rows = src_cur.fetchall()
+                _t_select += time.monotonic() - _t0
+                _rows_for_advance = rows
+                # MSSQL→MySQL: 컬럼 타입별 값 변환
+                # v10 #6: 컬럼별 변환 함수 사전 컴파일 (CONVERT 병목 개선)
+                #   이전: 매 셀마다 dict lookup + 7개 if 체크 (500만행×21컬럼 = 1억 호출)
+                #   현재: 컬럼 타입은 고정이므로 컬럼별로 변환 함수를 미리 바인딩,
+                #         per-cell 루프는 단순히 converter(val) 만 호출
+                #   로컬 벤치 기준 2배 빠름 (500만행 83s → 43s)
+                _t0 = time.monotonic()
+                if tgt_is_mysql:
+                    # 첫 루프에서 converters 빌드 (이후 이 테이블 이관 끝날 때까지 재사용)
+                    if _converters is None:
+                        _converters = self._build_mysql_converters(cols, col_names)
+                    # per-row: zip 으로 converter 와 value 를 병렬 순회
+                    batch_data = [
+                        tuple(conv(v) for conv, v in zip(_converters, r))
+                        for r in rows
+                    ]
+                else:
+                    batch_data = [tuple(r) for r in rows]
+                _t_convert += time.monotonic() - _t0
+
+            if not rows: break
+
+            rows_inserted = 0
+            try:
+                # v9 패치 #20: 선택된 bulk loader 사용
+                _t0 = time.monotonic()
+                rows_inserted = _bulk_loader.load(batch_data)
+                _t_load += time.monotonic() - _t0
+                if rows_inserted == 0 and batch_data:
+                    rows_inserted = len(batch_data)
+            except Exception as e:
+                err_msg = str(e)[:300]
+                # bulk loader 가 bcp/pymssql 이었고 실패했으면 executemany 로 폴백 재시도
+                if _bulk_loader.name != "executemany":
+                    self._log("warn", f"  [{table}] {_bulk_loader.name} 로더 실패 → executemany 폴백: {err_msg}")
+                    try:
+                        _bulk_loader.close()
+                    except Exception:
+                        pass
+                    from app.engine.bulk_loader import ExecutemanyLoader as _Ex
+                    _bulk_loader = _Ex(
+                        table=table, col_names=col_names, tgt_conn=tgt_conn,
+                        log=lambda lv, m: self._log(lv, m),
+                        insert_sql=insert_sql, tgt_is_mssql=tgt_is_mssql, job_opts=self.job,
+                    )
+                    _bulk_loader.open()
+                    try:
+                        rows_inserted = _bulk_loader.load(batch_data)
+                    except Exception as e2:
+                        err_msg = str(e2)[:300]
+                        rows_inserted = 0
+                        # 아래 건별 재시도 로직 탐
+                        e = e2
+                    else:
+                        # 폴백 성공 — 계속 진행
+                        pass
+
+                if rows_inserted == 0:
+                    # 트리거 관련 오류 → 트리거 비활성화 후 재시도
+                    # 건별 재시도 (트리거는 전역에서 이미 비활성화됨)
+                    self._log("error", f"배치 INSERT 실패 [{table}] offset={offset}: {err_msg}")
+                    if self.job["on_error"] == "abort": raise
+                    # 한 건씩 재시도 — 오류 행만 건너뜀
+                    _row_ok = 0
+                    _row_fail = 0
+                    try:
+                        tgt_conn.rollback()
+                        for _single in batch_data:
+                            try:
+                                tgt_cur.execute(insert_sql, _single)
+                                tgt_conn.commit()
+                                _row_ok += 1
+                            except Exception as _se:
+                                _row_fail += 1
+                                try: tgt_conn.rollback()
+                                except: pass
+                        rows_inserted = _row_ok
+                        self._log("warn", f"  [{table}] 건별 재시도: 성공 {_row_ok:,}건 / 실패 {_row_fail:,}건")
+                    except Exception as _re:
+                        self._log("error", f"  [{table}] 건별 재시도 실패: {_re}")
+                    self.job["rows_error"] += _row_fail
+                    # item_statuses에 오류 누적 기록
+                    prev = self.job["item_statuses"].get(table, {})
+                    prev_err = prev.get("batch_errors") or []
+                    if not any(err_msg[:80] in e for e in prev_err):
+                        prev_err.append(f"offset={offset}: {err_msg}")
+                    self.job["item_statuses"][table] = {
+                        **prev,
+                        "batch_errors": prev_err[-10:],
+                        "batch_error_rows": (prev.get("batch_error_rows") or 0) + len(rows),
+                        "error": f"배치 오류 {len(prev_err)}건, {(prev.get('batch_error_rows') or 0)+len(rows):,}행 실패"
+                    }
+                    try: tgt_conn.rollback()
+                    except: pass
+
+            done   += len(rows)
+            offset += batch_size   # 로그/진행률 표시용 — Keyset에서는 실제 페이징과 무관
+            # 페이지네이터 커서 진행
+            try:
+                _paginator.advance(_rows_for_advance, _col_index_map)
+            except Exception as _pe:
+                # Keyset advance 실패 시 안전하게 루프 종료 (무한루프 방지)
+                self._log("error", f"  [{table}] 페이지네이터 진행 실패, 루프 종료: {_pe}")
+                break
+            self.job["current_table_rows_done"] = done
+
+            # ── Resume용 체크포인트 저장 ────────────────────
+            # 배치가 완료된 시점에 현재 paginator 위치를 item_statuses에 기록.
+            # 잡이 중단되면 이 값으로 재개 가능.
+            # 매 배치마다 저장하지 않고 10배치마다 저장 (I/O 절약).
+            if (done // batch_size) % 10 == 0:
+                try:
+                    _cp = _paginator.checkpoint()
+                    _st_cp = self.job["item_statuses"].get(table, {})
+                    _st_cp["checkpoint"] = {
+                        "strategy": _cp.strategy,
+                        "last_key": list(_cp.last_key) if _cp.last_key else None,
+                        "offset":   _cp.offset,
+                        "rows_done": _cp.rows_done,
+                    }
+                    self.job["item_statuses"][table] = _st_cp
+                except Exception:
+                    pass  # 체크포인트 실패해도 이관은 계속
+            # 소스/타겟 건수 분리 추적 (실제 INSERT된 건수만 누적)
+            st = self.job["item_statuses"].get(table, {})
+            self.job["item_statuses"][table] = {
+                **st,
+                "rows_src": done,
+                "rows_tgt": st.get("rows_tgt", 0) + rows_inserted,
+                "rows_total": row_count,       # v9 패치 #24: 개별 테이블 진행률용
+                "rows_tgt_final": False,  # 아직 진행중
+            }
+            elapsed = time.monotonic() - start_t
+            # v9 패치 #24: 병렬 환경에서는 전체 속도 = 누적 rows / 엔진 총 경과시간
+            _engine_elapsed = time.monotonic() - getattr(self, "_engine_start_t", start_t)
+            if _engine_elapsed > 0:
+                _total_done_all = (self.job.get("rows_processed", 0) + done)
+                self.job["speed"] = int(_total_done_all / _engine_elapsed)
+            # 테이블 개별 속도도 item_statuses 에 기록
+            _tbl_speed = int(done / elapsed) if elapsed > 0 else 0
+            if table in self.job["item_statuses"]:
+                self.job["item_statuses"][table]["speed"] = _tbl_speed
+            # 10% 단위로 진행 로그
+            if row_count and done % max(1, (row_count // 10)) < batch_size:
+                pct = min(100, round(done / row_count * 100))
+                self._log("debug", f"  [{table}] {pct}% — {done:,}/{row_count:,} rows ({_tbl_speed:,} rows/s)")
+            # 진행률 — v10 #5: 스트리밍과 동일한 3단 fallback
+            rows_total = self.job.get("rows_total", 0)
+            if rows_total > 0:
+                self.job["progress"] = min(99.9, round(
+                    (self.job["rows_processed"] + done) / rows_total * 100, 1))
+            elif row_count and row_count > 0:
+                # 단일 테이블 이관 또는 rows_total 추정 실패 시
+                self.job["progress"] = min(99.9, round(done / row_count * 100, 1))
+            else:
+                # 최후 fallback: 테이블 단위
+                t_done  = self.job.get("table_done", 0)
+                t_total = max(self.job.get("table_total", 1), 1)
+                self.job["progress"] = min(99.9, round(t_done / t_total * 100, 1))
+
+        if tgt_is_mssql and has_identity:
+            try: tgt_cur.execute(f"SET IDENTITY_INSERT [{table}] OFF")
+            except: pass
+
+        # v9 패치 #20: bulk loader 정리
+        try:
+            _bulk_loader.close()
+        except Exception:
+            pass
+
+        # v9 패치 #29: 병목 분석 로그 (테이블 완료 시점)
+        _total_t = time.monotonic() - start_t
+        if _total_t > 0 and done > 0:
+            _other = max(0.0, _total_t - _t_select - _t_load - _t_convert)
+            _pct = lambda x: (x / _total_t * 100) if _total_t > 0 else 0
+            self._log("info",
+                f"  [{table}] 병목분석: 총 {_total_t:.1f}s · "
+                f"SELECT {_t_select:.1f}s ({_pct(_t_select):.0f}%) · "
+                f"LOAD {_t_load:.1f}s ({_pct(_t_load):.0f}%) · "
+                f"CONVERT {_t_convert:.1f}s ({_pct(_t_convert):.0f}%) · "
+                f"기타 {_other:.1f}s ({_pct(_other):.0f}%) · "
+                f"loader={_bulk_loader.name}")
+
+        return done
+
+
+    def _create_mssql_table(self, tgt_conn, table: str, cols: list):
+        """
+        MySQL 컬럼 정보 → MSSQL CREATE TABLE
+        핵심 처리:
+        - unsigned 타입: 범위 초과 방지를 위해 한 단계 위 타입으로 변환
+          (tinyint unsigned→SMALLINT, smallint unsigned→INT,
+           mediumint unsigned→INT, int unsigned→BIGINT)
+        - 복합 PK: 여러 PK 컬럼을 CONSTRAINT로 묶어서 처리
+        - AUTO_INCREMENT → IDENTITY(1,1)
+        - timestamp → DATETIME2(6) DEFAULT GETDATE()
+        """
+        # ── 기본 타입 매핑 ──────────────────────────────────────
+        TYPE_MAP = {
+            # 정수
+            "int":              "INT",
+            "bigint":           "BIGINT",
+            "smallint":         "SMALLINT",
+            "tinyint":          "TINYINT",
+            "mediumint":        "INT",
+            "year":             "SMALLINT",
+            # unsigned → 한 단계 위 타입 (범위 초과 방지)
+            "tinyint unsigned": "SMALLINT",
+            "smallint unsigned":"INT",
+            "mediumint unsigned":"INT",
+            "int unsigned":     "BIGINT",
+            "bigint unsigned":  "DECIMAL(20,0)",
+            # 실수
+            "float":            "FLOAT",
+            "double":           "FLOAT",
+            "decimal":          "DECIMAL",   # 별도 처리
+            "numeric":          "DECIMAL",
+            # 문자
+            "varchar":          "NVARCHAR",  # 별도 처리
+            "char":             "NCHAR",
+            "nvarchar":         "NVARCHAR",
+            "nchar":            "NCHAR",
+            "text":             "NVARCHAR(MAX)",
+            "tinytext":         "NVARCHAR(500)",
+            "mediumtext":       "NVARCHAR(MAX)",
+            "longtext":         "NVARCHAR(MAX)",
+            # 날짜
+            "datetime":         "DATETIME2(6)",
+            "date":             "DATE",
+            "time":             "TIME",
+            "timestamp":        "DATETIME2(6)",
+            # 바이너리
+            "blob":             "VARBINARY(MAX)",
+            "tinyblob":         "VARBINARY(MAX)",
+            "mediumblob":       "VARBINARY(MAX)",
+            "longblob":         "VARBINARY(MAX)",
+            "binary":           "BINARY",
+            "varbinary":        "VARBINARY(MAX)",
+            # 기타
+            "bit":              "BIT",
+            "bool":             "BIT",
+            "boolean":          "BIT",
+            "enum":             "NVARCHAR(255)",
+            "set":              "NVARCHAR(500)",
+            "json":             "NVARCHAR(MAX)",
+        }
+
+        col_defs = []
+        pk_cols  = []   # 복합 PK를 위해 리스트로 수집
+
+        for c in cols:
+            raw_full = (c.get("DATA_TYPE") or "varchar").lower().strip()
+            # COLUMN_TYPE 에서 unsigned 여부 감지 (DATA_TYPE 은 base type만 반환할 수도 있음)
+            col_type_full = (c.get("COLUMN_TYPE") or raw_full).lower()
+            is_unsigned = "unsigned" in col_type_full
+
+            # unsigned 포함된 경우 매핑 키 우선 시도
+            if is_unsigned:
+                raw_key = raw_full + " unsigned"
+            else:
+                raw_key = raw_full
+
+            extra    = (c.get("EXTRA") or "").lower()
+            is_pk    = (c.get("COLUMN_KEY","") == "PRI")
+            is_ai    = "auto_increment" in extra
+            nullable = c.get("IS_NULLABLE","YES") == "YES"
+            null_str = "NULL" if nullable else "NOT NULL"
+            cname    = c["COLUMN_NAME"]
+
+            # ── IDENTITY 컬럼 ──────────────────────────────────
+            if is_ai:
+                col_defs.append(f"  [{cname}] INT IDENTITY(1,1) NOT NULL")
+                if is_pk:
+                    pk_cols.append(cname)
+                continue
+
+            # ── 타입 결정 ──────────────────────────────────────
+            # 1) decimal / numeric
+            if raw_full in ("decimal","numeric"):
+                p = int(c.get("NUMERIC_PRECISION") or 18)
+                s = int(c.get("NUMERIC_SCALE") or 4)
+                mtype = f"DECIMAL({p},{s})"
+
+            # 2) tinyint(1) → BIT  /  tinyint → TINYINT or SMALLINT(unsigned)
+            elif raw_full == "tinyint":
+                if "(1)" in col_type_full:
+                    mtype = "BIT"
+                elif is_unsigned:
+                    mtype = "SMALLINT"
+                else:
+                    mtype = "TINYINT"
+
+            # 3) varchar / char
+            elif raw_full in ("varchar","char","nvarchar","nchar"):
+                ln  = c.get("CHARACTER_MAXIMUM_LENGTH")
+                base= {"varchar":"NVARCHAR","char":"NCHAR",
+                       "nvarchar":"NVARCHAR","nchar":"NCHAR"}.get(raw_full,"NVARCHAR")
+                if ln and int(ln) > 0:
+                    mtype = f"{base}({min(int(ln),4000)})"
+                else:
+                    mtype = f"{base}(255)"
+
+            # 4) varbinary / binary
+            elif raw_full in ("varbinary","binary"):
+                ln = c.get("CHARACTER_MAXIMUM_LENGTH")
+                if ln and int(ln) > 0:
+                    mtype = f"VARBINARY({min(int(ln),8000)})"
+                else:
+                    mtype = "VARBINARY(MAX)"
+
+            # 5) timestamp → DATETIME2 + DEFAULT
+            elif raw_full == "timestamp":
+                mtype = "DATETIME2(6)"
+                default_val = c.get("COLUMN_DEFAULT","")
+                if default_val and "CURRENT_TIMESTAMP" in str(default_val).upper():
+                    col_defs.append(f"  [{cname}] {mtype} {null_str} DEFAULT GETDATE()")
+                    if is_pk:
+                        pk_cols.append(cname)
+                    continue
+
+            # 6) 나머지 unsigned / 일반
+            else:
+                mtype = TYPE_MAP.get(raw_key) or TYPE_MAP.get(raw_full, "NVARCHAR(500)")
+
+            if is_pk:
+                pk_cols.append(cname)
+
+            # v9 패치 #14: 모든 문자열 컬럼에 Latin1_General_BIN2 콜레이션 강제.
+            # 목적: MySQL utf8mb4_0900_ai_ci (대소문자/악센트 무시) 로 저장된 값이
+            #       MSSQL 에서도 "바이트 완전 일치" 로 구분되도록.
+            # 효과: 'ABC' vs 'abc' 가 서로 다른 행으로 보존됨 → 원본 100% 복제.
+            # 대상: NVARCHAR, NCHAR, VARCHAR, CHAR (MAX 포함).
+            # 제외: VARBINARY, 숫자, 날짜 등 비문자 타입.
+            _mupper = mtype.upper()
+            _is_text = (
+                _mupper.startswith("NVARCHAR") or _mupper.startswith("NCHAR") or
+                _mupper.startswith("VARCHAR")  or _mupper.startswith("CHAR")
+            ) and not _mupper.startswith("VARBINARY")
+            if _is_text and "COLLATE" not in _mupper:
+                mtype = f"{mtype} COLLATE Latin1_General_BIN2"
+
+            col_defs.append(f"  [{cname}] {mtype} {null_str}")
+
+        # ── PRIMARY KEY 제약 (단일 / 복합 모두 처리) ───────────
+        if pk_cols:
+            pk_cols_str = ", ".join([f"[{c}]" for c in pk_cols])
+            col_defs.append(f"  CONSTRAINT [PK_{table}] PRIMARY KEY ({pk_cols_str})")
+
+        if not col_defs:
+            self._log("warn", f"테이블 [{table}] 컬럼 정의 없음 — 생성 스킵")
+            return
+
+        ddl = (
+            f"IF OBJECT_ID(N'[dbo].[{table}]', N'U') IS NULL\n"
+            f"CREATE TABLE [dbo].[{table}] (\n"
+            + ",\n".join(col_defs)
+            + "\n)"
+        )
+
+        self._log("info", f"테이블 [{table}] DDL:\n{ddl}")
+        try:
+            cur = tgt_conn.cursor()
+            cur.execute(ddl)
+            tgt_conn.commit()
+            self._log("info", f"테이블 [{table}] 생성 완료 ✓")
+        except Exception as e:
+            self._log("error", f"테이블 [{table}] 생성 실패: {e}\nDDL=\n{ddl}")
+            raise
+
+    def stop(self):
+        # v9 패치 #33: 중단 호출 로그 — 실제로 호출됐는지 추적
+        self._stop = True
+        try:
+            self._log("warn", "⚠ 이관 중단 요청 — 현재 작업 완료 후 종료")
+        except Exception:
+            pass
+    def pause(self): self._pause = True
+    def resume(self):self._pause = False
+
+    # ─────────────────────────────────────────────────────────
+    # v9 패치 #21: 스트리밍 이관 (PK 없는 대용량 MySQL 테이블 전용)
+    # ─────────────────────────────────────────────────────────
+    def _migrate_table_streaming(
+        self, *, src_conn, tgt_conn, table, col_names,
+        select_expr, batch_size, bulk_loader, insert_sql,
+        tgt_is_mssql, start_t, row_count,
+    ) -> int:
+        """
+        서버 사이드 커서 기반 단일 SELECT 스트리밍 + 배치 단위로 bulk loader 호출.
+
+        OFFSET pagination 의 O(N²) 문제 회피 → O(N) 선형 시간.
+        pymysql 의 SSCursor(SSDictCursor) 를 써서 서버에서 한 행씩 받아옴.
+        메모리 사용량 일정 (배치 크기 × 행 크기 만큼만).
+        """
+        import pymysql.cursors as _pc
+        import time as _t
+
+        # v9 패치 #30: 스트리밍 경로 병목 측정
+        _t_fetch = 0.0   # MySQL 에서 행 읽기 (SSCursor 반복)
+        _t_load  = 0.0   # bulk_loader.load
+
+        # 별도 커서 — 기존 src_conn 은 dict 커서일 수 있어서 SS 커서로 새로 연다.
+        # 단, 같은 연결에서 두 커서를 쓰면 pymysql 이 MixedQueries 오류 낼 수 있어
+        # 안전하게 별도 연결 생성.
+        from app.core.db_conn import make_mysql_conn
+        _stream_conn = make_mysql_conn(
+            host=self.job.get("src_host",""),
+            port=int(self.job.get("src_port") or 3306),
+            username=self.job.get("src_username",""),
+            password=self.job.get("src_password",""),
+            database=self.job.get("src_database",""),
+            timeout=int(self.job.get("connect_timeout") or 60),
+        )
+        # v9 패치 #31c: MySQL 세션 튜닝 — MySQL 8 에서 net_buffer_length 가 read-only 라
+        # 세션 수준 SET 불가. 대신 pymysql 연결 옵션의 read_buffer_size 가 기본 16KB → max_allowed_packet 근처로
+        # 키우려면 my.cnf 서버 설정 필요. 여기서는 조용히 스킵.
+        # (여전히 측정용 FETCH 시간은 찍히므로 병목 식별은 가능)
+        pass
+        try:
+            _ss_cur = _stream_conn.cursor(_pc.SSCursor)
+            # 백틱 인용 — 컬럼명에 특수문자 대비
+            _cols_q = ", ".join([f"`{c}`" for c in col_names])
+            _tbl_q  = f"`{table}`"
+            # select_expr 대신 안전하게 컬럼명 그대로. 변환이 필요한 케이스는 위에서
+            # 이미 _cast 로 처리됨 → 현재 MySQL 소스는 대부분 그대로 읽기 가능.
+            _sql = f"SELECT {_cols_q} FROM {_tbl_q}"
+            self._log("debug", f"  [{table}] 스트리밍 SQL: {_sql}")
+            _ss_cur.execute(_sql)
+        except Exception as e:
+            self._log("error", f"  [{table}] 스트리밍 SELECT 실패: {e}")
+            try: _stream_conn.close()
+            except: pass
+            raise
+
+        done = 0
+        batch = []
+        rows_error = 0
+
+        def _flush():
+            nonlocal batch, done, rows_error, _t_load
+            if not batch:
+                return
+            try:
+                _t0 = _t.monotonic()
+                inserted = bulk_loader.load(batch)
+                _t_load += _t.monotonic() - _t0
+                done += inserted
+                # 진행 상태 반영
+                st = self.job["item_statuses"].get(table, {})
+                self.job["item_statuses"][table] = {
+                    **st,
+                    "rows_src": done,
+                    "rows_tgt": st.get("rows_tgt", 0) + inserted,
+                    "rows_total": row_count,  # v9 패치 #24
+                    "rows_tgt_final": False,
+                }
+                self.job["current_table_rows_done"] = done
+                elapsed = _t.monotonic() - start_t
+                # v9 패치 #24: 전체 경과시간 기준 속도
+                _engine_elapsed = _t.monotonic() - getattr(self, "_engine_start_t", start_t)
+                if _engine_elapsed > 0:
+                    _total_done_all = (self.job.get("rows_processed", 0) + done)
+                    self.job["speed"] = int(_total_done_all / _engine_elapsed)
+                # 테이블 개별 속도
+                _tbl_speed = int(done / elapsed) if elapsed > 0 else 0
+                if table in self.job["item_statuses"]:
+                    self.job["item_statuses"][table]["speed"] = _tbl_speed
+                # 진행률 — v10 #5: 3단 fallback
+                # 1) rows_total (전체 Job 기준) 있으면 그것 사용
+                # 2) 없으면 current_table_rows_total (단일 테이블 기준) 사용
+                # 3) 그것도 없으면 table_done/table_total 사용 (거친 추정)
+                rows_total = self.job.get("rows_total", 0)
+                if rows_total > 0:
+                    self.job["progress"] = min(99.9, round(
+                        (self.job["rows_processed"] + done) / rows_total * 100, 1))
+                elif row_count and row_count > 0:
+                    # 단일 테이블 이관 또는 rows_total 추정 실패 시
+                    # → 현재 테이블의 done/row_count 로 직접 계산
+                    self.job["progress"] = min(99.9, round(done / row_count * 100, 1))
+                else:
+                    # 최후 fallback: 테이블 단위
+                    t_done  = self.job.get("table_done", 0)
+                    t_total = max(self.job.get("table_total", 1), 1)
+                    self.job["progress"] = min(99.9, round(t_done / t_total * 100, 1))
+                # 10% 단위 진행 로그
+                if row_count and done % max(1, (row_count // 10)) < batch_size:
+                    pct = min(100, round(done / row_count * 100))
+                    self._log("info",
+                        f"  [{table}] {pct}% — {done:,}/{row_count:,} rows ({_tbl_speed:,} rows/s, stream)")
+            except Exception as ee:
+                rows_error += len(batch)
+                self.job["rows_error"] = (self.job.get("rows_error") or 0) + len(batch)
+                self._log("error",
+                    f"  [{table}] 스트림 배치 INSERT 실패 ({len(batch):,}행): {str(ee)[:200]}")
+                if self.job.get("on_error") == "abort":
+                    raise
+            finally:
+                batch = []
+
+        try:
+            _t_last_fetch = _t.monotonic()
+            # v9 패치 #31: fetchmany 청크 사이즈
+            # SSCursor 의 기본 iteration 은 한 행씩 — Python 루프 오버헤드 큼.
+            # fetchmany(10000) 로 한 번에 여러 행 가져와 성능 향상.
+            _fetch_chunk = 10000
+            while True:
+                chunk = _ss_cur.fetchmany(_fetch_chunk)
+                _now = _t.monotonic()
+                _t_fetch += _now - _t_last_fetch
+                if not chunk:
+                    break
+                if self._stop:
+                    break
+                while self._pause:
+                    _t.sleep(0.3)
+                for row in chunk:
+                    batch.append(tuple(row))
+                    if len(batch) >= batch_size:
+                        _flush()
+                _t_last_fetch = _t.monotonic()
+            # 잔여
+            if batch:
+                _flush()
+        finally:
+            try: _ss_cur.close()
+            except: pass
+            try: _stream_conn.close()
+            except: pass
+
+        # v9 패치 #30: 스트리밍 경로 병목 분석 로그
+        _total_t = _t.monotonic() - start_t
+        if _total_t > 0 and done > 0:
+            _other = max(0.0, _total_t - _t_fetch - _t_load)
+            _pct = lambda x: (x / _total_t * 100) if _total_t > 0 else 0
+            self._log("info",
+                f"  [{table}] 병목분석(stream): 총 {_total_t:.1f}s · "
+                f"FETCH {_t_fetch:.1f}s ({_pct(_t_fetch):.0f}%) · "
+                f"LOAD {_t_load:.1f}s ({_pct(_t_load):.0f}%) · "
+                f"기타 {_other:.1f}s ({_pct(_other):.0f}%) · "
+                f"loader={bulk_loader.name}")
+
+        self._log("info",
+            f"  [{table}] 스트리밍 완료 — {done:,}/{row_count:,} rows "
+            f"({rows_error:,} 실패)")
+        # v9 패치 #24: rows_processed 누적은 상위 _run_one 에서 Lock으로 처리 — 여기서는 증가 안 함
+        return done
+
+    def _log(self, level: str, msg: str):
+        now = datetime.now(_KST).strftime("%H:%M:%S")
+        entry = {"time": now, "level": level,
+                 "tag": f"Job#{self.jid[:6]}", "message": msg}
+        # 외부 수신자(라우터 쪽 _job_logs)에 전달
+        if self._log_sink is not None:
+            try:
+                self._log_sink(level, msg, entry)
+            except Exception:
+                pass  # 싱크 실패가 엔진 멈추게 하지 않도록
+        # 파일/콘솔 로거 출력
+        log_fn = {"info": logger.info, "warn": logger.warning,
+                  "error": logger.error, "debug": logger.debug}.get(level, logger.info)
+        log_fn("[Job#%s] %s", self.jid[:6], msg)
+
+

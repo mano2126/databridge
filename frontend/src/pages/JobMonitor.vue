@@ -426,36 +426,58 @@
           <div class="kpi-sub">{{ job.status==='running'?'실시간':'—' }}</div>
         </div>
 
-        <div class="kpi-card" :class="{'kpi-error': hasAnyError}">
+        <!-- v95_p107 hotfix_022: 오류 카드 → 상태 분포 카드로 본질 처방
+             본부장님 본질: "AI 로 성공 된게 빨간 색이라 헷갈려"
+             처방: 5단계 의미 상태 분포로 진짜 메시지 전달 -->
+        <div class="kpi-card" :class="{'kpi-error': stateSummary[CS_STATE.FAILED] > 0, 'kpi-review': stateSummary._needsReview > 0 && stateSummary[CS_STATE.FAILED] === 0}">
           <div class="kpi-header">
-            <span class="kpi-label">오류</span>
+            <span class="kpi-label">상태 분포</span>
           </div>
-          <!-- v90.66: 행 단위 vs 객체 단위 구분 명확화 -->
-          <!-- 큰 숫자는 더 의미있는 쪽 (객체 오류가 있으면 객체 수, 없으면 행 오류) -->
-          <div v-if="errItems.length > 0" class="kpi-value" :class="{'err-val': hasAnyError}">
-            {{ errItems.length }}<span class="kpi-unit"> 항목</span>
+          <!-- 가장 의미있는 숫자: 완전 실패 우선, 그 다음 KB 정화 필요 -->
+          <div v-if="stateSummary[CS_STATE.FAILED] > 0" class="kpi-value err-val">
+            {{ stateSummary[CS_STATE.FAILED] }}<span class="kpi-unit"> 실패</span>
           </div>
-          <div v-else class="kpi-value" :class="{'err-val': hasAnyError}">
-            {{ fmtNum(job.rows_error||0) }}<span class="kpi-unit"> 행</span>
+          <div v-else-if="stateSummary._needsReview > 0" class="kpi-value review-val">
+            {{ stateSummary._needsReview }}<span class="kpi-unit"> 정화 필요</span>
           </div>
-          <div class="kpi-sub">
+          <div v-else class="kpi-value ok-val">
+            ✓<span class="kpi-unit"> 모두 정상</span>
+          </div>
+          <!-- 5단계 미니 분포 -->
+          <div class="kpi-sub state-mini">
+            <span v-if="stateSummary[CS_STATE.KB_HIT] > 0" class="csm csm-kb-hit"
+                  :title="'KB 즉시 매칭 — AI 호출 0회'">
+              <span class="csm-dot"></span>KB {{ stateSummary[CS_STATE.KB_HIT] }}
+            </span>
+            <span v-if="stateSummary[CS_STATE.AI_LEARNED] > 0" class="csm csm-ai-learned"
+                  :title="'KB 미스 → AI 신규 학습 → KB 등록'">
+              <span class="csm-dot"></span>학습 {{ stateSummary[CS_STATE.AI_LEARNED] }}
+            </span>
+            <span v-if="stateSummary[CS_STATE.KB_BROKEN_RECOVERED] > 0" class="csm csm-kb-broken"
+                  :title="'KB 깨짐 → AI 복구. 결과 OK, KB 정화 필요'">
+              <span class="csm-dot"></span>재시도 {{ stateSummary[CS_STATE.KB_BROKEN_RECOVERED] }}
+            </span>
+            <span v-if="stateSummary[CS_STATE.COMPLETED] > 0" class="csm csm-completed"
+                  :title="'정상 완료 (테이블 등)'">
+              <span class="csm-dot"></span>완료 {{ stateSummary[CS_STATE.COMPLETED] }}
+            </span>
+            <span v-if="stateSummary[CS_STATE.FAILED] > 0" class="csm csm-failed"
+                  :title="'완전 실패 — 본부장님 개입 필요'">
+              <span class="csm-dot"></span>실패 {{ stateSummary[CS_STATE.FAILED] }}
+            </span>
+          </div>
+          <!-- 정화 필요 시 안내 + 상세 -->
+          <div v-if="stateSummary._needsReview > 0 || stateSummary[CS_STATE.FAILED] > 0" class="kpi-sub-extra">
             <button v-if="errItems.length > 0" class="err-open-btn" @click="openErrModal">
               <span class="err-btn-dot"></span>
               <span class="err-btn-text">
-                <!-- v90.66: 보조 정보로 행 오류도 같이 표시 (있을 때만) -->
-                <template v-if="(job.rows_error||0) > 0">
-                  객체 {{ errItems.length }} · 행 {{ fmtNum(job.rows_error) }}
-                </template>
-                <template v-else>{{ errItems.length }}개 객체 실패</template>
+                <template v-if="stateSummary[CS_STATE.FAILED] > 0">실패 항목 상세</template>
+                <template v-else>KB 정화 후보 상세</template>
               </span>
-              <span class="err-btn-divider"></span>
-              <span class="err-btn-action">상세 보기</span>
               <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" style="width:8px;height:8px;opacity:.6">
                 <polyline points="1.5,3 4,5.5 6.5,3"/>
               </svg>
             </button>
-            <span v-else-if="(job.rows_error||0) > 0">테이블 이관 행 오류</span>
-            <span v-else>정상</span>
           </div>
         </div>
       </div>
@@ -654,7 +676,10 @@
               <span v-else class="muted">—</span>
             </span>
             <span class="ic-stat">
-              <span class="stat-pill" :class="[item.status, {'via-ai': item.via_ai_remig && item.status==='done', 'recovered': item.had_error && item.status==='done' && !item.via_ai_remig}]">
+              <!-- v95_p107 hotfix_022: 5단계 의미 상태 클래스 (cs-*) 추가, 짧은 라벨 -->
+              <span class="stat-pill"
+                    :class="[item.status, getItemMeta(item).cssClass, {'via-ai': item.via_ai_remig && item.status==='done', 'recovered': item.had_error && item.status==='done' && !item.via_ai_remig}]"
+                    :title="describePath(item) || statusLabel(item.status)">
                 <svg v-if="item.status==='running'" class="spin" viewBox="0 0 12 12">
                   <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="20" stroke-dashoffset="7"/>
                 </svg>
@@ -672,15 +697,8 @@
                 <svg v-else-if="item.status==='done'" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2,6 4.5,9 10,3"/></svg>
                 <svg v-else-if="item.status==='error'" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg>
                 <svg v-else viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="6" r="2.5"/></svg>
-                <!-- v90.67: 라벨 — AI 재이관 / 재시도 후 성공 / 일반 완료 구분 -->
-                <!-- v95_p107 hotfix_013: conversion_path 가 있으면 상세 라벨 우선 표시 -->
-                <span v-if="conversionPathLbl(item.conversion_path)"
-                      :title="`변환 경로: ${(item.conversion_path||[]).join(' → ')} (${item.attempts || 1}회 시도)`">
-                  {{ conversionPathLbl(item.conversion_path) }}
-                </span>
-                <span v-else-if="item.status==='done' && item.via_ai_remig" :title="`AI 재이관으로 성공 (${item.attempts || 2}회 시도)`">AI 재이관 성공</span>
-                <span v-else-if="item.status==='done' && item.had_error" :title="`재시도 후 성공 (${item.attempts || 2}회 시도)`">재시도 성공</span>
-                <span v-else>{{ statusLabel(item.status) }}</span>
+                <!-- v95_p107 hotfix_022: 5단계 의미 상태의 shortLabel 우선 표시 -->
+                <span>{{ shortBadgeLabel(item) }}</span>
               </span>
             </span>
             <!-- 오류 상세 + 재이관 버튼 -->
@@ -1179,6 +1197,16 @@
 
 <script setup>
 import { fmtDate, fmtDateShort, fmtElapsed, fmtTime, parseDate, toMs } from '@/utils/dateUtils.js'
+// v95_p107 hotfix_022 (2026-05-11 본부장님 본질 처방):
+//   상태 배지/통계가 진짜 의미를 드러내도록 5단계 의미 상태로 통합
+import {
+  STATE as CS_STATE,
+  deriveConversionState,
+  getItemMeta,
+  summarizeStates,
+  describePath,
+  shortBadgeLabel,
+} from '@/utils/conversionStatus.js'
 defineOptions({ name: 'JobMonitor' })
 import { ref, computed, onMounted, onActivated, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -1309,9 +1337,18 @@ let autoTimer = null
 const etaFixedMs = ref(0)   // 예상 완료 Unix ms
 const etaJobId   = ref('')  // 추적 중인 Job ID
 
+// v95_p107 hotfix_022 (2026-05-11): 필터에 5단계 의미 상태 추가
+//   - 기존 'error' (status==='error') 와 'cs-broken' (KB 깨짐 재시도) 명확 분리
+//   - 본부장님: "AI 로 성공 된게 빨간 색이라 헷갈려" 정면 처방
 const filters = [
-  {v:'all',l:'전체'},{v:'running',l:'진행중'},{v:'done',l:'완료'},
-  {v:'pending',l:'대기'},{v:'error',l:'오류'},{v:'mismatch',l:'불일치'},
+  {v:'all',      l:'전체'},
+  {v:'running',  l:'진행중'},
+  {v:'done',     l:'완료'},
+  {v:'pending',  l:'대기'},
+  {v:'error',    l:'실패'},        // 진짜 실패만 — status==='error'
+  {v:'cs-broken',l:'재시도 성공'}, // KB 정화 후보 — 결과는 OK 지만 본부장님 주목
+  {v:'cs-kb-hit',l:'KB 매칭'},     // 본부장님 KB 자산 진가
+  {v:'mismatch', l:'불일치'},
 ]
 const types = [
   {v:'all',l:'전체'},{v:'table',l:'테이블'},{v:'view',l:'뷰'},
@@ -1926,8 +1963,12 @@ const allItems = computed(()=>{
 const filteredItems = computed(()=>{
   let list = allItems.value
   if(search.value) list = list.filter(i=>i.name.toLowerCase().includes(search.value.toLowerCase()))
-  if(activeFilter.value==='mismatch') list = list.filter(isMismatch)
-  else if(activeFilter.value!=='all') list = list.filter(i=>i.status===activeFilter.value)
+  // v95_p107 hotfix_022: 5단계 의미 상태 필터 인식
+  if(activeFilter.value==='mismatch')        list = list.filter(isMismatch)
+  else if(activeFilter.value==='cs-broken')  list = list.filter(i => deriveConversionState(i) === CS_STATE.KB_BROKEN_RECOVERED)
+  else if(activeFilter.value==='cs-kb-hit')  list = list.filter(i => deriveConversionState(i) === CS_STATE.KB_HIT)
+  else if(activeFilter.value==='cs-learned') list = list.filter(i => deriveConversionState(i) === CS_STATE.AI_LEARNED)
+  else if(activeFilter.value!=='all')        list = list.filter(i=>i.status===activeFilter.value)
   if(activeType.value!=='all')   list = list.filter(i=>i.type===activeType.value)
   const order={running:0,error:1,done:2,pending:3}
   // 컬럼 정렬
@@ -2046,7 +2087,11 @@ function isMismatch(i) {
 }
 function filterCount(v) {
   if (v === 'all') return allItems.value.length
-  if (v === 'mismatch') return allItems.value.filter(isMismatch).length
+  if (v === 'mismatch')  return allItems.value.filter(isMismatch).length
+  // v95_p107 hotfix_022: 의미 상태 필터 카운트
+  if (v === 'cs-broken') return allItems.value.filter(i => deriveConversionState(i) === CS_STATE.KB_BROKEN_RECOVERED).length
+  if (v === 'cs-kb-hit') return allItems.value.filter(i => deriveConversionState(i) === CS_STATE.KB_HIT).length
+  if (v === 'cs-learned')return allItems.value.filter(i => deriveConversionState(i) === CS_STATE.AI_LEARNED).length
   return allItems.value.filter(i => i.status === v).length
 }
 function countByStatus(s){ return allItems.value.filter(i=>i.status===s).length }
@@ -2711,6 +2756,11 @@ const hasAnyError = computed(() => {
   // rows_error 숫자가 남아있어도 실제 오류 항목이 없으면 정상 표시
   return errItems.value.length > 0
 })
+
+// ═══ v95_p107 hotfix_022 (2026-05-11 본부장님 본질 처방): 5단계 상태 분포 ═══
+// 본부장님 본질: "AI 로 성공 된게 빨간색이라 헷갈려"
+// 처방: conversion_path 까지 보고 5단계 의미 상태 도출, 진짜 메시지 전달
+const stateSummary = computed(() => summarizeStates(allItems.value))
 
 // ═══ v10: 일괄 재처리 기능 ═══
 const bulkSelectedRetry = ref(new Set())       // 선택한 item name 들
@@ -3865,6 +3915,51 @@ async function doRemig(item) {
 .stat-pill.done.via-ai{background:linear-gradient(135deg,rgba(139,92,246,.12),rgba(168,85,247,.08));color:#6d28d9;border:1px solid rgba(139,92,246,.2)}
 /* v90.67: 1차 실패 → 재시도로 성공 — 청록색 (회복) */
 .stat-pill.done.recovered{background:rgba(20,184,166,.1);color:#0f766e;border:1px solid rgba(20,184,166,.18)}
+
+/* ═══════════════════════════════════════════════════════════════════
+   v95_p107 hotfix_022 (2026-05-11 본부장님 본질 처방):
+   5단계 의미 상태 (cs-*) — conversion_path 기반 진짜 의미 색상
+   기존 .stat-pill.done 보다 우선 (CSS 우선순위 위해 별도 셀렉터 사용)
+   ═══════════════════════════════════════════════════════════════════ */
+/* 🟢 KB 즉시 매칭 — 본부장님 KB 자산 진가 (가장 좋은 상태) */
+.stat-pill.cs-kb-hit{background:rgba(26,127,55,.12);color:#1a7f37;border:1px solid rgba(26,127,55,.30);font-weight:700}
+/* 🔵 AI 신규 학습 — KB 미스 → AI 변환 → KB 등록 (다음에 즉시 매칭됨) */
+.stat-pill.cs-ai-learned{background:rgba(9,105,218,.10);color:#0969da;border:1px solid rgba(9,105,218,.25)}
+/* 🟡 재시도 성공 — KB 깨짐 발견 → AI 복구. 결과 OK, KB 정화 필요 */
+.stat-pill.cs-kb-broken{background:rgba(154,103,0,.10);color:#9a6700;border:1px solid rgba(154,103,0,.30);font-weight:600}
+/* 🟢 정상 완료 (path 없는 단순 완료) */
+.stat-pill.cs-completed{background:rgba(22,163,74,.10);color:#15803d;border:1px solid rgba(22,163,74,.20)}
+/* 🔴 완전 실패 — 본부장님 개입 필요 */
+.stat-pill.cs-failed{background:rgba(207,34,46,.12);color:#cf222e;border:1px solid rgba(207,34,46,.35);font-weight:700}
+/* 🟦 진행중 */
+.stat-pill.cs-running{background:rgba(59,130,246,.10);color:#1d4ed8;animation:pillBlink 1.2s ease-in-out infinite}
+/* ⚪ 대기 */
+.stat-pill.cs-pending{background:var(--border-light);color:var(--text-tertiary)}
+
+/* ═══ KPI 카드 — 상태 분포 미니 표시 ═══ */
+.kpi-card.kpi-review{border-color:rgba(154,103,0,.30);background:rgba(154,103,0,.04)}
+.kpi-value.ok-val{color:#1a7f37}
+.kpi-value.review-val{color:#9a6700}
+.state-mini{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.csm{display:inline-flex;align-items:center;gap:3px;font-size:.66rem;font-weight:600;padding:2px 7px;border-radius:99px;border:1px solid transparent;cursor:help}
+.csm-dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.csm-kb-hit{background:rgba(26,127,55,.10);color:#1a7f37;border-color:rgba(26,127,55,.20)}
+.csm-kb-hit .csm-dot{background:#1a7f37}
+.csm-ai-learned{background:rgba(9,105,218,.10);color:#0969da;border-color:rgba(9,105,218,.20)}
+.csm-ai-learned .csm-dot{background:#0969da}
+.csm-kb-broken{background:rgba(154,103,0,.10);color:#9a6700;border-color:rgba(154,103,0,.25)}
+.csm-kb-broken .csm-dot{background:#9a6700}
+.csm-completed{background:rgba(22,163,74,.08);color:#15803d;border-color:rgba(22,163,74,.18)}
+.csm-completed .csm-dot{background:#15803d}
+.csm-failed{background:rgba(207,34,46,.10);color:#cf222e;border-color:rgba(207,34,46,.30)}
+.csm-failed .csm-dot{background:#cf222e}
+.kpi-sub-extra{margin-top:6px}
+
+/* 필터 버튼 — cs-* 필터들 (재시도 성공/KB 매칭) 도 dot 표시 */
+.filter-btn .fdot.cs-broken{background:#9a6700}
+.filter-btn .fdot.cs-kb-hit{background:#1a7f37}
+.filter-btn .fdot.cs-learned{background:#0969da}
+
 /* v9 패치 #39: 진행중 상태 깜빡임 */
 @keyframes pillBlink {
   0%,100% { background:rgba(59,130,246,.1); color:#1d4ed8; }
