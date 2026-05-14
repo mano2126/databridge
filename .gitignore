@@ -43,3 +43,8 @@ logs/
 *.ldf
 data/raw/
 backend/uploads/
+
+# DB 파일 (환경 데이터, GitHub 에 안 올림)
+backend/data/databridge.db
+backend/data/databridge.db-wal
+backend/data/databridge.db-shm
