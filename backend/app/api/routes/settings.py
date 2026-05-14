@@ -50,7 +50,7 @@ _DEFAULTS: dict = {
     # ════════════════════════════════════════════════════════════════
     "ai_provider":   "anthropic",                # "anthropic" | "ollama"
     "ollama_url":    "http://localhost:11434",   # Ollama 데몬 URL
-    "ollama_model":  "gemma4:26b",               # 본부장님 24GB 환경 권장 — Gemma 4 26B MoE
+    "ollama_model":  "gemma4:26b",               # 기본값 (본부장님 환경) — 코딩 변환은 qwen2.5-coder:32b 또는 deepseek-coder-v2:16b 권장 (v95_p107 hotfix_069)
 }
 
 # ── JSON 파일 영속 스토어 ─────────────────────────────────

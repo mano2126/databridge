@@ -78,6 +78,16 @@ const routes = [
         meta: { title: '프로세스', section: '관리자' } },
       { path: 'settings',        component: () => import('@/pages/Settings.vue'),
         meta: { title: '시스템 설정', section: '관리자' } },
+      // v95_p107 hotfix_089 (2026-05-13 본부장님): 시스템 설정 서브 라우트
+      //   같은 Settings.vue 가리키되 meta.settingsCat 으로 카테고리 분기
+      { path: 'settings/ai',         component: () => import('@/pages/Settings.vue'),
+        meta: { title: 'AI 변환 엔진', section: '관리자', settingsCat: 'ai' } },
+      { path: 'settings/migration',  component: () => import('@/pages/Settings.vue'),
+        meta: { title: '이관 동작', section: '관리자', settingsCat: 'migration' } },
+      { path: 'settings/appearance', component: () => import('@/pages/Settings.vue'),
+        meta: { title: '모양 및 느낌', section: '관리자', settingsCat: 'appearance' } },
+      { path: 'settings/logs',       component: () => import('@/pages/Settings.vue'),
+        meta: { title: '로그 관리', section: '관리자', settingsCat: 'logs' } },
     ]
   },
   // v95_p107 hotfix_005: 콘솔 전용 팝업 — AdminConsole(/admin/console) 와 완전 독립.

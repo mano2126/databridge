@@ -131,9 +131,21 @@ const MENU_GROUPS = [
   {
     label: '시스템',
     items: [
-      { path: '/admin/console/settings',
-        label: '시스템 설정',
-        icon: '<circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v1M8 13.5v1M1.5 8h1M13.5 8h1M3.4 3.4l.7.7M11.9 11.9l.7.7M3.4 12.6l.7-.7M11.9 4.1l.7-.7"/>' },
+      // v95_p107 hotfix_089 (2026-05-13 본부장님 본질 처방):
+      //   "시스템 설정의 아래 서브 메뉴로 달아서 넣고 구성을 좀더 멋찌게"
+      //   본부장님 비전: 좌측 사이드바에 카테고리 펼침 → 우측 컨텐츠 전용
+      { path: '/admin/console/settings/ai',
+        label: 'AI 변환 엔진',
+        icon: '<path d="M8 1l2 4 4 .5-3 3 .8 4.5L8 11l-3.8 2 .8-4.5-3-3 4-.5z"/>' },
+      { path: '/admin/console/settings/migration',
+        label: '이관 동작',
+        icon: '<rect x="1" y="4" width="6" height="9" rx="1"/><rect x="9" y="3" width="6" height="10" rx="1"/><path d="M4 4V2.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V3"/>' },
+      { path: '/admin/console/settings/appearance',
+        label: '모양 및 느낌',
+        icon: '<circle cx="8" cy="8" r="6"/><circle cx="5" cy="7" r="1.2" fill="currentColor"/><circle cx="11" cy="7" r="1.2" fill="currentColor"/><path d="M5 10 Q8 13 11 10"/>' },
+      { path: '/admin/console/settings/logs',
+        label: '로그 관리',
+        icon: '<rect x="1" y="2" width="14" height="12" rx="1"/><line x1="4" y1="6" x2="12" y2="6"/><line x1="4" y1="9" x2="10" y2="9"/><line x1="4" y1="12" x2="8" y2="12"/>' },
     ]
   },
 ]

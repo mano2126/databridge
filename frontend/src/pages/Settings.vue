@@ -1,35 +1,23 @@
 <template>
   <div>
-    <div class="page-title">시스템 설정</div>
-    <div class="page-desc">DataBridge Studio 동작 방식, 로그 설정, Anthropic API 키를 관리합니다</div>
+    <div class="page-title">{{ pageTitle }}</div>
+    <div class="page-desc">{{ pageDesc }}</div>
     <div v-if="saved" class="save-toast">✓ 설정이 저장됐습니다</div>
 
     <div class="settings-layout">
-      <!-- 왼쪽: 설정 패널 -->
+      <!-- 카테고리별 컨텐츠 (좌측 사이드바의 서브메뉴로부터 진입) -->
       <div class="settings-main">
 
-        <!-- ── UI 커스터마이즈 진입 ── -->
-        <router-link to="/appearance" class="card setting-card nav-card">
-          <div class="nav-card-inner">
-            <div class="nav-card-icon">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:16px;height:16px">
-                <circle cx="8" cy="8" r="3"/>
-                <path d="M8 1v2M8 13v2M3.5 3.5l1.5 1.5M11 11l1.5 1.5M1 8h2M13 8h2M3.5 12.5L5 11M11 5l1.5-1.5"/>
-              </svg>
-            </div>
-            <div class="nav-card-text">
-              <div class="nav-card-title">모양 및 느낌</div>
-              <div class="nav-card-desc">테마 · 밀도 · 글자 크기 · 포인트 색 · 접근성 옵션</div>
-            </div>
-            <div class="nav-card-arrow">→</div>
-          </div>
-        </router-link>
-
+        <!-- v95_p107 hotfix_091 (2026-05-13 본부장님 본질 처방):
+             옛 "모양 및 느낌" 진입 카드 제거 — 좌측 사이드바에 같은 메뉴 이미 존재
+             + 라우트가 /appearance (메인 화면) 가리켜서 관리자 콘솔 밖으로 튕김
+             아래 아이콘 테마 / 화면 여백 카드가 이미 모양 카테고리 컨텐츠 -->
+        
         <!-- ════════════════════════════════════════════════════════ -->
-        <!-- v95_p100 (2026-05-09 본부장님): AI 영역 collapse 그룹     -->
-        <!-- 닫혔을 때 현재 엔진 요약 표시 (Provider + 모델/연결 정보)  -->
+        <!-- AI 영역 collapse 그룹 (v95_p100)                            -->
+        <!-- v95_p107 hotfix_089: 카테고리 'ai' 또는 기본(='')에서만 표시 -->
         <!-- ════════════════════════════════════════════════════════ -->
-        <div class="card setting-card ai-engine-group">
+        <div v-show="activeCategory === 'ai' || activeCategory === ''" class="card setting-card ai-engine-group">
           <!-- ── 헤더 (클릭 시 토글) ── -->
           <div class="sc-header" style="cursor:pointer" @click="aiOpen=!aiOpen">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
@@ -68,37 +56,23 @@
 
           <!-- ── 펼침 영역 (Provider 선택 + 세부 설정) ── -->
           <div v-if="aiOpen" class="ai-engine-body">
-            <!-- Provider 라디오 선택 -->
-            <div class="cfg-row" style="border-bottom:1px solid rgba(0,0,0,.06)">
-              <div class="cfg-info">
-                <div class="cfg-l">Provider</div>
-                <div class="cfg-d">DDL 변환에 사용할 AI 엔진을 선택합니다 (저장 즉시 반영)</div>
-              </div>
-              <div class="ai-provider-options">
-                <label class="ai-provider-card"
-                       :class="{ 'is-selected': cfg.ai_provider==='anthropic', 'is-anthropic': true }">
-                  <input type="radio" v-model="cfg.ai_provider" value="anthropic" @change="saveProvider"/>
-                  <div class="ai-provider-content">
-                    <div class="ai-provider-name">Anthropic Claude (Cloud)</div>
-                    <div class="ai-provider-desc">api.anthropic.com — 크레딧 기반 과금. 인터넷 필요.</div>
-                  </div>
-                </label>
-                <label class="ai-provider-card"
-                       :class="{ 'is-selected': cfg.ai_provider==='ollama', 'is-ollama': true }">
-                  <input type="radio" v-model="cfg.ai_provider" value="ollama" @change="saveProvider"/>
-                  <div class="ai-provider-content">
-                    <div class="ai-provider-name">Ollama + Gemma (자체 호스팅)</div>
-                    <div class="ai-provider-desc">localhost — 망분리 가능, 크레딧 무관, Apache 2.0 모델 사용.</div>
-                  </div>
-                </label>
-              </div>
+            <!-- v95_p107 hotfix_090 (2026-05-13 본부장님): 컴팩트 인라인 row -->
+            <div class="cfg-row-inline">
+              <label class="cfg-l-inline">엔진</label>
+              <select v-model="cfg.ai_provider" @change="saveProvider" class="cfg-select cfg-select-sm">
+                <option value="anthropic">Anthropic Claude</option>
+                <option value="ollama">Ollama</option>
+              </select>
+              <span class="cfg-hint-inline">
+                <template v-if="cfg.ai_provider==='anthropic'">클라우드 · 크레딧 기반 · 최고 정확도</template>
+                <template v-else>자체 호스팅 · 망분리 가능 · 무료</template>
+              </span>
             </div>
-            <!-- (Anthropic / Ollama 세부 설정은 아래 v-show 카드들에서 — 그대로 둠) -->
           </div>
         </div>
 
         <!-- ── Anthropic API 설정 (provider="anthropic" + aiOpen 일 때만) ── -->
-        <div class="card setting-card ai-detail-card" v-show="cfg.ai_provider==='anthropic' && aiOpen">
+        <div class="card setting-card ai-detail-card" v-show="(activeCategory === 'ai' || activeCategory === '') && cfg.ai_provider==='anthropic' && aiOpen">
           <div class="sc-header">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px"><circle cx="8" cy="8" r="7"/><line x1="8" y1="5" x2="8" y2="9"/></svg>
             Anthropic API 설정 (오브젝트 AI 변환용)
@@ -167,88 +141,72 @@
         <!-- ════════════════════════════════════════════════════════ -->
         <!-- v95_p89_ui: Ollama + Gemma 설정 (provider="ollama" + aiOpen 일 때) -->
         <!-- ════════════════════════════════════════════════════════ -->
-        <div class="card setting-card ai-detail-card" v-show="cfg.ai_provider==='ollama' && aiOpen">
+        <div class="card setting-card ai-detail-card" v-show="(activeCategory === 'ai' || activeCategory === '') && cfg.ai_provider==='ollama' && aiOpen">
           <div class="sc-header">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px"><rect x="2" y="3" width="12" height="10" rx="1"/><line x1="2" y1="6" x2="14" y2="6"/><circle cx="4.5" cy="4.5" r=".5" fill="currentColor"/></svg>
-            Ollama + Gemma 설정 (자체 호스팅 AI)
+            Ollama 자체 호스팅 LLM
+            <span v-if="cfg.ollama_model" class="sc-tag" style="margin-left:auto;font-family:monospace;font-size:.72rem;background:#dcfce7;color:#15803d;border:1px solid #86efac;padding:2px 8px">
+              현재: {{ cfg.ollama_model }}
+            </span>
           </div>
-          <div class="cfg-row">
-            <div class="cfg-info">
-              <div class="cfg-l">Ollama URL</div>
-              <div class="cfg-d">로컬 Ollama 데몬 주소 (기본: localhost:11434)</div>
-            </div>
-            <div style="display:flex;gap:6px;flex:1;min-width:0">
-              <input v-model="cfg.ollama_url" type="text" class="api-key-input"
-                     placeholder="http://localhost:11434"
-                     style="flex:1;font-family:monospace;font-size:.82rem"/>
-            </div>
+          <!-- v95_p107 hotfix_090 (2026-05-13 본부장님): 컴팩트 인라인 + 라벨 폭 통일 -->
+          <div class="cfg-row-inline">
+            <label class="cfg-l-inline">URL</label>
+            <input v-model="cfg.ollama_url" type="text" class="cfg-input-mono"
+                   placeholder="http://localhost:11434"/>
+            <span class="cfg-hint-inline">로컬 Ollama 데몬 주소</span>
           </div>
-          <div class="cfg-row">
-            <div class="cfg-info">
-              <div class="cfg-l">모델</div>
-              <div class="cfg-d">DDL 변환에 사용할 Ollama 모델 (24GB RAM 권장: gemma4:26b)</div>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:0">
-              <div style="display:flex;gap:6px;align-items:center">
-                <input v-model="cfg.ollama_model" type="text" class="api-key-input"
-                       placeholder="gemma4:26b"
-                       list="ollama-models-datalist"
-                       style="flex:1;font-family:monospace;font-size:.82rem"/>
-                <button class="btn btn-sm" @click="loadOllamaModels" :disabled="ollamaModelsLoading" style="white-space:nowrap">
-                  <span v-if="ollamaModelsLoading" class="spinner" style="width:10px;height:10px;display:inline-block;margin-right:4px"></span>
-                  {{ ollamaModelsLoading?'조회 중...':'🔄 모델 목록' }}
-                </button>
-              </div>
-              <datalist id="ollama-models-datalist">
-                <option v-for="m in ollamaModels" :key="m.name" :value="m.name">
-                  {{ m.name }} ({{ Math.round(m.size_mb/1024*10)/10 }} GB)
-                </option>
-              </datalist>
-              <div v-if="ollamaModels.length > 0" style="font-size:.7rem;color:#64748b">
-                풀된 모델 {{ ollamaModels.length }}개:
-                <span v-for="(m,i) in ollamaModels.slice(0,5)" :key="m.name" style="font-family:monospace">
-                  {{ m.name }}{{ i<Math.min(ollamaModels.length,5)-1?', ':'' }}
-                </span>
-                <span v-if="ollamaModels.length > 5">...</span>
-              </div>
-              <div v-if="ollamaModelsError" style="font-size:.72rem;color:#dc2626">
-                ⚠ {{ ollamaModelsError }}
-              </div>
-            </div>
+          
+          <div class="cfg-row-inline">
+            <label class="cfg-l-inline">모델</label>
+            <select v-model="cfg.ollama_model" class="cfg-select cfg-select-sm cfg-select-mono">
+              <option value="" disabled>— 모델 선택 —</option>
+              <option v-for="m in sortedOllamaModels" :key="m.name" :value="m.name">
+                {{ m.label }}{{ m.sizeGb ? ` · ${m.sizeGb} GB` : '' }}{{ m.isCoder ? ' · 코딩 특화' : '' }}
+              </option>
+            </select>
+            <button class="btn-mini" @click="loadOllamaModels" :disabled="ollamaModelsLoading"
+                    title="Ollama 데몬에서 설치된 모델 다시 조회">
+              <span v-if="ollamaModelsLoading" class="spinner" style="width:9px;height:9px;display:inline-block;margin-right:3px"></span>
+              {{ ollamaModelsLoading?'조회 중':'새로고침' }}
+            </button>
+            <span class="cfg-hint-inline">Ollama 데몬에 풀된 모델</span>
           </div>
-          <div class="cfg-row">
-            <div class="cfg-info">
-              <div class="cfg-l">설정 저장</div>
-              <div class="cfg-d">URL/모델 변경 후 저장</div>
-            </div>
-            <div style="display:flex;gap:6px;align-items:center;flex:1;min-width:0">
-              <button class="btn btn-sm" @click="saveOllamaConfig" :disabled="ollamaSaving" style="white-space:nowrap">
-                <span v-if="ollamaSaving" class="spinner" style="width:10px;height:10px;display:inline-block;margin-right:4px"></span>
-                💾 Ollama 설정 저장
-              </button>
-            </div>
+          <div v-if="ollamaModels.length === 0 && !ollamaModelsLoading" class="cfg-row-note cfg-row-note-warn">
+            모델 다운로드: <code>ollama pull qwen2.5-coder:32b</code>
           </div>
-          <div class="cfg-row" style="border-bottom:none">
-            <div class="cfg-info"><div class="cfg-l">연결 테스트</div></div>
-            <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
-              <button class="btn btn-primary" @click="testApiKey" :disabled="apiTesting">
-                <span v-if="apiTesting" class="spinner" style="width:12px;height:12px;border-top-color:#fff;display:inline-block"></span>
-                {{ apiTesting?'테스트 중...':'🔌 Ollama + Gemma 연결 테스트' }}
-              </button>
-              <span style="font-size:.7rem;color:var(--text-tertiary)">데몬 + 모델 + 추론 호출 검증</span>
-              <div v-if="apiTestResult" class="api-test-result" :class="apiTestResult.ok?'ok':'err'">
-                {{ apiTestResult.ok?'✓ '+apiTestResult.message:'✗ '+apiTestResult.error }}
-                <div v-if="apiTestResult.debug" style="font-size:.68rem;opacity:.75;margin-top:3px;font-family:monospace;white-space:pre-wrap">
-                  🔍 {{ apiTestResult.debug }}
-                </div>
-              </div>
+          <div v-if="ollamaModelsError" class="cfg-row-note cfg-row-note-err">
+            ⚠ {{ ollamaModelsError }}
+          </div>
+          
+          <div class="cfg-row-inline">
+            <label class="cfg-l-inline">저장</label>
+            <button class="btn-mini btn-mini-primary" @click="saveOllamaConfig" :disabled="ollamaSaving">
+              <span v-if="ollamaSaving" class="spinner" style="width:9px;height:9px;display:inline-block;margin-right:3px"></span>
+              💾 Ollama 설정 저장
+            </button>
+            <span class="cfg-hint-inline">URL/모델 변경 후 저장</span>
+          </div>
+          
+          <div class="cfg-row-inline" style="border-bottom:none">
+            <label class="cfg-l-inline">연결</label>
+            <button class="btn-mini btn-mini-primary" @click="testApiKey" :disabled="apiTesting">
+              <span v-if="apiTesting" class="spinner" style="width:9px;height:9px;display:inline-block;margin-right:3px"></span>
+              {{ apiTesting?'테스트 중...':'🔌 Ollama 연결 테스트' }}
+            </button>
+            <span class="cfg-hint-inline">데몬 + 모델 + 추론 호출 검증</span>
+          </div>
+          <div v-if="apiTestResult" class="cfg-row-note" :class="apiTestResult.ok?'cfg-row-note-ok':'cfg-row-note-err'">
+            {{ apiTestResult.ok?'✓ '+apiTestResult.message:'✗ '+apiTestResult.error }}
+            <div v-if="apiTestResult.debug" style="font-size:.66rem;opacity:.75;margin-top:3px;font-family:monospace;white-space:pre-wrap">
+              🔍 {{ apiTestResult.debug }}
             </div>
           </div>
         </div>
 
 
-        <!-- ── Claude API 사용량 ── -->
-        <div class="card setting-card">
+        <!-- ── Claude API 사용량 (ai 카테고리) ── -->
+        <div v-show="activeCategory === 'ai' || activeCategory === ''" class="card setting-card">
           <div class="sc-header" style="cursor:pointer" @click="claudeOpen=!claudeOpen; if(claudeOpen) loadClaudeUsage()">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px">
               <circle cx="8" cy="8" r="6"/>
@@ -326,8 +284,8 @@
             Claude API 사용 이력이 없습니다
           </div>
         </div>
-        <!-- ── 이관 설정 ── -->
-        <div class="card setting-card">
+        <!-- ── 이관 설정 (migration 카테고리) ── -->
+        <div v-show="activeCategory === 'migration'" class="card setting-card">
           <div class="sc-header" style="cursor:pointer" @click="migOpen=!migOpen">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px">
               <rect x="1" y="4" width="6" height="9" rx="1"/>
@@ -372,8 +330,8 @@
         </div>
 
 
-        <!-- ── 아이콘 테마 ── -->
-        <div class="card setting-card">
+        <!-- ── 아이콘 테마 (appearance 카테고리) ── -->
+        <div v-show="activeCategory === 'appearance' || activeCategory === ''" class="card setting-card">
           <div class="sc-header" style="cursor:pointer" @click="themeOpen=!themeOpen">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
               <circle cx="8" cy="8" r="6"/>
@@ -413,8 +371,8 @@
           </div>
         </div>
 
-        <!-- ── 화면 여백 조정 ── -->
-        <div class="card setting-card">
+        <!-- ── 화면 여백 조정 (appearance 카테고리) ── -->
+        <div v-show="activeCategory === 'appearance' || activeCategory === ''" class="card setting-card">
           <div class="sc-header" style="cursor:pointer" @click="spacingOpen=!spacingOpen">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
               <rect x="1" y="1" width="14" height="14" rx="2"/>
@@ -520,8 +478,8 @@
           </div>
         </div>
 
-        <!-- ── 로그 설정 ── -->
-        <div class="card setting-card">
+        <!-- ── 로그 설정 (logs 카테고리) ── -->
+        <div v-show="activeCategory === 'logs'" class="card setting-card">
           <div class="sc-header">
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px"><rect x="1" y="2" width="14" height="12" rx="1"/><line x1="4" y1="6" x2="12" y2="6"/><line x1="4" y1="9" x2="10" y2="9"/></svg>
             로그 설정
@@ -805,9 +763,36 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useAppStore } from '@/store/appStore.js'
+import { useRoute } from 'vue-router'
 import axios from 'axios'
 
 const app = useAppStore()
+const route = useRoute()
+
+// v95_p107 hotfix_089 (2026-05-13 본부장님 본질 처방):
+//   "시스템 설정의 아래 서브 메뉴로 달아서 넣고 구성을 좀더 멋찌게"
+//   route.meta.settingsCat 에서 현재 카테고리 읽음 (사이드바 서브항목이 결정)
+//   '' = 기본 (모든 카드 표시) - 옛 URL /admin/console/settings 호환
+const activeCategory = computed(() => route.meta?.settingsCat || '')
+
+const pageTitle = computed(() => {
+  const cat = activeCategory.value
+  if (cat === 'ai')         return 'AI 변환 엔진'
+  if (cat === 'migration')  return '이관 동작'
+  if (cat === 'appearance') return '모양 및 느낌'
+  if (cat === 'logs')       return '로그 관리'
+  return '시스템 설정'
+})
+
+const pageDesc = computed(() => {
+  const cat = activeCategory.value
+  if (cat === 'ai')         return 'Anthropic Claude 또는 자체 호스팅 Ollama 엔진 선택 및 API 키 관리'
+  if (cat === 'migration')  return '병렬 처리, 재시도, 타임아웃 등 이관 동작 세부 설정'
+  if (cat === 'appearance') return '테마, 아이콘, 화면 여백 등 UI 시각 설정'
+  if (cat === 'logs')       return '로그 레벨, 파일 보관 정책, 실시간 모니터링'
+  return 'DataBridge Studio 동작 방식, 로그 설정, Anthropic API 키를 관리합니다'
+})
+
 const Chev = { template: '<div class="chev-ico"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" style="width:10px;height:10px;display:block"><polyline points="2,4 6,8 10,4"/></svg></div>' }
 
 const DEFAULTS = {
@@ -1301,12 +1286,21 @@ async function testApiKey() {
 // ════════════════════════════════════════════════════════════════
 
 // AI provider 변경 즉시 저장 (라디오 onchange)
+async function _h072_dispatchAiChange() {
+  // v95_p107 hotfix_072: provider/모델 변경 이벤트 — Topbar 즉시 갱신
+  try {
+    window.dispatchEvent(new CustomEvent('ai-config-changed', {
+      detail: { provider: cfg.value.ai_provider, model: cfg.value.ollama_model || '', url: cfg.value.ollama_url || '' }
+    }))
+  } catch (_) {}
+}
 async function saveProvider() {
   try {
     await axios.put('/api/v1/settings/', {
       ai_provider: cfg.value.ai_provider,
     })
-    app.notify(`AI 엔진을 ${cfg.value.ai_provider==='ollama'?'Ollama + Gemma':'Anthropic Claude'} 로 전환했습니다`, 'success')
+    app.notify(`AI 엔진을 ${cfg.value.ai_provider==='ollama'?'Ollama 자체 호스팅':'Anthropic Claude'} 로 전환했습니다`, 'success')
+    _h072_dispatchAiChange()  // v95_p107 hotfix_072: Topbar 즉시 갱신
     apiTestResult.value = null  // 테스트 결과 초기화 (provider 바뀜)
     // Ollama 로 전환 시 즉시 모델 목록 조회
     if (cfg.value.ai_provider === 'ollama') {
@@ -1318,6 +1312,44 @@ async function saveProvider() {
 }
 
 // Ollama 데몬에서 풀된 모델 목록 조회
+// v95_p107 hotfix_073: 모델 정렬 (코딩 특화 상위, 라벨 가공)
+const sortedOllamaModels = computed(() => {
+  const list = ollamaModels.value || []
+  const coderPriority = (name) => {
+    if (name.includes('coder') || name.includes('deepseek')) return 0  // 코딩 특화 최상위
+    if (name.startsWith('qwen')) return 1
+    if (name.startsWith('gemma')) return 2
+    if (name.startsWith('llama')) return 3
+    return 4
+  }
+  return [...list]
+    .sort((a, b) => coderPriority(a.name) - coderPriority(b.name) || a.name.localeCompare(b.name))
+    .map(m => {
+      const sizeGb = Math.round((m.size_mb || 0) / 1024 * 10) / 10
+      const isCoder = m.name.includes('coder') || m.name.includes('deepseek')
+      const isQwen = m.name.startsWith('qwen')
+      const isGemma = m.name.startsWith('gemma')
+      const isLlama = m.name.startsWith('llama')
+      const star = isCoder ? '⭐ ' : ''
+      const label = `${star}${m.name}`
+      // v95_p107 hotfix_073 v2: 라디오 pill 의 풍선 도움말 (title)
+      let desc = ''
+      if (isCoder) {
+        desc = '코딩 특화 LLM — MSSQL/MySQL DDL 변환에 정확. MSSQL 함수·트리거·CTE 변환 정확도 높음.'
+      } else if (isGemma) {
+        desc = 'Google 일반 LLM — 자연어/요약 강함. 코딩 변환은 일반적 수준.'
+      } else if (isQwen) {
+        desc = 'Alibaba Qwen 일반 LLM.'
+      } else if (isLlama) {
+        desc = 'Meta Llama 일반 LLM.'
+      } else {
+        desc = '일반 LLM.'
+      }
+      const tooltip = `${m.name}\n크기: ${sizeGb} GB\n${desc}\n클릭해서 선택`
+      return { ...m, label, tooltip }
+    })
+})
+
 async function loadOllamaModels() {
   ollamaModelsLoading.value = true
   ollamaModelsError.value = ''
@@ -1350,6 +1382,10 @@ async function saveOllamaConfig() {
     apiTestResult.value = null  // 설정 변경됐으니 테스트 결과 초기화
     // URL 바뀌면 모델 목록 재조회
     loadOllamaModels()
+    // v95_p107 hotfix_072: Topbar 등 다른 컴포넌트가 즉시 갱신하도록 이벤트 발생
+    window.dispatchEvent(new CustomEvent('ai-config-changed', {
+      detail: { provider: 'ollama', model: cfg.value.ollama_model, url: cfg.value.ollama_url }
+    }))
   } catch(e) {
     app.notify('저장 실패: '+e.message, 'error')
   }
@@ -1748,8 +1784,9 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.settings-layout { display:grid; grid-template-columns:400px 1fr; gap:12px; align-items:start; }
-.settings-main { display:flex; flex-direction:column; gap:10px; }
+/* v95_p107 hotfix_089: 단일 컬럼 (좌측 사이드바는 AdminConsole 의 ac-side 가 담당) */
+.settings-layout { display:block; }
+.settings-main { display:flex; flex-direction:column; gap:10px; max-width:1100px; }
 .setting-card { padding:0; overflow:hidden; }
 .sc-header { display:flex; align-items:center; gap:7px; padding:10px 14px; border-bottom:0.5px solid var(--border-light); background:var(--bg-secondary); font-size:12.5px; font-weight:600; color:var(--text-primary); transition:background .12s; }
 .sc-header[style*="cursor:pointer"]:hover { background:var(--bg-primary); }
@@ -1876,6 +1913,119 @@ input:focus { outline:none; border-color:var(--accent-blue); }
 .sel-wrap { position:relative; }
 .sel-wrap select { width:100%; appearance:none; -webkit-appearance:none; background:var(--bg-secondary); border:0.5px solid var(--border-mid); border-radius:var(--radius-md); padding:6px 24px 6px 9px; font-size:12px; color:var(--text-primary); cursor:pointer; font-family:var(--font); }
 .sel-wrap select:focus { outline:none; border-color:var(--accent-blue); }
+
+/* v95_p107 hotfix_089 (2026-05-13 본부장님): 담백한 select for 설정 페이지 */
+.cfg-select {
+  width:100%;
+  padding:7px 28px 7px 12px;
+  background:var(--bg-primary, #fff);
+  border:1px solid var(--border-mid, #d0d4d9);
+  border-radius:6px;
+  font-size:.78rem;
+  color:var(--text-primary);
+  cursor:pointer;
+  font-family:var(--font);
+  appearance:none;
+  -webkit-appearance:none;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%236b7280' stroke-width='1.5'><polyline points='2,4.5 6,8.5 10,4.5'/></svg>");
+  background-repeat:no-repeat;
+  background-position:right 9px center;
+  background-size:10px;
+  transition:border-color .12s;
+}
+.cfg-select:hover { border-color:var(--accent-blue, #4f46e5) }
+.cfg-select:focus { outline:none; border-color:var(--accent-blue, #4f46e5); box-shadow:0 0 0 3px rgba(99,102,241,.1) }
+.cfg-select-mono { font-family:'SF Mono', Menlo, Monaco, monospace; font-size:.74rem }
+
+/* v95_p107 hotfix_090 (2026-05-13 본부장님): 컴팩트 인라인 row 패턴 */
+/*   라벨 폭 통일 + 한 줄 + 행 높이 축소 */
+.cfg-row-inline {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:6px 14px;
+  border-bottom:0.5px solid var(--border-light, #e5e7eb);
+  font-size:.78rem;
+  min-height:34px;
+}
+.cfg-row-inline:last-of-type { border-bottom:none }
+.cfg-l-inline {
+  flex:0 0 60px;       /* 라벨 폭 통일 — 짧은 단어 60px */
+  font-size:.76rem;
+  font-weight:500;
+  color:var(--text-secondary, #6b7280);
+  white-space:nowrap;
+}
+.cfg-hint-inline {
+  font-size:.7rem;
+  color:var(--text-tertiary, #9ca3af);
+  margin-left:auto;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.cfg-select-sm {
+  width:auto;
+  min-width:220px;
+  padding:5px 28px 5px 10px;
+  font-size:.76rem;
+}
+.cfg-input-mono {
+  flex:1;
+  padding:5px 10px;
+  background:var(--bg-primary, #fff);
+  border:1px solid var(--border-mid, #d0d4d9);
+  border-radius:5px;
+  font-size:.74rem;
+  font-family:'SF Mono', Menlo, Monaco, monospace;
+  color:var(--text-primary);
+  min-width:0;
+  max-width:340px;
+}
+.cfg-input-mono:focus { outline:none; border-color:var(--accent-blue, #4f46e5) }
+.btn-mini {
+  padding:4px 11px;
+  background:var(--bg-secondary, #f9fafb);
+  border:1px solid var(--border-mid, #d0d4d9);
+  border-radius:5px;
+  font-size:.72rem;
+  color:var(--text-primary);
+  cursor:pointer;
+  white-space:nowrap;
+  font-family:var(--font);
+}
+.btn-mini:hover:not(:disabled) {
+  background:var(--bg-tertiary, #f3f4f6);
+  border-color:var(--accent-blue, #4f46e5);
+  color:var(--accent-blue, #4f46e5);
+}
+.btn-mini:disabled { opacity:.5; cursor:not-allowed }
+.btn-mini-primary {
+  background:var(--accent-blue, #4f46e5);
+  color:#fff;
+  border-color:var(--accent-blue, #4f46e5);
+}
+.btn-mini-primary:hover:not(:disabled) {
+  background:var(--accent-blue, #4f46e5);
+  opacity:.9;
+  color:#fff;
+}
+.cfg-row-note {
+  margin:0 14px 8px 14px;
+  padding:6px 10px;
+  border-radius:5px;
+  font-size:.7rem;
+}
+.cfg-row-note code {
+  background:#fff;
+  padding:1px 5px;
+  border-radius:3px;
+  font-family:'SF Mono', Menlo, monospace;
+  font-size:.7rem;
+}
+.cfg-row-note-warn { background:#fffbeb; border:1px solid #fde68a; color:#92400e }
+.cfg-row-note-err  { background:#fef2f2; border:1px solid #fecaca; color:#991b1b }
+.cfg-row-note-ok   { background:#f0fdf4; border:1px solid #bbf7d0; color:#15803d }
 .chev-ico { position:absolute; right:7px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--text-tertiary); }
 .chev-ico svg { width:10px; height:10px; display:block; }
 .w120 { min-width:120px; } .w140 { min-width:140px; } .w160 { min-width:160px; }
@@ -2270,4 +2420,115 @@ input:focus { outline:none; border-color:var(--accent-blue); }
 .nav-card-desc { font-size:11.5px; color:var(--text-tertiary); }
 .nav-card-arrow { color:var(--text-tertiary); font-size:18px; transition:transform .15s; }
 .nav-card:hover .nav-card-arrow { transform:translateX(3px); color:var(--accent-blue); }
+
+/* v95_p107 hotfix_071: Ollama 모델 chip — 프로페셔널 디자인 */
+.ollama-model-chip {
+  padding: 4px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  font-size: .72rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all .12s;
+  white-space: nowrap;
+}
+.ollama-model-chip:hover {
+  background: var(--bg-info);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.ollama-model-chip.is-active {
+  background: #dcfce7;
+  border-color: #15803d;
+  color: #15803d;
+  font-weight: 600;
+  box-shadow: 0 0 0 2px rgba(21,128,61,.1);
+}
+
+/* v95_p107 hotfix_073 v2: 엔진/모델 라디오 pill (본부장님 — 라디오 + 풍선 도움말) */
+.ai-radio-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: var(--bg-secondary);
+  border: 1.5px solid var(--border-light);
+  border-radius: 999px;
+  font-size: .82rem;
+  font-family: 'SF Mono', Consolas, monospace;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all .15s;
+  user-select: none;
+  white-space: nowrap;
+}
+.ai-radio-pill input[type="radio"] {
+  margin: 0;
+  cursor: pointer;
+  accent-color: #15803d;
+}
+.ai-radio-pill:hover {
+  background: var(--bg-info);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.ai-radio-pill.active {
+  background: #dcfce7;
+  border-color: #15803d;
+  color: #15803d;
+  font-weight: 600;
+  box-shadow: 0 0 0 3px rgba(21,128,61,.12);
+}
+
+/* v95_p107 hotfix_073 v3: AI 카드 안 cfg-row 를 표(table) 형태로 — 본부장님 명시 */
+.ai-detail-card .cfg-row {
+  display: flex !important;
+  align-items: stretch;
+  padding: 0 !important;
+  border-bottom: 1px solid var(--border-light) !important;
+  margin: 0 !important;
+  min-height: 56px;
+}
+.ai-detail-card .cfg-row:last-child {
+  border-bottom: none !important;
+}
+.ai-detail-card .cfg-info {
+  width: 120px !important;
+  max-width: 120px !important;
+  flex-shrink: 0;
+  flex-grow: 0;
+  padding: 12px 16px !important;
+  border-right: 1px solid var(--border-light);
+  background: var(--bg-secondary);
+  display: flex !important;
+  align-items: center !important;
+  margin: 0 !important;
+}
+.ai-detail-card .cfg-info .cfg-l {
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+.ai-detail-card .cfg-info .cfg-d {
+  display: none;  /* 라벨 아래 설명 텍스트 제거 (본부장님 명시) */
+}
+/* 라벨 다음 콘텐츠 영역 */
+.ai-detail-card .cfg-row > div:not(.cfg-info) {
+  flex: 1;
+  padding: 12px 16px !important;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* 연결 테스트 행 — 결과 박스 자리 잡음 */
+.ai-detail-card .api-test-result {
+  flex-basis: 100%;
+  margin-top: 6px;
+  font-size: .76rem;
+}
+
 </style>

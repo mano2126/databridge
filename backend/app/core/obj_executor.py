@@ -2231,6 +2231,34 @@ def ai_convert_ddl(ddl: str, obj_type: str, obj_name: str,
             logger.debug(f"[v95_p70] 실패 KB 체크 오류 (무시): {_fe}")
     # ════════════════════════════════════════════════════════════════
 
+    # v95_p107 hotfix_060: Claude 비용 누수 차단 (긴급)
+    # 본부장님 진가: ai_provider=ollama 인데도 Claude API 계속 호출 → 토큰 낭비
+    # 처방: provider 가드 — anthropic 아니면 즉시 폴백 (Claude 호출 0)
+    try:
+        from app.api.routes.settings import _cfg as _h060_get_cfg
+        _h060_cfg = _h060_get_cfg()
+        _h060_provider = (_h060_cfg.get("ai_provider", "anthropic") or "anthropic").strip().lower()
+    except Exception:
+        _h060_cfg = {}
+        _h060_provider = "anthropic"
+
+    if _h060_provider != "anthropic":
+        logger.warning(
+            "[h060-claude-block] ai_provider=%s → Claude 호출 차단 (본부장님 비용 보호). %s [%s]",
+            _h060_provider, obj_type, obj_name
+        )
+        # 규칙 폴백으로 즉시 우회 (Claude 호출 안 함)
+        converted, warnings = mssql_to_mysql_ddl(ddl, obj_type)
+        return {
+            "converted_ddl": converted,
+            "changes": [f"[h060] Claude 차단 (provider={_h060_provider}) → 규칙 변환"],
+            "warnings": (warnings or []) + [
+                f"⚠ ai_provider={_h060_provider} 인데 Claude-only 함수가 호출됨",
+                "  호출자 흐름 확인 필요 — h060 으로 일단 비용 차단"
+            ],
+            "method": "h060_claude_blocked",
+        }
+
     try:
         from app.api.routes.settings import _cfg as _get_cfg
         api_key = _get_cfg().get("anthropic_api_key", "").strip()
@@ -3792,6 +3820,93 @@ def deploy_mysql_object(ddl: str, conn_info: dict, obj_type: str, obj_name: str)
 
     def _exec_one(sql_text: str, kind_label: str, allow_fail: bool) -> tuple[bool, str]:
         """하나의 SQL 을 독립 커넥션에서 실행. (성공여부, 에러문자열) 반환."""
+        # v95_p107 hotfix_054: execute 직전 bracket 안전망
+        # (post_process_sql 누락 경로 대비 — 21건 1064 본질 차단)
+        import re as _h054re
+        _h054_orig_len = len(sql_text)
+        sql_text = _h054re.sub(r'\[([A-Za-z_][\w]*)\]', r'`\1`', sql_text)
+        if len(sql_text) != _h054_orig_len:
+            logger.info("[h054-safetynet] [%s/%s] bracket→백틱 정정 (len %d→%d)",
+                        obj_name, kind_label, _h054_orig_len, len(sql_text))
+        # v95_p107 hotfix_056: 갈래 B 안전망 — R-035 (기본값 제거) + R-036 (타입 백틱 제거)
+        # 본부장님 진가 (13:12~13:13): p_useInflectional `TINYINT(1)`=0 → 1064
+        if "CREATE PROCEDURE" in sql_text.upper() or "CREATE FUNCTION" in sql_text.upper():
+            try:
+                import re as _h056re
+                _h056_orig_len = len(sql_text)
+                # R-036: 타입 백틱 제거 (p_x `int` → p_x int)
+                sql_text = _h056re.sub(
+                    r'(p_\w+\s+)`(\w+(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?)`',
+                    r'\1\2', sql_text)
+                # R-035: 파라미터 기본값 제거 (p_x int=0 → p_x int)
+                sql_text = _h056re.sub(
+                    r"(p_\w+\s+`?\w+(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?`?)\s*=\s*(?:NULL|TRUE|FALSE|-?\d+|'[^']*'|\"[^\"]*\"|\w+)",
+                    r'\1', sql_text, flags=_h056re.IGNORECASE)
+                if len(sql_text) != _h056_orig_len:
+                    logger.info("[h056-safetynet] [%s/%s] R-035/R-036 정규식 정정 (len %d→%d)",
+                                obj_name, kind_label, _h056_orig_len, len(sql_text))
+            except Exception as _h056e:
+                logger.warning("[h056-safetynet] R-035/R-036 적용 실패 (무시): %s", _h056e)
+        # v95_p107 hotfix_058: 갈래 B 안전망 — R-037 (OPTION 제거) + R-039 (함수 AS 제거)
+        # 본부장님 진가 (13:50~13:52):
+        #   uspGetWhereUsedProductID: OPTION (MAXRECURSION 25) → 1064
+        #   ufnGetDocumentStatusText: RETURNS VARCHAR(255) AS BEGIN → 1064
+        if "CREATE PROCEDURE" in sql_text.upper() or "CREATE FUNCTION" in sql_text.upper():
+            try:
+                import re as _h058re
+                _h058_orig_len = len(sql_text)
+                # R-037: OPTION (MAXRECURSION N) 제거
+                sql_text = _h058re.sub(
+                    r'\s*OPTION\s*\(\s*MAXRECURSION\s+\d+\s*\)\s*',
+                    ' ', sql_text, flags=_h058re.IGNORECASE)
+                # R-039: 함수 RETURNS type AS BEGIN → BEGIN
+                sql_text = _h058re.sub(
+                    r'(CREATE\s+FUNCTION\s+`?\w+`?\s*\([^)]*\)\s*RETURNS\s+\w+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)\s+AS\s*(\n?\s*)BEGIN\b',
+                    r'\1\2BEGIN', sql_text, flags=_h058re.IGNORECASE)
+                # R-038: WITH cte AS (... UNION ALL ...) → WITH RECURSIVE cte AS
+                if "UNION ALL" in sql_text.upper() and "RECURSIVE" not in sql_text.upper():
+                    sql_text = _h058re.sub(
+                        r'\bWITH\s+(?!RECURSIVE\b)(`?\w+`?\s*\([^)]*\)\s*\n?\s*AS\s*\(\s*SELECT[\s\S]{0,2000}?UNION\s+ALL[\s\S]{0,2000}?\))',
+                        r'WITH RECURSIVE \1', sql_text, flags=_h058re.IGNORECASE)
+                if len(sql_text) != _h058_orig_len:
+                    logger.info("[h058-safetynet] [%s/%s] R-037/R-038/R-039 정정 (len %d→%d)",
+                                obj_name, kind_label, _h058_orig_len, len(sql_text))
+            except Exception as _h058e:
+                logger.warning("[h058-safetynet] R-037~R-039 적용 실패 (무시): %s", _h058e)
+        # v95_p107 hotfix_055: proc signature 안전망 (R-033 직접 호출 — h056 정리 후)
+        # 본부장님 진가 (12:53:05): CREATE PROCEDURE name p_x int AS BEGIN ... → 1064
+        if "CREATE PROCEDURE" in sql_text.upper() or "CREATE FUNCTION" in sql_text.upper():
+            try:
+                from app.core.sql_post_processor import _r033_fix_proc_signature as _h055_r033
+                _h055_orig_len = len(sql_text)
+                sql_text, _h055_count = _h055_r033(sql_text)
+                if _h055_count > 0:
+                    logger.info("[h055-safetynet] [%s/%s] R-033 proc signature 정정 x%d (len %d→%d)",
+                                obj_name, kind_label, _h055_count, _h055_orig_len, len(sql_text))
+            except Exception as _h055e:
+                logger.warning("[h055-safetynet] R-033 호출 실패 (무시, 원본 유지): %s", _h055e)
+        # v95_p107 hotfix_059: 통합 안전망 — R-037 (OPTION) + R-039 (FUNC AS) + R-040 (CONVERT)
+        # 본부장님 진가 (15:18:06): OPTION (MAXRECURSION 25), AS BEGIN, ''20030701', 112)
+        try:
+            import re as _h059re
+            _h059_orig_len = len(sql_text)
+            # R-037: OPTION (MAXRECURSION N) 제거
+            sql_text = _h059re.sub(
+                r'\s*OPTION\s*\(\s*MAXRECURSION\s+\d+\s*\)\s*',
+                ' ', sql_text, flags=_h059re.IGNORECASE)
+            # R-039: 함수 RETURNS type AS BEGIN → BEGIN
+            sql_text = _h059re.sub(
+                r'(CREATE\s+FUNCTION\s+`?\w+`?\s*\([^)]*\)\s*RETURNS\s+\w+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)\s+AS\s*(\n?\s*)BEGIN\b',
+                r'\1\2BEGIN', sql_text, flags=_h059re.IGNORECASE)
+            # R-040: CONVERT style 잔재 → CAST DATETIME
+            sql_text = _h059re.sub(
+                r"('\d{8}')\s*,\s*\d{2,3}\s*\)",
+                r"CAST(\1 AS DATETIME))", sql_text)
+            if len(sql_text) != _h059_orig_len:
+                logger.info("[h059-safetynet] [%s/%s] R-037/R-039/R-040 정정 (len %d→%d)",
+                            obj_name, kind_label, _h059_orig_len, len(sql_text))
+        except Exception as _h059e:
+            logger.warning("[h059-safetynet] R-037~R-040 적용 실패 (무시): %s", _h059e)
         import time as _time
         # v90.40: _exec_one 내부 마이크로 TRACE — freeze 정확한 발생점 파악용
         _eo_t0 = _time.monotonic()
@@ -3876,6 +3991,93 @@ def deploy_mysql_object(ddl: str, conn_info: dict, obj_type: str, obj_name: str)
                     except Exception as _be:
                         _eotrace("E4-bytes-log-err", error=str(_be)[:60])
                 
+                # ════════════════════════════════════════════════════════════
+                # v95_p107 hotfix_077 (2026-05-12 본부장님 본질 처방):
+                #   execute() 직전 최종 nuclear cleanup — 모든 경로 100% 통과 보장
+                #
+                # 본질: AdventureWorks2022 13개 객체 1064 누수 발생
+                #   - schema._ai_convert_ddl 안 tsql_residue_cleaner ✓
+                #   - deploy_mysql_object 안 DELIMITER 제거 ✓
+                #   - _exec_one 안 h054 bracket 안전망 ✓
+                #   그래도 [dbo_xxx] 가 MySQL 까지 도달 → 어떤 경로 우회 발생
+                #
+                # 처방: cur.execute 의 sql_text 인자에 가장 마지막으로 결정적 정화
+                #   - 어떤 경로/캐시/AI provider 든 100% 통과
+                #   - 정상 SQL 부작용 0 (정규식 매치 안 되면 무변경)
+                #   - 변경 시 로그 — 어디서 누수 발생 진단 가능
+                # ════════════════════════════════════════════════════════════
+                try:
+                    import re as _h077re
+                    _h077_changes = []
+                    # (1) [Schema].[Table] → `Schema_Table` (먼저 — 평탄화)
+                    _n = len(_h077re.findall(r'\[(\w+)\]\.\[(\w+)\]', sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r'\[(\w+)\]\.\[(\w+)\]', r'`\1_\2`', sql_text)
+                        _h077_changes.append(f"[S].[T]→`S_T`x{_n}")
+                    # (2) [ident] → `ident` (단일 — 가장 흔한 1064 원인)
+                    _n = len(_h077re.findall(r'\[([A-Za-z_][\w]*)\]', sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r'\[([A-Za-z_][\w]*)\]', r'`\1`', sql_text)
+                        _h077_changes.append(f"[ident]→`ident`x{_n}")
+                    # (3) DELIMITER 지시자 모든 라인 제거 (드라이버 인식 안 함)
+                    _n = len(_h077re.findall(r'(?im)^[ \t]*DELIMITER\s+\S+[ \t]*$', sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r'(?im)^[ \t]*DELIMITER\s+\S+[ \t]*$', '', sql_text)
+                        _h077_changes.append(f"DELIMITERx{_n}")
+                    # (4) "END //" → "END" + 후속 ; 자동 (custom delimiter terminator 잔재)
+                    _n = len(_h077re.findall(r'\bEND\s*//\s*(?:\n|$)', sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r'\bEND\s*//\s*(?=\n|$)', 'END;', sql_text)
+                        _h077_changes.append(f"END//→END;x{_n}")
+                    # (5) "// " 또는 "$$" 단독 라인 (delimiter terminator 잔재)
+                    _n = len(_h077re.findall(r'(?m)^\s*(?://|\$\$)\s*$', sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r'(?m)^\s*(?://|\$\$)\s*$', '', sql_text)
+                        _h077_changes.append(f"//단독x{_n}")
+                    # (6) GO 단독 라인 (T-SQL 배치 종결)
+                    _n = len(_h077re.findall(r'(?im)^[ \t]*GO[ \t]*$', sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r'(?im)^[ \t]*GO[ \t]*$', '', sql_text)
+                        _h077_changes.append(f"GOx{_n}")
+                    # (7) IF OBJECT_ID(...) IS NOT NULL DROP ...; (T-SQL DROP guard)
+                    _n = len(_h077re.findall(
+                        r"IF\s+OBJECT_ID\s*\(\s*N?'[^']+'\s*,?\s*N?'?\w*'?\s*\)\s+IS\s+NOT\s+NULL\s+DROP\s+\w+\s+[^;]+;",
+                        sql_text, _h077re.IGNORECASE | _h077re.DOTALL))
+                    if _n:
+                        sql_text = _h077re.sub(
+                            r"IF\s+OBJECT_ID\s*\(\s*N?'[^']+'\s*,?\s*N?'?\w*'?\s*\)\s+IS\s+NOT\s+NULL\s+DROP\s+\w+\s+[^;]+;",
+                            '', sql_text, flags=_h077re.IGNORECASE | _h077re.DOTALL)
+                        _h077_changes.append(f"OBJECT_ID guardx{_n}")
+                    # (8) N'string' → 'string' (T-SQL nvarchar 리터럴)
+                    _n = len(_h077re.findall(r"\bN'", sql_text))
+                    if _n:
+                        sql_text = _h077re.sub(r"\bN'", "'", sql_text)
+                        _h077_changes.append(f"N'→'x{_n}")
+                    # (9) ISNULL → IFNULL
+                    _n = len(_h077re.findall(r'\bISNULL\s*\(', sql_text, _h077re.IGNORECASE))
+                    if _n:
+                        sql_text = _h077re.sub(r'\bISNULL\s*\(', 'IFNULL(', sql_text, flags=_h077re.IGNORECASE)
+                        _h077_changes.append(f"ISNULL→IFNULLx{_n}")
+                    # (10) GETDATE() → NOW()
+                    _n = len(_h077re.findall(r'\bGETDATE\s*\(\s*\)', sql_text, _h077re.IGNORECASE))
+                    if _n:
+                        sql_text = _h077re.sub(r'\bGETDATE\s*\(\s*\)', 'NOW()', sql_text, flags=_h077re.IGNORECASE)
+                        _h077_changes.append(f"GETDATE→NOWx{_n}")
+                    # (11) SET NOCOUNT ON; (T-SQL 전용)
+                    _n = len(_h077re.findall(r'\bSET\s+NOCOUNT\s+ON\s*;', sql_text, _h077re.IGNORECASE))
+                    if _n:
+                        sql_text = _h077re.sub(r'\bSET\s+NOCOUNT\s+ON\s*;', '', sql_text, flags=_h077re.IGNORECASE)
+                        _h077_changes.append(f"SET NOCOUNTx{_n}")
+                    if _h077_changes:
+                        logger.warning(
+                            "[h077-NUCLEAR] [%s/%s] execute 직전 잔재 강제 정화 — 이전 안전망 누수: %s",
+                            obj_name, kind_label, ", ".join(_h077_changes)
+                        )
+                        _eotrace("E4-h077-cleaned", changes=len(_h077_changes))
+                except Exception as _h077e:
+                    logger.warning("[h077-NUCLEAR] 정화 실패 (원본 사용): %s", _h077e)
+                # ════════════════════════════════════════════════════════════
+
                 cur.execute(sql_text)
                 _t_elapsed = _time.monotonic() - _t_start
                 _eotrace("E5-execute-done", elapsed=f"{_t_elapsed:.2f}s")

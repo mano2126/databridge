@@ -10,6 +10,101 @@ logger = logging.getLogger("databridge.schema")
 _conns: dict = {}
 
 
+# v95_p107 hotfix_032: KB 매칭 검증 실패 시 다음 Layer 위임용 예외
+class _KbValidationFailed(Exception):
+    """KB 매칭된 SQL 이 MySQL 검증 실패 — Pattern KB 로 위임."""
+    pass
+
+
+# ════════════════════════════════════════════════════════════════
+# v95_p107 hotfix_032 (2026-05-11 본부장님 진가의 마지막):
+#   Pattern Library 가시화 API
+#   schema.py 의 router 가 mount 되는 prefix 와 어울리게 짧은 path
+#   → 본부장님 환경 main.py 에서 prefix='/api/v1/schema' 등으로 mount 되면
+#      실제 URL: /api/v1/schema/pattern-kb/stats
+#   → prefix='/api/v1' 이면 /api/v1/pattern-kb/stats
+# ════════════════════════════════════════════════════════════════
+@router.get("/pattern-kb/stats")
+def get_pattern_kb_stats_h032():
+    """Pattern Library 의 현재 자산 상태."""
+    try:
+        from app.core.pattern_kb import load_pattern_kb, kb_value_report
+        kb = load_pattern_kb()
+        report = kb_value_report(kb)
+        patterns = kb.get('patterns', [])
+        report['auto_extracted'] = sum(1 for p in patterns if p.get('auto_extracted'))
+        report['curated'] = report['total_patterns'] - report['auto_extracted']
+        report['avg_confidence'] = (
+            round(sum(p.get('confidence', 0) for p in patterns) / len(patterns), 3)
+            if patterns else 0
+        )
+        return {'success': True, 'kb': report}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+@router.get("/pattern-kb/list")
+def list_pattern_kb_h032(limit: int = 50, offset: int = 0,
+                         category: str = None, min_confidence: float = 0.0):
+    """Pattern Library 의 패턴 목록 (페이징)."""
+    try:
+        from app.core.pattern_kb import load_pattern_kb
+        kb = load_pattern_kb()
+        patterns = kb.get('patterns', [])
+        if category:
+            patterns = [p for p in patterns if p.get('category') == category]
+        if min_confidence > 0:
+            patterns = [p for p in patterns if p.get('confidence', 0) >= min_confidence]
+        patterns.sort(key=lambda p: (-p.get('use_count', 0), p.get('priority', 999)))
+        return {
+            'success': True,
+            'total': len(patterns),
+            'limit': limit, 'offset': offset,
+            'patterns': patterns[offset:offset+limit],
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+@router.get("/pattern-kb/top")
+def top_pattern_kb_h032(n: int = 10):
+    """Top N 사용된 패턴."""
+    try:
+        from app.core.pattern_kb import load_pattern_kb
+        kb = load_pattern_kb()
+        patterns = sorted(
+            kb.get('patterns', []),
+            key=lambda p: -p.get('use_count', 0),
+        )[:n]
+        return {
+            'success': True,
+            'top': [
+                {
+                    'pattern_id': p.get('pattern_id'),
+                    'name': p.get('name'),
+                    'category': p.get('category'),
+                    'use_count': p.get('use_count', 0),
+                    'confidence': p.get('confidence', 0),
+                    'auto_extracted': p.get('auto_extracted', False),
+                }
+                for p in patterns
+            ],
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+@router.get("/pattern-kb/validation-stats")
+def get_validation_stats_h032():
+    """MySQL 실행 검증 통계."""
+    try:
+        from app.core.mysql_runtime_validator import get_validation_stats
+        return {'success': True, 'stats': get_validation_stats()}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+# ════════════════════════════════════════════════════════════════
+
+
 # ── DB 별 테이블 목록 ─────────────────────────────────────
 def _mysql_tables(h, p, u, pw, db):
     import pymysql
@@ -1729,6 +1824,112 @@ def execute_object(body: dict):
         if _src_schema:
             _add(f"{_src_schema}_{_bare}")                        # credit_fn_age
             _add(f"{_src_schema}__{_bare}")                       # credit__fn_age
+        
+        # ────────────────────────────────────────────────────────
+        # v95_p107 hotfix_035 (2026-05-11 본부장님 17번째 본질 통찰):
+        #   본부장님 환경 실제 발견된 추가 패턴:
+        #
+        #   1. TRIGGER 의 _insert/_update/_delete 접미사
+        #      iuPerson → Person_iuPerson_update / _insert / _DELETE
+        #      iduSalesOrderDetail → Sales_iduSalesOrderDetail_DELETE
+        #
+        #   2. schema prefix 케이스 변형
+        #      uspGetWhereUsedProductID → production_uspGetWhereUsedProductID (소문자!)
+        #      ufnGetProductListPrice → dbo_ + Production_ 두 곳 (다른 schema)
+        #
+        #   3. snake_case 변환
+        #      ufnLeadingZeros → dbo_ufnLeading_zeros (Leading + _ + zeros)
+        #
+        #   4. 다른 schema 까지 검색 (AI 가 dbo_ vs Sales_ 등 임의 선택)
+        # ────────────────────────────────────────────────────────
+        _h035_added = []
+        # TRIGGER 의 경우 _insert/_update/_delete 접미사
+        for _suffix in ['_insert', '_update', '_delete',
+                         '_INSERT', '_UPDATE', '_DELETE']:
+            if _src_schema:
+                _new = f"{_src_schema}_{_bare}{_suffix}"
+                if _new not in _candidates:
+                    _candidates.append(_new)
+                    _h035_added.append(_new)
+                _new = f"{_src_schema.lower()}_{_bare}{_suffix}"
+                if _new not in _candidates:
+                    _candidates.append(_new)
+                    _h035_added.append(_new)
+            _new = f"dbo_{_bare}{_suffix}"
+            if _new not in _candidates:
+                _candidates.append(_new)
+                _h035_added.append(_new)
+        
+        # 소문자 schema prefix (Production → production)
+        if _src_schema:
+            _new = f"{_src_schema.lower()}_{_bare}"
+            if _new not in _candidates:
+                _candidates.append(_new)
+                _h035_added.append(_new)
+        
+        # dbo_ prefix (AI 가 흔히 사용)
+        if 'dbo_' not in [c[:4] for c in _candidates]:
+            _new = f"dbo_{_bare}"
+            if _new not in _candidates:
+                _candidates.append(_new)
+                _h035_added.append(_new)
+        
+        # snake_case 변환 (CamelCase → camel_case)
+        import re as _re_h035
+        _snake = _re_h035.sub(r'(?<!^)(?=[A-Z])', '_', _bare).lower()
+        if _snake != _bare.lower() and _snake != _bare:
+            for _prefix in ['dbo_', f'{_src_schema}_' if _src_schema else 'dbo_',
+                            f'{_src_schema.lower()}_' if _src_schema else 'dbo_']:
+                _new = f"{_prefix}{_snake}"
+                if _new not in _candidates:
+                    _candidates.append(_new)
+                    _h035_added.append(_new)
+            if _snake not in _candidates:
+                _candidates.append(_snake)
+                _h035_added.append(_snake)
+        
+        # v95_p107 hotfix_035: 부분 snake_case 변환 (AI 흔히 발생)
+        # 본부장님 환경 사례: ufnLeadingZeros → ufnLeading_zeros (마지막 단어만 분리)
+        # 또는 ufn_leadingZeros (첫 단어만 분리) 등
+        _partial_variants = []
+        # 마지막 대문자 단어 앞에 _ 삽입: ufnLeadingZeros → ufnLeading_zeros
+        _last_word_match = _re_h035.match(r'^(.+?)([A-Z][a-z]+)$', _bare)
+        if _last_word_match:
+            _v = f"{_last_word_match.group(1)}_{_last_word_match.group(2).lower()}"
+            _partial_variants.append(_v)
+        # 첫 단어 분리: ufnLeadingZeros → ufn_LeadingZeros
+        _first_word_match = _re_h035.match(r'^([a-z]+)([A-Z].+)$', _bare)
+        if _first_word_match:
+            _v = f"{_first_word_match.group(1)}_{_first_word_match.group(2).lower()}"
+            _partial_variants.append(_v)
+        
+        for _pv in _partial_variants:
+            for _prefix in ['dbo_', f'{_src_schema}_' if _src_schema else 'dbo_',
+                            f'{_src_schema.lower()}_' if _src_schema else 'dbo_']:
+                _new = f"{_prefix}{_pv}"
+                if _new not in _candidates:
+                    _candidates.append(_new)
+                    _h035_added.append(_new)
+        
+        # 다른 schema 도 추가 (AI 가 dbo 와 Sales 등 무작위)
+        for _other_schema in ['dbo', 'Sales', 'Production', 'HumanResources',
+                                'Person', 'Purchasing']:
+            if _other_schema != _src_schema:
+                _new = f"{_other_schema}_{_bare}"
+                if _new not in _candidates:
+                    _candidates.append(_new)
+                    _h035_added.append(_new)
+        
+        # 로그 (진단용)
+        if _h035_added:
+            try:
+                import logging as _lg_h035
+                _lg_h035.getLogger("databridge.schema").info(
+                    "[CHECK_EXISTS-h035] %s 추가 후보 %d개 (총 %d): %s...",
+                    _bare, len(_h035_added), len(_candidates), _h035_added[:5],
+                )
+            except Exception:
+                pass
 
         try:
             if db_type in ("mysql","aurora","cloudsql","tidb","mariadb"):
@@ -4294,15 +4495,374 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
                     obj_type, obj_name,
                     _kb_hit.get("id"), _kb_hit.get("source"), _kb_hit.get("use_count"),
                 )
+                # ════════════════════════════════════════════════════════════
+                # v95_p107 hotfix_026 (2026-05-11 오후): KB 매칭 결과 자동 정화
+                #
+                # 본부장님 환경 본질 (오늘 오후 발견):
+                #   KB 에 깨진 SQL 5개 등록됨 (CTE FROM 누락, PIVOT 미변환 등)
+                #   use_count=2~3 — 매번 매칭되지만 실행 시 1064
+                #   본부장님 11번째 통찰: "학습한게 영향 받아야"
+                #
+                # 처방: KB 매칭 결과를 그대로 반환하지 않고 자동 정화:
+                #   - CTE FROM 절 누락 자동 보강 (cte_from_fixer)
+                #   - PIVOT → CASE WHEN 결정적 변환 (pivot_to_case_when)
+                #   - T-SQL 잔재 정화 (tsql_residue_cleaner, hotfix_025)
+                # ════════════════════════════════════════════════════════════
+                _kb_tgt = _kb_hit["tgt_sample_ddl"]
+                try:
+                    from app.core.kb_match_cleanup import cleanup_kb_match_result
+                    _kb_cleaned, _kb_fixes = cleanup_kb_match_result(
+                        _kb_tgt, obj_type, obj_name
+                    )
+                    if _kb_fixes:
+                        _log.info(
+                            "[v95_p107-KB-CLEANUP-h026] %s [%s] %s",
+                            obj_type, obj_name, _kb_fixes,
+                        )
+                        _trace("01c-kb-cleanup", fixes=_kb_fixes[:3])
+                        _kb_tgt = _kb_cleaned
+                except Exception as _kbc:
+                    _log.warning(
+                        "[v95_p107-h026] KB 매칭 정화 실패 (무시, 원본 사용): %s",
+                        _kbc,
+                    )
+                
+                # ════════════════════════════════════════════════════════
+                # v95_p107 hotfix_032 (2026-05-11 본부장님 진가의 마지막 본질):
+                #   KB 매칭 시점에도 MySQL 사후 검증.
+                #   깨진 KB 면 자동 제거 + 다음 Layer (Pattern KB) 위임.
+                #
+                # 본부장님 화면 데이터 입증 (오늘 18:53):
+                #   13개 객체가 매번 같은 흐름:
+                #     kb_match_first → 실패 → AI(Gemma)성공
+                #   → KB 의 SQL 이 깨진 채로 (1064/1582/1363)
+                #   → 사후 검증 + 자동 제거 필요
+                # ════════════════════════════════════════════════════════
+                try:
+                    from app.core.mysql_runtime_validator import (
+                        validate_mysql_execution, record_validation,
+                    )
+                    _kb_valid, _kb_val_msg = validate_mysql_execution(
+                        _kb_tgt, obj_type, obj_name,
+                    )
+                    record_validation(_kb_valid, _kb_val_msg)
+                    
+                    if not _kb_valid:
+                        # KB 가 깨진 SQL — 제거 + 다음 Layer 위임
+                        _log.warning(
+                            "[v95_p107-KB-MATCH-VALIDATION-FAIL] %s [%s] "
+                            "KB 매칭됐지만 MySQL 실행 실패 — KB 제거 + 재변환: %s",
+                            obj_type, obj_name, _kb_val_msg,
+                        )
+                        try:
+                            from app.core.obj_executor import (
+                                _kb_remove_pattern as _kb_remove_h032,
+                            )
+                            _kb_remove_h032(
+                                src_db, tgt_db, obj_type, obj_name,
+                            )
+                            _log.info(
+                                "[v95_p107-KB-REMOVE-h032] %s [%s] 깨진 KB 자동 제거",
+                                obj_type, obj_name,
+                            )
+                        except (ImportError, AttributeError):
+                            # _kb_remove_pattern 없으면 use_count -1 등으로 약화
+                            try:
+                                from app.core.obj_executor import _kb_match_pattern
+                                # 본부장님 환경엔 remove 가 없을 수 있음
+                                # → fallthrough: KB 안 쓰고 다음 Layer 진행
+                                pass
+                            except Exception:
+                                pass
+                        except Exception as _kre:
+                            _log.warning(
+                                "[v95_p107-h032] KB 제거 실패 (무시): %s", _kre,
+                            )
+                        # ⭐ 결정적 본질: 깨진 KB 반환 안 함 → 다음 Layer 진행
+                        # KB 매칭 흐름을 빠져나가 Pattern KB 로
+                        raise _KbValidationFailed(_kb_val_msg)
+                    else:
+                        _log.info(
+                            "[v95_p107-KB-MATCH-VALIDATION-OK] %s [%s] "
+                            "KB 매칭 + MySQL 검증 통과 (%s)",
+                            obj_type, obj_name, _kb_val_msg,
+                        )
+                except _KbValidationFailed:
+                    # 깨진 KB → 다음 Layer 로 위임 (raise 안 함, 그냥 KB 흐름 skip)
+                    raise
+                except Exception as _vex:
+                    _log.warning(
+                        "[v95_p107-h032] KB 매칭 사후 검증 중 오류 (무시, KB 사용): %s",
+                        _vex,
+                    )
+                
                 return {
-                    "statements": [_kb_hit["tgt_sample_ddl"]],
+                    "statements": [_kb_tgt],
                     "notes": (f"[KB 매칭 source={_kb_hit.get('source')} "
                               f"use_count={_kb_hit.get('use_count')}]"),
                     # v95_p107 hotfix_013: 호출자가 변환 경로 추적용
                     "path_marker": "kb_match",
                 }
+        except _KbValidationFailed as _kvf:
+            # 깨진 KB → Pattern KB 로 위임
+            _log.info(
+                "[v95_p107-h032] KB 매칭 검증 실패 → Pattern KB 로 위임 (%s)",
+                _kvf,
+            )
         except Exception as _kme:
             _log.warning("[v95_p107] KB 매칭 시도 실패 (무시, AI 변환 진행): %s", _kme)
+    # ════════════════════════════════════════════════════════════════
+
+    # ════════════════════════════════════════════════════════════════
+    # v95_p107 hotfix_030 (2026-05-11 본부장님 15번째 본질 통찰):
+    #   "SQL 통째 KB 는 다양한 SQL 수용 불가. 패턴 자산화가 본질."
+    #
+    # Pattern-Based KB 우선 진입 — SQLGlot 도 못 하는 context-dependent 처리.
+    #
+    # 본부장님 환경 5쌍 데이터 검증 입증:
+    #   - TVF → PROCEDURE 구조 변환 (SQLGlot 가 Fallback Command 처리)
+    #   - @변수 context (param vs DECLARE vs body) — SQLGlot 못 함
+    #   - TRIGGER body 의 multi-DECLARE — SQLGlot 못 함
+    #   - TRY/CATCH 단순화
+    #
+    # 4-Layer 순서:
+    #   1. KB 매칭 (위)
+    #   2. Pattern KB (Context-Aware + 정규식)  ← 이 위치
+    #   3. SQLGlot (아래)
+    #   4. AI (마지막 fallback)
+    #
+    # 본부장님 모토 #19 (air-gapped) 정면 — AI 없이도 작동.
+    # ════════════════════════════════════════════════════════════════
+    try:
+        from app.core.context_pattern import apply_context_patterns
+        from app.core.pattern_kb import apply_patterns as _apply_pattern_kb
+        from app.core.pattern_kb import record_pattern_use as _record_pat_use
+        
+        # Step 1: Context-Aware (SP/FN/TRIGGER 구조 인식 변환)
+        _ctx_result, _ctx_fixes = apply_context_patterns(src_ddl)
+        
+        # Step 2: Pattern KB (정규식 변환)
+        _final_result, _kb_applied = _apply_pattern_kb(_ctx_result)
+        
+        # 변환이 의미있게 일어났나? (잔재 검사)
+        # ════════════════════════════════════════════════════════════════
+        # v95_p107 hotfix_107 (2026-05-14 본부장님 통찰 — 본질 재정의):
+        #   "하드코딩 룰은 다른 문장에 적용 가능한가" 의문
+        #
+        # 어제 본질 발견:
+        #   _ctx_fixes (Context-Aware) 만 있고 _kb_applied (Pattern) 가 0 일 때
+        #   → "Pattern KB 우선 변환 성공" 처리 (AI 호출 0회)
+        #   → 결과: 본문 손실 (481 → 131 bytes), MySQL 1320 (No RETURN found)
+        #
+        # 본질 처방:
+        #   _kb_applied (진짜 Pattern 매칭) 가 있을 때만 Pattern KB 우선 변환 사용.
+        #   Context-Aware 단독은 단순 텍스트 치환에 불과 — 충분 변환 보장 안 됨.
+        #   Pattern 0건 → AI 호출 (Layer 4) 으로 폴백 → 본질 처리.
+        #
+        # 본부장님 모토 #4 (살아있는 자산 본질):
+        #   Pattern KB v3.0 (49개) 의 진짜 매칭만 인정.
+        #   Context-Aware 만의 "변환 성공" 은 거짓 자산화 위험.
+        # ════════════════════════════════════════════════════════════════
+        if _kb_applied:   # ← 진짜 Pattern 매칭 있을 때만 (Context-Aware 단독 X)
+            import re as _re_check
+            _leaks = []
+            if _re_check.search(r'\[(\w+)\]', _final_result): _leaks.append('[bracket]')
+            if _re_check.search(r'@\w+', _final_result): _leaks.append('@변수')
+            if _re_check.search(r'\bBEGIN\s+TRY\b', _final_result, _re_check.IGNORECASE): _leaks.append('BEGIN TRY')
+            if _re_check.search(r'@@(?:ROWCOUNT|IDENTITY)', _final_result, _re_check.IGNORECASE): _leaks.append('@@function')
+            if _re_check.search(r'CREATE\s+FUNCTION\s+\[', _final_result, _re_check.IGNORECASE): _leaks.append('CREATE FUNCTION [bracket]')
+            
+            if not _leaks:
+                # 완전 깨끗 → Pattern KB 변환 성공 (SQLGlot/AI 호출 0)
+                _trace("01e-pattern-kb-ok",
+                       ctx_fixes=len(_ctx_fixes), kb_patterns=len(_kb_applied))
+                _log.info(
+                    "[v95_p107-PATTERN-KB-FIRST] %s [%s] Pattern KB 우선 변환 성공 — "
+                    "Context-Aware %d건, Pattern %d건 (AI 호출 0회)",
+                    obj_type, obj_name,
+                    len(_ctx_fixes), len(_kb_applied),
+                )
+                # Pattern use count 갱신 (살아있는 자산)
+                try:
+                    _record_pat_use([p['pattern_id'] for p in _kb_applied])
+                except Exception:
+                    pass
+                
+                # ════════════════════════════════════════════════════════
+                # v95_p107 hotfix_031 (2026-05-11 본부장님 13+16번째 본질):
+                #   "MySQL 실행 검증 통과한 SQL 만 KB 자산화"
+                #   "지속적으로 KB 를 쌓고 타겟 DB 에서 잘 수행되면 이용"
+                # ════════════════════════════════════════════════════════
+                _kb_safe = False
+                _validation_msg = ""
+                try:
+                    from app.core.mysql_runtime_validator import (
+                        validate_mysql_execution, record_validation,
+                    )
+                    _is_valid, _validation_msg = validate_mysql_execution(
+                        _final_result, obj_type, obj_name,
+                    )
+                    record_validation(_is_valid, _validation_msg)
+                    _kb_safe = _is_valid
+                except Exception as _vex:
+                    _log.warning(
+                        "[v95_p107-h031] MySQL 검증 실패 (안전 통과): %s", _vex,
+                    )
+                    _kb_safe = True  # 검증 안 되면 안전 통과 (기존 게이트로 fallback)
+                
+                # 기존 게이트도 추가 검증
+                if _kb_safe:
+                    try:
+                        _kb_safe_gate, _ = _kb_quality_gate_p107(_final_result, src_ddl)
+                        _kb_safe = _kb_safe and _kb_safe_gate
+                    except Exception:
+                        pass
+                
+                # KB 등록 (MySQL 검증 통과 + 게이트 통과)
+                if _kb_safe:
+                    try:
+                        from app.core.obj_executor import _kb_register_pattern as _kb_reg_h031
+                        _kb_reg_h031(
+                            src_db, tgt_db, obj_type, obj_name,
+                            src_ddl, _final_result, source="pattern_kb_verified",
+                        )
+                        _log.info(
+                            "[v95_p107-PATTERN-KB-REGISTER] %s [%s] "
+                            "Pattern KB 변환 결과 자산화 완료 (MySQL 검증 %s)",
+                            obj_type, obj_name, _validation_msg,
+                        )
+                        
+                        # v95_p107 hotfix_031: Pattern Auto-Extract
+                        # 검증된 변환 쌍에서 새 Pattern 자동 발견
+                        try:
+                            from app.core.pattern_extractor import auto_extract_and_register
+                            _new_pats = auto_extract_and_register(
+                                src_ddl, _final_result, obj_type, obj_name,
+                                verified=True,
+                            )
+                            if _new_pats:
+                                _log.info(
+                                    "[v95_p107-PATTERN-AUTO-EXTRACT] %s [%s] "
+                                    "새 Pattern %d개 자동 학습 (Library 성장)",
+                                    obj_type, obj_name, len(_new_pats),
+                                )
+                        except Exception as _aex:
+                            _log.warning("[v95_p107-h031] auto_extract: %s", _aex)
+                    except Exception as _kre:
+                        _log.warning("[v95_p107-h031] KB 등록 실패 (무시): %s", _kre)
+                else:
+                    _log.warning(
+                        "[v95_p107-PATTERN-KB-VALIDATION-FAIL] %s [%s] "
+                        "MySQL 검증 실패 — KB 자산화 거부 (살아있는 자산 본질): %s",
+                        obj_type, obj_name, _validation_msg,
+                    )
+                    # 검증 실패 시 → Pattern KB 결과 반환은 하되 KB 등록 안 함
+                    # 다음 Layer (SQLGlot/AI) 로 위임할지 결정
+                    # 일단 결과는 반환 (호출자가 재시도 또는 AI 위임)
+                
+                return {
+                    "statements": [_final_result],
+                    "notes": (
+                        f"Pattern KB 우선 변환 — "
+                        f"Context-Aware {len(_ctx_fixes)}건, "
+                        f"Pattern {len(_kb_applied)}건"
+                    ),
+                    "path_marker": "pattern_kb_first",
+                }
+            else:
+                # 잔재 있음 → SQLGlot/AI 로 위임
+                _log.info(
+                    "[v95_p107-PATTERN-KB-PARTIAL] %s [%s] Pattern KB 부분 변환 — "
+                    "잔재 %s (다음 Layer 위임)",
+                    obj_type, obj_name, _leaks,
+                )
+    except Exception as _pke:
+        _log.warning(
+            "[v95_p107-h030] Pattern KB 우선 진입 실패 (무시, SQLGlot/AI 진행): %s",
+            _pke,
+        )
+    # ════════════════════════════════════════════════════════════════
+
+    # ════════════════════════════════════════════════════════════════
+    # v95_p107 hotfix_026 (2026-05-11 오후 본부장님 12번째 본질 처방):
+    #   SQLGlot 우선 진입 — 4-Layer 의 Layer 3 본격 활용
+    #
+    # 본부장님 12번째 본질 통찰 (오늘 오후):
+    #   "다운받은 모듈을 활용해서 질을 높이는게 목적 아냐?"
+    #
+    # 본부장님 환경 PoC 입증 (오전):
+    #   SQLGlot 직접 변환 — 큰 객체 5/8 성공
+    #   - vJobCandidate, vJobCandidateEmployment, vAdditionalContactInfo,
+    #     vProductModelCatalogDescription (XML 처리), vSalesPersonSalesByFiscalYears
+    #
+    # 처방: 큰 객체 (≥1.5KB) 또는 PIVOT/CTE/CROSS APPLY 패턴 →
+    #   AI 호출 전에 SQLGlot 우선 시도 → 성공 시 AI 호출 0회
+    #
+    # v95_p107 hotfix_027 (2026-05-11 오후 본부장님 12번째 본질의 진가):
+    #   SQLGlot 은 결정적 변환 — error_hint 무관 항상 시도.
+    #   재실행 케이스 (error_hint 있음) 에서도 SQLGlot 우선 진입.
+    #   본부장님 모토 #4 (한방에) + 본부장님 hotfix_024 의 Rule Engine 처럼.
+    # ════════════════════════════════════════════════════════════════
+    try:
+        from app.core.sqlglot_first_engine import try_sqlglot_first
+        _sg_result = try_sqlglot_first(src_ddl, obj_type, obj_name, error_hint)
+        if _sg_result and _sg_result.get("final_sql"):
+            _trace("01d-sqlglot-first-ok",
+                   elapsed_ms=_sg_result.get("elapsed_ms"),
+                   ratio=_sg_result.get("ratio"))
+            _log.info(
+                "[v95_p107-SQLGLOT-FIRST] %s [%s] SQLGlot 우선 변환 성공 — "
+                "%dms (ratio=%.2f, AI 호출 0회, error_hint=%s)",
+                obj_type, obj_name,
+                _sg_result.get("elapsed_ms", 0),
+                _sg_result.get("ratio", 0),
+                bool(error_hint),
+            )
+            # SQLGlot 결과도 post-processing (T-SQL 잔재 정화)
+            try:
+                from app.core.tsql_residue_cleaner import clean_tsql_residues
+                _sg_cleaned, _sg_fixes = clean_tsql_residues(
+                    _sg_result["final_sql"], obj_type, obj_name
+                )
+                if _sg_fixes:
+                    _log.info(
+                        "[v95_p107-SQLGLOT-POSTCLEAN] %s [%s] %s",
+                        obj_type, obj_name, _sg_fixes,
+                    )
+                _sg_final = _sg_cleaned
+            except Exception:
+                _sg_final = _sg_result["final_sql"]
+            
+            # KB 등록 (SQLGlot 결과 자산화)
+            try:
+                from app.core.obj_executor import _kb_register_pattern as _kb_reg_h026
+                _kb_safe, _kb_reason = _kb_quality_gate_p107(_sg_final, src_ddl)
+                if _kb_safe:
+                    _kb_reg_h026(
+                        src_db, tgt_db, obj_type, obj_name,
+                        src_ddl, _sg_final, source="sqlglot_first",
+                    )
+                    _log.info(
+                        "[v95_p107-SQLGLOT-KB-REGISTER] %s [%s] "
+                        "SQLGlot 결과 KB 자산화 완료",
+                        obj_type, obj_name,
+                    )
+            except Exception as _kre:
+                _log.warning(
+                    "[v95_p107-SQLGLOT-KB-ERR] %s [%s] %s",
+                    obj_type, obj_name, _kre,
+                )
+            
+            return {
+                "statements": [_sg_final],
+                "notes": _sg_result.get("notes", "SQLGlot 우선 변환"),
+                "path_marker": "sqlglot_first",
+            }
+    except Exception as _sge:
+        _log.warning(
+            "[v95_p107-h026] SQLGlot 우선 진입 실패 (무시, AI 진행): %s",
+            _sge,
+        )
     # ════════════════════════════════════════════════════════════════
 
     # anthropic_api_key (시스템 설정) 또는 claude_api_key 둘 다 시도
@@ -4998,18 +5558,66 @@ def _ai_convert_ddl(src_ddl: str, obj_type: str, obj_name: str,
                     )
                     _trace("15b-kb-rejected", obj_name=obj_name, reason=_kb_reason)
                 else:
-                    _kb_reg_p107(
-                        src_db=src_db, tgt_db=tgt_db,
-                        obj_type=obj_type, obj_name=obj_name,
-                        src_ddl=src_ddl, tgt_ddl=_converted_ddl,
-                        source="ai_success",
-                    )
-                    _trace("15b-kb-registered", obj_name=obj_name)
-                    _log.info(
-                        "[v95_p107-KB-REGISTER] %s [%s] 변환 성공 SQL → KB 등록 "
-                        "(다음 이관 시 RAG 매칭 가능)",
-                        obj_type, obj_name,
-                    )
+                    # ────────────────────────────────────────────────────
+                    # v95_p107 hotfix_031 (2026-05-11 본부장님 13+16번째 본질):
+                    #   AI 변환 결과도 MySQL 실행 검증 통과 후 KB 자산화
+                    #   + 검증 통과한 변환 쌍에서 새 Pattern 자동 학습
+                    # ────────────────────────────────────────────────────
+                    _kb_verified = True
+                    _val_msg = ""
+                    try:
+                        from app.core.mysql_runtime_validator import (
+                            validate_mysql_execution, record_validation,
+                        )
+                        _is_valid, _val_msg = validate_mysql_execution(
+                            _converted_ddl, obj_type, obj_name,
+                        )
+                        record_validation(_is_valid, _val_msg)
+                        _kb_verified = _is_valid
+                    except Exception as _vex:
+                        _log.warning(
+                            "[v95_p107-h031] AI 결과 MySQL 검증 실패 (안전 통과): %s",
+                            _vex,
+                        )
+                    
+                    if _kb_verified:
+                        _kb_reg_p107(
+                            src_db=src_db, tgt_db=tgt_db,
+                            obj_type=obj_type, obj_name=obj_name,
+                            src_ddl=src_ddl, tgt_ddl=_converted_ddl,
+                            source="ai_success_verified",
+                        )
+                        _trace("15b-kb-registered", obj_name=obj_name)
+                        _log.info(
+                            "[v95_p107-KB-REGISTER] %s [%s] AI 변환 SQL → KB 등록 "
+                            "(MySQL 검증 %s, 다음 이관 시 RAG 매칭 가능)",
+                            obj_type, obj_name, _val_msg,
+                        )
+                        
+                        # Pattern Auto-Extract (본부장님 비전 정면)
+                        try:
+                            from app.core.pattern_extractor import auto_extract_and_register
+                            _new_pats = auto_extract_and_register(
+                                src_ddl, _converted_ddl, obj_type, obj_name,
+                                verified=True,
+                            )
+                            if _new_pats:
+                                _log.info(
+                                    "[v95_p107-PATTERN-AUTO-EXTRACT] %s [%s] "
+                                    "AI 변환 결과에서 새 Pattern %d개 학습 (Library 성장)",
+                                    obj_type, obj_name, len(_new_pats),
+                                )
+                        except Exception as _aex:
+                            _log.warning("[v95_p107-h031] auto_extract: %s", _aex)
+                    else:
+                        _log.warning(
+                            "[v95_p107-KB-VALIDATION-FAIL] %s [%s] "
+                            "AI 변환 SQL MySQL 검증 실패 — KB 자산화 거부 "
+                            "(살아있는 자산 본질): %s",
+                            obj_type, obj_name, _val_msg,
+                        )
+                        _trace("15b-kb-validation-failed",
+                               obj_name=obj_name, reason=_val_msg)
             except Exception as _kre:
                 _log.warning("[v95_p107] KB 등록 실패 (무시): %s", _kre)
         # ════════════════════════════════════════════════════════════

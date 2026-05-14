@@ -1,0 +1,584 @@
+<!--
+  AiEngineMonitor.vue — AI 엔진 실시간 상태 플로팅 팝업
+  v95_p107 hotfix_085 (2026-05-13 본부장님 본질 처방)
+  
+  요구사항:
+    ✅ Topbar 의 AI 버튼 클릭 → 이 팝업 열림 (좌클릭=팝업, ⚙=설정 이동)
+    ✅ 드래그로 어디든 이동, 펼침/최소화 토글
+    ✅ Teleport to=body (페이지 이동해도 유지)
+    ✅ 5초 polling /api/v1/ai-stats/live
+    ✅ 메모리 #4 가시화 — "AI 호출 점점 감소" 진짜 일어나는지 보여줌
+    ✅ FloatingMonitor 톤 100% 재사용 (디자인 일관성)
+-->
+<template>
+  <Teleport to="body">
+    <div
+      v-if="visible"
+      class="aem-root"
+      :class="{ 'aem-min': minimized, 'aem-dragging': dragging }"
+      :style="rootStyle"
+      role="dialog"
+      aria-label="AI 엔진 실시간 모니터"
+    >
+      <!-- ── 헤더 ──────────────────────────── -->
+      <div class="aem-header" @pointerdown="startDrag">
+        <span class="aem-dot" :class="statusDotClass" />
+        <span class="aem-title">
+          <template v-if="!minimized">AI 엔진 모니터</template>
+          <template v-else>{{ minimizedSummary }}</template>
+        </span>
+        <div class="aem-actions" @pointerdown.stop>
+          <button class="aem-btn" :title="minimized ? '펼치기' : '접기'"
+                  @click="minimized = !minimized">
+            <svg v-if="minimized" viewBox="0 0 12 12" width="10" height="10">
+              <polyline points="2,4 6,8 10,4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            </svg>
+            <svg v-else viewBox="0 0 12 12" width="10" height="10">
+              <line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.6"/>
+            </svg>
+          </button>
+          <button class="aem-btn" title="닫기" @click="close">
+            <svg viewBox="0 0 12 12" width="10" height="10">
+              <line x1="2.5" y1="2.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1.6"/>
+              <line x1="9.5" y1="2.5" x2="2.5" y2="9.5" stroke="currentColor" stroke-width="1.6"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- ── 본문 (펼친 상태) ──────────────── -->
+      <div v-if="!minimized" class="aem-body">
+
+        <!-- 1. Provider 정보 -->
+        <section class="aem-sec">
+          <h4 class="aem-sec-title">Provider</h4>
+          <div class="aem-row">
+            <span class="aem-l">엔진</span>
+            <span class="aem-v">
+              <strong>{{ providerLabel }}</strong>
+              <span v-if="data.provider === 'ollama' && data.ollama"
+                    class="aem-tag" :class="data.ollama.reachable ? 'aem-tag-on' : 'aem-tag-off'">
+                {{ data.ollama.reachable ? '연결됨' : '연결실패' }}
+              </span>
+            </span>
+          </div>
+          <div v-if="data.provider === 'ollama' && data.ollama" class="aem-row">
+            <span class="aem-l">URL</span>
+            <span class="aem-v aem-mono">{{ data.ollama.url }}</span>
+          </div>
+          <div v-if="data.provider === 'ollama' && data.ollama?.configured_model" class="aem-row">
+            <span class="aem-l">설정 모델</span>
+            <span class="aem-v aem-mono">{{ data.ollama.configured_model }}</span>
+          </div>
+          <div v-if="data.provider === 'anthropic' && data.anthropic" class="aem-row">
+            <span class="aem-l">API 키</span>
+            <span class="aem-v">
+              <span class="aem-tag" :class="data.anthropic.api_key_set ? 'aem-tag-on' : 'aem-tag-off'">
+                {{ data.anthropic.api_key_set ? '설정됨' : '미설정' }}
+              </span>
+            </span>
+          </div>
+          <div v-if="data.ollama?.error" class="aem-err">
+            ⚠ {{ data.ollama.error }}
+          </div>
+        </section>
+
+        <!-- 2. RAM 로드된 모델 -->
+        <section v-if="data.provider === 'ollama' && data.ollama?.reachable" class="aem-sec">
+          <h4 class="aem-sec-title">
+            로드된 모델
+            <span class="aem-sec-count">{{ data.ollama.loaded_models?.length || 0 }}</span>
+          </h4>
+          <div v-if="!data.ollama.loaded_models?.length" class="aem-empty">
+            RAM 에 로드된 모델 없음 (첫 변환 호출 시 자동 로드)
+          </div>
+          <div v-for="m in data.ollama.loaded_models" :key="m.name" class="aem-model">
+            <div class="aem-model-head">
+              <span class="aem-mono aem-strong">{{ m.name }}</span>
+              <span class="aem-sub">{{ m.size_gb }} GB</span>
+            </div>
+            <!-- Processor 분포 (CPU/GPU 비율) -->
+            <div class="aem-bar-row">
+              <span class="aem-l-sm">Processor</span>
+              <div class="aem-bar">
+                <div class="aem-bar-cpu" :style="{ width: m.cpu_pct + '%' }"
+                     :title="`CPU ${m.cpu_pct}%`"></div>
+                <div class="aem-bar-gpu" :style="{ width: m.gpu_pct + '%' }"
+                     :title="`GPU ${m.gpu_pct}%`"></div>
+              </div>
+              <span class="aem-bar-lbl">CPU {{ m.cpu_pct }}% · GPU {{ m.gpu_pct }}%</span>
+            </div>
+            <!-- 잔여 시간 -->
+            <div v-if="m.expires_in_sec !== null && m.expires_in_sec !== undefined" class="aem-row">
+              <span class="aem-l-sm">RAM 잔여</span>
+              <span class="aem-v">
+                <span :class="expiresClass(m.expires_in_sec)">
+                  {{ formatDuration(m.expires_in_sec) }}
+                </span>
+                <span class="aem-sub" v-if="m.expires_in_sec > 0">
+                  ({{ Math.floor(m.expires_in_sec / 60) }}분 후 언로드)
+                </span>
+              </span>
+            </div>
+            <!-- Context window -->
+            <div v-if="m.context" class="aem-row">
+              <span class="aem-l-sm">Context</span>
+              <span class="aem-v aem-mono">{{ formatNum(m.context) }} 토큰</span>
+            </div>
+            <div v-if="m.parameter_size" class="aem-row">
+              <span class="aem-l-sm">Parameter</span>
+              <span class="aem-v aem-mono">{{ m.parameter_size }}{{ m.quantization ? ' · ' + m.quantization : '' }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 오늘 세션 메트릭 — 메모리 #4 가시화 -->
+        <section class="aem-sec aem-sec-metric">
+          <h4 class="aem-sec-title">오늘 변환 활동</h4>
+          <div class="aem-metric-grid">
+            <div class="aem-metric">
+              <div class="aem-metric-num aem-num-blue">{{ today.pattern_kb_hits }}</div>
+              <div class="aem-metric-lbl">Pattern KB<br/>적중</div>
+            </div>
+            <div class="aem-metric">
+              <div class="aem-metric-num aem-num-amber">{{ today.ai_calls }}</div>
+              <div class="aem-metric-lbl">AI 호출<br/>(Layer 위임)</div>
+            </div>
+            <div class="aem-metric">
+              <div class="aem-metric-num aem-num-green">{{ today.kb_registers }}</div>
+              <div class="aem-metric-lbl">KB 자산화<br/>(살아있는 자산)</div>
+            </div>
+          </div>
+          <!-- AI 호출 비율 비주얼 -->
+          <div v-if="totalConversions > 0" class="aem-ratio">
+            <div class="aem-ratio-bar">
+              <div class="aem-ratio-kb"
+                   :style="{ width: kbRatio + '%' }"
+                   :title="`Pattern KB: ${kbRatio}%`"></div>
+              <div class="aem-ratio-ai"
+                   :style="{ width: aiRatio + '%' }"
+                   :title="`AI: ${aiRatio}%`"></div>
+            </div>
+            <div class="aem-ratio-lbl">
+              Pattern KB <strong>{{ kbRatio }}%</strong> · AI <strong>{{ aiRatio }}%</strong>
+              <span class="aem-sub">— AI 호출이 감소할수록 KB 자산화가 효과적 (메모리 #4)</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. MySQL 검증 통계 -->
+        <section v-if="data.session?.validator?.total > 0" class="aem-sec">
+          <h4 class="aem-sec-title">MySQL 실행 검증</h4>
+          <div class="aem-row">
+            <span class="aem-l">통과 / 실패</span>
+            <span class="aem-v">
+              <strong class="aem-num-green">{{ data.session.validator.passes }}</strong>
+              <span class="aem-sub"> / </span>
+              <strong class="aem-num-red">{{ data.session.validator.fails }}</strong>
+              <span class="aem-sub"> · 총 {{ data.session.validator.total }}건</span>
+            </span>
+          </div>
+          <div class="aem-row">
+            <span class="aem-l">통과율</span>
+            <span class="aem-v">
+              <strong>{{ validatorPassRate }}%</strong>
+            </span>
+          </div>
+        </section>
+
+        <!-- 5. 액션 -->
+        <div class="aem-footer">
+          <button class="aem-action" @click="refresh"
+                  :disabled="loading" :title="loading ? '로딩 중' : '즉시 새로고침'">
+            {{ loading ? '⋯' : '↻' }} 새로고침
+          </button>
+          <button class="aem-action" @click="openSettings" title="AI 변환 엔진 설정 화면 열기">
+            ⚙ AI 설정
+          </button>
+          <span class="aem-tick">{{ tickLabel }}</span>
+        </div>
+
+      </div>
+    </div>
+  </Teleport>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+
+// ── Props / Emits ────────────────────────────────────────────
+const props = defineProps({
+  modelValue: { type: Boolean, default: false },
+})
+const emit = defineEmits(['update:modelValue', 'open-settings'])
+
+const visible = computed({
+  get: () => props.modelValue,
+  set: (v) => emit('update:modelValue', v),
+})
+
+// ── 상태 ────────────────────────────────────────────────────
+const minimized = ref(false)
+const loading   = ref(false)
+const data      = ref({
+  provider: '',
+  ollama: null,
+  anthropic: null,
+  session: { validator: { passes: 0, fails: 0, total: 0 }, today: {} },
+})
+
+// ── 위치 (드래그) ──────────────────────────────────────────
+const pos = ref({ x: window.innerWidth - 360, y: 72 })
+const dragging = ref(false)
+let dragStart = { x: 0, y: 0, px: 0, py: 0 }
+
+const rootStyle = computed(() => ({
+  left: pos.value.x + 'px',
+  top:  pos.value.y + 'px',
+}))
+
+function startDrag(e) {
+  if (e.button !== 0) return
+  dragging.value = true
+  dragStart = { x: e.clientX, y: e.clientY, px: pos.value.x, py: pos.value.y }
+  window.addEventListener('pointermove', onDrag)
+  window.addEventListener('pointerup',   stopDrag, { once: true })
+  e.preventDefault()
+}
+function onDrag(e) {
+  if (!dragging.value) return
+  const dx = e.clientX - dragStart.x
+  const dy = e.clientY - dragStart.y
+  pos.value = {
+    x: Math.max(8, Math.min(window.innerWidth  - 50, dragStart.px + dx)),
+    y: Math.max(8, Math.min(window.innerHeight - 50, dragStart.py + dy)),
+  }
+}
+function stopDrag() {
+  dragging.value = false
+  window.removeEventListener('pointermove', onDrag)
+  // 위치 기억
+  try { sessionStorage.setItem('aem.pos', JSON.stringify(pos.value)) } catch {}
+}
+
+// 위치 복원
+try {
+  const p = sessionStorage.getItem('aem.pos')
+  if (p) pos.value = JSON.parse(p)
+} catch {}
+
+// ── Computed ────────────────────────────────────────────────
+const providerLabel = computed(() => {
+  if (data.value.provider === 'ollama')    return 'Ollama (자체 호스팅)'
+  if (data.value.provider === 'anthropic') return 'Anthropic Claude'
+  return data.value.provider || '미설정'
+})
+
+const today = computed(() => data.value.session?.today || {
+  ai_calls: 0, pattern_kb_hits: 0, kb_registers: 0, validator_ok: 0, validator_fail: 0,
+})
+
+const totalConversions = computed(() => (today.value.ai_calls || 0) + (today.value.pattern_kb_hits || 0))
+
+const kbRatio = computed(() => {
+  if (totalConversions.value === 0) return 0
+  return Math.round(100 * (today.value.pattern_kb_hits || 0) / totalConversions.value)
+})
+
+const aiRatio = computed(() => Math.max(0, 100 - kbRatio.value))
+
+const validatorPassRate = computed(() => {
+  const v = data.value.session?.validator
+  if (!v || !v.total) return 0
+  return Math.round(100 * v.passes / v.total)
+})
+
+const statusDotClass = computed(() => {
+  if (data.value.provider === 'ollama') {
+    return data.value.ollama?.reachable ? 'aem-dot-on' : 'aem-dot-off'
+  }
+  if (data.value.provider === 'anthropic') {
+    return data.value.anthropic?.api_key_set ? 'aem-dot-on' : 'aem-dot-off'
+  }
+  return 'aem-dot-pending'
+})
+
+const minimizedSummary = computed(() => {
+  if (data.value.provider === 'ollama') {
+    const cnt = data.value.ollama?.loaded_models?.length || 0
+    return cnt > 0
+      ? `AI · Ollama · 모델 ${cnt}개 활성`
+      : 'AI · Ollama · 대기 중'
+  }
+  if (data.value.provider === 'anthropic') return 'AI · Claude API'
+  return 'AI 엔진'
+})
+
+const tickLabel = ref('')
+function updateTick() {
+  const d = new Date()
+  tickLabel.value = '갱신: ' + d.toLocaleTimeString('ko-KR', { hour12: false })
+}
+
+// ── Helpers ─────────────────────────────────────────────────
+function expiresClass(sec) {
+  if (sec === null || sec === undefined) return ''
+  if (sec < 60)   return 'aem-num-red'
+  if (sec < 300)  return 'aem-num-amber'
+  return 'aem-num-green'
+}
+
+function formatDuration(sec) {
+  if (sec === null || sec === undefined) return '—'
+  if (sec <= 0)  return '곧 언로드'
+  if (sec < 60)  return sec + '초'
+  if (sec < 3600) return Math.floor(sec / 60) + '분 ' + (sec % 60) + '초'
+  return Math.floor(sec / 3600) + '시간 ' + Math.floor((sec % 3600) / 60) + '분'
+}
+
+function formatNum(n) {
+  if (!n) return '0'
+  return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+// ── Fetch ───────────────────────────────────────────────────
+async function refresh() {
+  loading.value = true
+  try {
+    const r = await fetch('/api/v1/ai-stats/live', { credentials: 'include' })
+    if (r.ok) {
+      data.value = await r.json()
+      updateTick()
+    }
+  } catch (e) {
+    // 조용히 실패 (polling 이라 다음 주기에 재시도)
+  } finally {
+    loading.value = false
+  }
+}
+
+// ── Polling 5초 (창 열려있을 때만) ─────────────────────────
+let poll = null
+function startPoll() {
+  refresh()
+  poll = setInterval(refresh, 5000)
+}
+function stopPoll() {
+  if (poll) { clearInterval(poll); poll = null }
+}
+
+watch(visible, (v) => { v ? startPoll() : stopPoll() }, { immediate: true })
+
+onUnmounted(() => stopPoll())
+
+// ── 액션 ────────────────────────────────────────────────────
+function close()         { visible.value = false }
+function openSettings()  { emit('open-settings') }
+</script>
+
+<style scoped>
+.aem-root{
+  position:fixed; z-index:9001;
+  width:340px;
+  background:var(--card-bg, #fff);
+  border:1px solid var(--border-mid, #d0d4d9);
+  border-radius:8px;
+  box-shadow:0 6px 24px rgba(0,0,0,0.16);
+  font-family:var(--font, system-ui);
+  font-size:.78rem;
+  color:var(--text-primary, #1a1a1a);
+  user-select:none;
+  transition: transform .12s ease, opacity .12s ease, box-shadow .12s ease;
+}
+.aem-root.aem-dragging {
+  opacity: 0.85;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .22), 0 4px 14px rgba(0, 0, 0, .18);
+  transform: scale(1.015);
+  cursor: grabbing !important;
+}
+.aem-root.aem-min      { width:auto; min-width:180px }
+
+/* Header */
+.aem-header{
+  display:flex; align-items:center; gap:8px;
+  padding:8px 10px;
+  border-bottom:1px solid var(--border-light, #e5e7eb);
+  cursor:move;
+  background:var(--bg-secondary, #f9fafb);
+  border-radius:8px 8px 0 0;
+}
+.aem-root.aem-min .aem-header{ border-bottom:none; border-radius:8px }
+.aem-dot{
+  width:8px; height:8px; border-radius:50%;
+  background:#9ca3af;
+}
+.aem-dot-on      { background:#10b981; box-shadow:0 0 0 3px rgba(16,185,129,.15) }
+.aem-dot-off     { background:#ef4444 }
+.aem-dot-pending { background:#fbbf24; animation:aem-pulse 1.4s infinite }
+@keyframes aem-pulse {
+  0%,100% { opacity:1 } 50% { opacity:.4 }
+}
+.aem-title{
+  flex:1;
+  font-weight:600; font-size:.78rem;
+}
+.aem-actions { display:flex; gap:4px }
+.aem-btn{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:18px; height:18px;
+  background:transparent; border:none; cursor:pointer;
+  color:var(--text-secondary, #6b7280);
+  border-radius:3px;
+}
+.aem-btn:hover { background:var(--bg-tertiary, #f3f4f6); color:var(--text-primary) }
+
+/* Body */
+.aem-body{
+  padding:10px 12px;
+  max-height:calc(100vh - 120px);
+  overflow-y:auto;
+}
+.aem-sec      { padding:8px 0; border-bottom:1px dashed var(--border-light, #e5e7eb) }
+.aem-sec:last-of-type { border-bottom:none }
+.aem-sec-title{
+  display:flex; align-items:center; gap:6px;
+  margin:0 0 6px 0;
+  font-size:.7rem; font-weight:700;
+  color:var(--text-secondary, #6b7280);
+  text-transform:uppercase; letter-spacing:.04em;
+}
+.aem-sec-count{
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width:18px; padding:0 5px; height:16px;
+  background:var(--accent, #4f46e5); color:#fff;
+  border-radius:8px; font-size:.62rem; font-weight:600;
+  text-transform:none; letter-spacing:0;
+}
+.aem-row{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:3px 0;
+  font-size:.74rem; line-height:1.4;
+}
+.aem-l { color:var(--text-secondary, #6b7280); min-width:72px; font-weight:500 }
+.aem-l-sm{ color:var(--text-secondary, #6b7280); min-width:72px; font-size:.7rem }
+.aem-v { color:var(--text-primary, #111827); text-align:right; flex:1 }
+.aem-mono { font-family:'SF Mono', Menlo, Monaco, Consolas, monospace; font-size:.72rem }
+.aem-strong{ font-weight:600 }
+.aem-sub { color:var(--text-tertiary, #9ca3af); font-size:.68rem }
+.aem-tag {
+  display:inline-block; padding:1px 7px;
+  border-radius:9px; font-size:.66rem; font-weight:600;
+  margin-left:6px;
+}
+.aem-tag-on  { background:#dcfce7; color:#166534 }
+.aem-tag-off { background:#fee2e2; color:#991b1b }
+.aem-err{
+  margin-top:6px; padding:6px 8px;
+  background:#fef3c7; color:#92400e;
+  border:1px solid #fde68a; border-radius:4px;
+  font-size:.7rem;
+}
+.aem-empty{ color:var(--text-tertiary, #9ca3af); font-size:.7rem; padding:4px 0; font-style:italic }
+
+/* Model card */
+.aem-model{
+  padding:7px 8px; margin-bottom:6px;
+  background:var(--bg-secondary, #f9fafb);
+  border:0.5px solid var(--border-light, #e5e7eb);
+  border-radius:5px;
+}
+.aem-model:last-child { margin-bottom:0 }
+.aem-model-head{
+  display:flex; align-items:baseline; justify-content:space-between;
+  margin-bottom:5px;
+}
+.aem-bar-row{
+  display:flex; align-items:center; gap:6px;
+  margin:4px 0; font-size:.7rem;
+}
+.aem-bar{
+  flex:1; display:flex; height:6px;
+  background:var(--bg-tertiary, #f3f4f6);
+  border-radius:3px; overflow:hidden;
+}
+.aem-bar-cpu { background:#60a5fa }
+.aem-bar-gpu { background:#34d399 }
+.aem-bar-lbl{ font-size:.65rem; color:var(--text-secondary); min-width:115px; text-align:right }
+
+/* Metric grid */
+.aem-metric-grid{
+  display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;
+  margin-bottom:6px;
+}
+.aem-metric{
+  text-align:center;
+  padding:6px 4px;
+  background:var(--bg-secondary, #f9fafb);
+  border:0.5px solid var(--border-light, #e5e7eb);
+  border-radius:5px;
+}
+.aem-metric-num{
+  font-size:1.15rem; font-weight:700; line-height:1.2;
+  font-family:'SF Mono', Menlo, Monaco, monospace;
+}
+.aem-metric-lbl{
+  font-size:.6rem; color:var(--text-secondary);
+  line-height:1.2; margin-top:2px;
+}
+.aem-num-blue  { color:#2563eb }
+.aem-num-amber { color:#d97706 }
+.aem-num-green { color:#16a34a }
+.aem-num-red   { color:#dc2626 }
+
+/* Ratio bar */
+.aem-ratio{ margin-top:6px }
+.aem-ratio-bar{
+  display:flex; height:6px;
+  background:var(--bg-tertiary, #f3f4f6);
+  border-radius:3px; overflow:hidden;
+}
+.aem-ratio-kb { background:#2563eb }
+.aem-ratio-ai { background:#d97706 }
+.aem-ratio-lbl{
+  margin-top:4px;
+  font-size:.65rem; color:var(--text-secondary);
+}
+
+/* Footer */
+.aem-footer{
+  display:flex; align-items:center; gap:6px;
+  margin-top:8px; padding-top:8px;
+  border-top:1px solid var(--border-light);
+}
+.aem-action{
+  padding:3px 9px;
+  font-size:.7rem;
+  background:var(--bg-secondary, #f9fafb);
+  border:1px solid var(--border-mid, #d0d4d9);
+  border-radius:4px;
+  color:var(--text-primary);
+  cursor:pointer;
+}
+.aem-action:hover:not(:disabled) {
+  background:var(--bg-tertiary, #f3f4f6);
+  border-color:var(--accent, #4f46e5);
+  color:var(--accent, #4f46e5);
+}
+.aem-action:disabled { opacity:.5; cursor:not-allowed }
+.aem-tick{
+  margin-left:auto;
+  font-size:.62rem; color:var(--text-tertiary, #9ca3af);
+  font-family:'SF Mono', Menlo, monospace;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  .aem-root { background:#1f2937; border-color:#374151; color:#f3f4f6 }
+  .aem-header, .aem-model, .aem-metric { background:#111827; border-color:#374151 }
+  .aem-action { background:#111827; border-color:#374151; color:#f3f4f6 }
+  .aem-bar, .aem-ratio-bar { background:#111827 }
+  .aem-tag-on  { background:#064e3b; color:#86efac }
+  .aem-tag-off { background:#7f1d1d; color:#fca5a5 }
+  .aem-err     { background:#451a03; color:#fde68a; border-color:#92400e }
+}
+</style>

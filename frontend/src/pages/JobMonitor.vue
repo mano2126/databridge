@@ -183,8 +183,44 @@
           {{ currentPhaseLabel }}
         </span>
         
-        <!-- 진행률 -->
-        <span class="kpi-compact-progress">
+        <!-- ════════════════════════════════════════════════════════════
+             v95_p107 hotfix_029 (2026-05-11 본부장님 본질 처방):
+               접힌 모드에서도 테이블/객체 진행 둘 다 분리 표시
+             
+             본부장님 본질 지적:
+               "테이블 진행과 오브젝트 진행 두개를 보여 줘야 될 것 같아.
+                테이블이 100%면 조그맣게 100%로 보여주고
+                오브젝트 진행 상태를 잘 보여줘."
+             
+             처방: 펼친 모드의 effectiveProgress + objectsOverallProgress 를
+                   접힌 모드에서도 인라인으로 분리 표시.
+             ════════════════════════════════════════════════════════════ -->
+        
+        <!-- 테이블 진행 (작게) -->
+        <span class="kpi-compact-progress kpi-compact-progress-tbl">
+          <span class="kpi-compact-mini-label">테이블</span>
+          <span class="kpi-compact-mini-count">{{ job.table_done||0 }}/{{ job.table_total||0 }}</span>
+          <span class="kpi-compact-mini-pct">{{ effectiveProgress }}%</span>
+        </span>
+        
+        <!-- 객체 진행 (객체 단계 진행 중이면 강조) -->
+        <span v-if="objectsOverallProgress" class="kpi-compact-progress kpi-compact-progress-obj"
+              :class="{ 'obj-active': isObjectPhaseRunning, 'obj-failed': objectsOverallProgress.failed > 0 }">
+          <span class="kpi-compact-mini-label">객체</span>
+          <span class="kpi-compact-mini-count">{{ objectsOverallProgress.done }}/{{ objectsOverallProgress.total }}</span>
+          <span class="kpi-compact-pct">{{ objectsOverallProgress.pct }}%</span>
+          <div class="kpi-compact-bar-track">
+            <div class="kpi-compact-bar-fill"
+                 :class="{
+                   'bar-failed': objectsOverallProgress.failed > 0,
+                   'bar-done': objectsOverallProgress.done === objectsOverallProgress.total && objectsOverallProgress.failed === 0
+                 }"
+                 :style="`width:${objectsOverallProgress.pct}%`"></div>
+          </div>
+        </span>
+        
+        <!-- 객체 변환 단계 없으면 (테이블만 작업) 기존 통합 진행률 fallback -->
+        <span v-else class="kpi-compact-progress">
           <span class="kpi-compact-pct">{{ totalProgressPct }}%</span>
           <div class="kpi-compact-bar-track">
             <div class="kpi-compact-bar-fill" :style="`width:${totalProgressPct}%`"></div>
@@ -426,58 +462,36 @@
           <div class="kpi-sub">{{ job.status==='running'?'실시간':'—' }}</div>
         </div>
 
-        <!-- v95_p107 hotfix_022: 오류 카드 → 상태 분포 카드로 본질 처방
-             본부장님 본질: "AI 로 성공 된게 빨간 색이라 헷갈려"
-             처방: 5단계 의미 상태 분포로 진짜 메시지 전달 -->
-        <div class="kpi-card" :class="{'kpi-error': stateSummary[CS_STATE.FAILED] > 0, 'kpi-review': stateSummary._needsReview > 0 && stateSummary[CS_STATE.FAILED] === 0}">
+        <div class="kpi-card" :class="{'kpi-error': hasAnyError}">
           <div class="kpi-header">
-            <span class="kpi-label">상태 분포</span>
+            <span class="kpi-label">오류</span>
           </div>
-          <!-- 가장 의미있는 숫자: 완전 실패 우선, 그 다음 KB 정화 필요 -->
-          <div v-if="stateSummary[CS_STATE.FAILED] > 0" class="kpi-value err-val">
-            {{ stateSummary[CS_STATE.FAILED] }}<span class="kpi-unit"> 실패</span>
+          <!-- v90.66: 행 단위 vs 객체 단위 구분 명확화 -->
+          <!-- 큰 숫자는 더 의미있는 쪽 (객체 오류가 있으면 객체 수, 없으면 행 오류) -->
+          <div v-if="errItems.length > 0" class="kpi-value" :class="{'err-val': hasAnyError}">
+            {{ errItems.length }}<span class="kpi-unit"> 항목</span>
           </div>
-          <div v-else-if="stateSummary._needsReview > 0" class="kpi-value review-val">
-            {{ stateSummary._needsReview }}<span class="kpi-unit"> 정화 필요</span>
+          <div v-else class="kpi-value" :class="{'err-val': hasAnyError}">
+            {{ fmtNum(job.rows_error||0) }}<span class="kpi-unit"> 행</span>
           </div>
-          <div v-else class="kpi-value ok-val">
-            ✓<span class="kpi-unit"> 모두 정상</span>
-          </div>
-          <!-- 5단계 미니 분포 -->
-          <div class="kpi-sub state-mini">
-            <span v-if="stateSummary[CS_STATE.KB_HIT] > 0" class="csm csm-kb-hit"
-                  :title="'KB 즉시 매칭 — AI 호출 0회'">
-              <span class="csm-dot"></span>KB {{ stateSummary[CS_STATE.KB_HIT] }}
-            </span>
-            <span v-if="stateSummary[CS_STATE.AI_LEARNED] > 0" class="csm csm-ai-learned"
-                  :title="'KB 미스 → AI 신규 학습 → KB 등록'">
-              <span class="csm-dot"></span>학습 {{ stateSummary[CS_STATE.AI_LEARNED] }}
-            </span>
-            <span v-if="stateSummary[CS_STATE.KB_BROKEN_RECOVERED] > 0" class="csm csm-kb-broken"
-                  :title="'KB 깨짐 → AI 복구. 결과 OK, KB 정화 필요'">
-              <span class="csm-dot"></span>재시도 {{ stateSummary[CS_STATE.KB_BROKEN_RECOVERED] }}
-            </span>
-            <span v-if="stateSummary[CS_STATE.COMPLETED] > 0" class="csm csm-completed"
-                  :title="'정상 완료 (테이블 등)'">
-              <span class="csm-dot"></span>완료 {{ stateSummary[CS_STATE.COMPLETED] }}
-            </span>
-            <span v-if="stateSummary[CS_STATE.FAILED] > 0" class="csm csm-failed"
-                  :title="'완전 실패 — 본부장님 개입 필요'">
-              <span class="csm-dot"></span>실패 {{ stateSummary[CS_STATE.FAILED] }}
-            </span>
-          </div>
-          <!-- 정화 필요 시 안내 + 상세 -->
-          <div v-if="stateSummary._needsReview > 0 || stateSummary[CS_STATE.FAILED] > 0" class="kpi-sub-extra">
+          <div class="kpi-sub">
             <button v-if="errItems.length > 0" class="err-open-btn" @click="openErrModal">
               <span class="err-btn-dot"></span>
               <span class="err-btn-text">
-                <template v-if="stateSummary[CS_STATE.FAILED] > 0">실패 항목 상세</template>
-                <template v-else>KB 정화 후보 상세</template>
+                <!-- v90.66: 보조 정보로 행 오류도 같이 표시 (있을 때만) -->
+                <template v-if="(job.rows_error||0) > 0">
+                  객체 {{ errItems.length }} · 행 {{ fmtNum(job.rows_error) }}
+                </template>
+                <template v-else>{{ errItems.length }}개 객체 실패</template>
               </span>
+              <span class="err-btn-divider"></span>
+              <span class="err-btn-action">상세 보기</span>
               <svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.5" style="width:8px;height:8px;opacity:.6">
                 <polyline points="1.5,3 4,5.5 6.5,3"/>
               </svg>
             </button>
+            <span v-else-if="(job.rows_error||0) > 0">테이블 이관 행 오류</span>
+            <span v-else>정상</span>
           </div>
         </div>
       </div>
@@ -667,7 +681,8 @@
             </span>
             <span class="ic-time muted">{{ fmtTime(item.finished_at) }}</span>
             <span class="ic-elapsed">
-              <span class="elapsed-badge" :class="elapsedClass(item)">{{ fmtElapsed(item.started_at, item.finished_at) }}</span>
+              <!-- v95_p107 hotfix_063: 경과시간 fallback (실패 시 started_at 없으면 retry_duration_s 사용) -->
+              <span class="elapsed-badge" :class="elapsedClass(item)">{{ _h063ElapsedDisplay(item) }}</span>
             </span>
             <span class="ic-eta-col">
               <span v-if="item.status==='running' && fmtItemEta(item)" class="item-eta-badge">
@@ -676,10 +691,7 @@
               <span v-else class="muted">—</span>
             </span>
             <span class="ic-stat">
-              <!-- v95_p107 hotfix_022: 5단계 의미 상태 클래스 (cs-*) 추가, 짧은 라벨 -->
-              <span class="stat-pill"
-                    :class="[item.status, getItemMeta(item).cssClass, {'via-ai': item.via_ai_remig && item.status==='done', 'recovered': item.had_error && item.status==='done' && !item.via_ai_remig}]"
-                    :title="describePath(item) || statusLabel(item.status)">
+              <span class="stat-pill" :class="[item.status, {'via-ai': item.via_ai_remig && item.status==='done', 'recovered': item.had_error && item.status==='done' && !item.via_ai_remig}]">
                 <svg v-if="item.status==='running'" class="spin" viewBox="0 0 12 12">
                   <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-dasharray="20" stroke-dashoffset="7"/>
                 </svg>
@@ -697,8 +709,15 @@
                 <svg v-else-if="item.status==='done'" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><polyline points="2,6 4.5,9 10,3"/></svg>
                 <svg v-else-if="item.status==='error'" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg>
                 <svg v-else viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="6" r="2.5"/></svg>
-                <!-- v95_p107 hotfix_022: 5단계 의미 상태의 shortLabel 우선 표시 -->
-                <span>{{ shortBadgeLabel(item) }}</span>
+                <!-- v90.67: 라벨 — AI 재이관 / 재시도 후 성공 / 일반 완료 구분 -->
+                <!-- v95_p107 hotfix_013: conversion_path 가 있으면 상세 라벨 우선 표시 -->
+                <span v-if="conversionPathLbl(item.conversion_path, item.status)"
+                      :title="`변환 경로: ${(item.conversion_path||[]).join(' → ')} (${item.attempts || 1}회 시도)`">
+                  <span class="stp-process">{{ conversionProcessLbl(item.conversion_path, item.status) }}</span><span v-if="conversionOutcomeCode(item.conversion_path, item.status)" class="stp-outcome" :class="conversionOutcomeCode(item.conversion_path, item.status)">{{ conversionOutcomeLbl(item.conversion_path, item.status) }}</span>
+                </span>
+                <span v-else-if="item.status==='done' && item.via_ai_remig" :title="`AI 재이관으로 성공 (${item.attempts || 2}회 시도)`">AI 재이관 성공</span>
+                <span v-else-if="item.status==='done' && item.had_error" :title="`재시도 후 성공 (${item.attempts || 2}회 시도)`">재시도 성공</span>
+                <span v-else>{{ statusLabel(item.status) }}</span>
               </span>
             </span>
             <!-- 오류 상세 + 재이관 버튼 -->
@@ -751,7 +770,7 @@
                     <input type="radio" v-model="objRemigMode" value="ai"/>
                     <div class="remig-opt-body">
                       <span class="remig-opt-title">🤖 AI 변환</span>
-                      <span class="remig-opt-desc">Claude AI가 오류 분석 후 DDL 변환 및 재생성 (API 키 필요)</span>
+                      <span class="remig-opt-desc">내부 AI(Gemini 기본)가 오류 분석 후 DDL 변환 및 재생성 (API 키 필요)</span>
                     </div>
                   </label>
                 </div>
@@ -834,7 +853,7 @@
                     <input type="radio" v-model="remigMode" value="ai"/>
                     <div class="remig-opt-body">
                       <span class="remig-opt-title">🤖 AI 이관</span>
-                      <span class="remig-opt-desc">Claude AI가 오류 분석 후 스키마 변환 및 재이관</span>
+                      <span class="remig-opt-desc">내부 AI(Gemini 기본)가 오류 분석 후 스키마 변환 및 재이관</span>
                     </div>
                   </label>
                 </div>
@@ -917,7 +936,7 @@
                 <input type="radio" v-model="bulkMode" value="ai"/>
                 <div class="remig-opt-body">
                   <span class="remig-opt-title">🤖 AI 변환</span>
-                  <span class="remig-opt-desc">Claude AI가 오류 분석 후 DDL 변환 및 재생성</span>
+                  <span class="remig-opt-desc">내부 AI(Gemini 기본)가 오류 분석 후 DDL 변환 및 재생성</span>
                 </div>
               </label>
             </div>
@@ -955,15 +974,17 @@
       </div>
 
       <!-- 오류 상세 모달 -->
-      <div v-if="showErrModal" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center" @click.self="showErrModal=false">
-        <div style="background:var(--bg-primary);border-radius:14px;width:min(680px,95vw);max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.3);overflow:hidden">
+      <!-- v95_p107 hotfix_046: 오류 상세 모달 → 플로팅 윈도우 (배경 dim 제거, 바깥 클릭 안 닫힘, 드래그+최소화) -->
+      <div v-if="showErrModal" class="emd-float-root" :class="{'emd-float-min': errMinimized}">
+        <div class="emd-float-card" :style="errFloatStyle">
           <!-- 헤더 -->
-          <div style="display:flex;align-items:center;gap:8px;padding:14px 18px;border-bottom:0.5px solid var(--border-light)">
+          <div class="emd-float-header" @pointerdown="startErrDrag">
             <span style="font-size:.88rem;font-weight:600;color:var(--text-primary);flex:1">
   오류 상세
   <span v-if="errItems.length"> — {{ errItems.length }}개 항목</span>
   <span v-if="errItems.length > 0 && job.rows_error > 0"> / 실패 행 {{ fmtNum(job.rows_error||0) }}건</span>
 </span>
+            <button @click="errMinimized=!errMinimized" :title="errMinimized?'펼치기':'접기'" style="border:none;background:none;cursor:pointer;font-size:1rem;color:var(--text-tertiary);padding:2px 8px;line-height:1">{{ errMinimized ? '□' : '─' }}</button>
             <button @click="showErrModal=false" style="border:none;background:none;cursor:pointer;font-size:1rem;color:var(--text-tertiary);padding:2px 8px">✕</button>
           </div>
           <!-- 요약 바 -->
@@ -989,6 +1010,10 @@
               <span>전체 선택</span>
               <span class="bulk-count">({{ bulkSelectedRetry.size }}/{{ errItems.length }})</span>
             </label>
+            <!-- v95_p107 hotfix_047: 오류만 선택 (status='error' 항목만 set) -->
+            <button class="bulk-only-err-btn" @click="selectOnlyErrors" :disabled="errOnlyCount === 0" :title="`status='error' 인 항목만 선택 (${errOnlyCount}건)`">
+              ⚠ 오류만 ({{ errOnlyCount }})
+            </button>
             <div class="bulk-filters">
               <select v-model="bulkFilterType" class="bulk-sel">
                 <option value="">전체 유형</option>
@@ -1025,10 +1050,10 @@
           <!-- v10: 일괄 처리 방식 선택 패널 -->
           <div v-if="bulkRetryPanelOpen && bulkSelectedRetry.size > 0" class="bulk-retry-panel">
             <div class="brp-header">처리 방식 선택 — 선택한 {{ bulkSelectedRetry.size }}건에 동일하게 적용됩니다</div>
-            <div class="brp-grid">
+            <div class="brp-grid" :class="{'has-ai-active': bulkRetryMode === 'ai'}">
               <label v-for="opt in bulkRetryOpts" :key="opt.value"
                      class="brp-opt"
-                     :class="{active: bulkRetryMode === opt.value}"
+                     :class="[{active: bulkRetryMode === opt.value}, 'brp-opt-' + opt.value]"
                      @click="bulkRetryMode = opt.value">
                 <div class="brp-opt-head">
                   <span class="brp-opt-icon">{{ opt.icon }}</span>
@@ -1039,13 +1064,42 @@
                 <div class="brp-opt-desc">{{ opt.desc }}</div>
                 <!-- AI 모드 선택 시 재시도 횟수 -->
                 <div v-if="opt.value === 'ai' && bulkRetryMode === 'ai'" class="brp-ai-opts">
-                  <span class="brp-ai-lbl">최대 재시도:</span>
-                  <select v-model.number="bulkAiMaxRetries" class="brp-sel" @click.stop>
-                    <option :value="3">3회</option>
-                    <option :value="5">5회</option>
-                    <option :value="7">7회</option>
-                  </select>
-                  <span class="brp-ai-hint">성공할 때까지 에러 누적 후 재시도</span>
+                  <!-- v95_p107 hotfix_048: provider 선택 (관리자 등록 AI 중) -->
+                  <div class="brp-ai-field">
+                    <span class="brp-ai-lbl">AI Provider</span>
+                    <select v-model="bulkAiProvider" class="brp-sel" @click.stop>
+                      <option value="">(기본 설정)</option>
+                      <option v-for="p in availableProviders" :key="p.id" :value="p.id">{{ p.name }}</option>
+                    </select>
+                  </div>
+                  <div v-if="bulkAiProvider && availableModels.length" class="brp-ai-field">
+                    <span class="brp-ai-lbl">모델</span>
+                    <select v-model="bulkAiModel" class="brp-sel" @click.stop>
+                      <option value="">(provider 기본)</option>
+                      <option v-for="m in availableModels" :key="m.id" :value="m.id">{{ m.label }}</option>
+                    </select>
+                  </div>
+                  <div class="brp-ai-field">
+                    <span class="brp-ai-lbl">최대 재시도</span>
+                    <select v-model.number="bulkAiMaxRetries" class="brp-sel" @click.stop>
+                      <option :value="1">1회</option>
+                      <option :value="2">2회</option>
+                      <option :value="3">3회</option>
+                      <option :value="5">5회</option>
+                      <option :value="7">7회</option>
+                    </select>
+                  </div>
+                  <!-- v95_p107 hotfix_068: 동시 처리 (병렬) -->
+                  <div class="brp-ai-field">
+                    <span class="brp-ai-lbl">동시 처리</span>
+                    <select v-model.number="bulkConcurrency" class="brp-sel" @click.stop>
+                      <option :value="1">1개 (순차, 로컬 AI 권장)</option>
+                      <option :value="3">3개 동시</option>
+                      <option :value="5">5개 동시</option>
+                      <option :value="10">10개 동시</option>
+                    </select>
+                  </div>
+                  <span class="brp-ai-hint">에러 누적 후 재시도. 로컬 AI(Ollama)는 1개 순차, Claude API 는 3~5개 동시 권장.</span>
                 </div>
               </label>
             </div>
@@ -1103,7 +1157,7 @@
                 </span>
                 <span v-else-if="item.retry_status==='retry_done'" class="emd-retry-badge done">
                   <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2" style="width:9px;height:9px"><polyline points="2,5 4.5,7.5 8.5,2.5"/></svg>
-                  재이관완료 {{ item.retry_duration_s ? '· ' + item.retry_duration_s + '초' : '' }}
+                  재이관완료<span v-if="item.retry_attempt && item.retry_attempt > 1" class="emd-retry-attempt-cnt"> · {{ item.retry_attempt }}회 만에</span>{{ item.retry_duration_s ? ' · ' + item.retry_duration_s + '초' : '' }}
                 </span>
                 <span v-else-if="item.retry_status==='retry_failed'" class="emd-retry-badge failed" :title="item.retry_last_error || ''">
                   ⚠ 재이관실패 {{ item.retry_duration_s ? '· ' + item.retry_duration_s + '초' : '' }}
@@ -1172,6 +1226,15 @@
                 <span v-if="bulkRetryRunning && bulkBatchEtaSec != null" class="emd-prog-eta">
                   · 예상 남은 {{ fmtBulkMs(bulkBatchEtaSec) }}
                 </span>
+                <!-- v95_p107 hotfix_054: 중지 버튼 -->
+                <button v-if="bulkRetryRunning && !bulkRetryAborted"
+                        class="emd-prog-abort-btn"
+                        @click="abortBulkRetry">
+                  ■ 중지
+                </button>
+                <span v-else-if="bulkRetryRunning && bulkRetryAborted" class="emd-prog-aborting">
+                  중지 중...
+                </span>
               </div>
             </div>
             <div class="emd-prog-bar">
@@ -1186,6 +1249,8 @@
           <div style="display:flex;justify-content:flex-end;padding:12px 18px;border-top:0.5px solid var(--border-light)">
             <button @click="showErrModal=false" style="padding:6px 20px;border-radius:7px;background:#2563eb;color:#fff;border:none;font-size:.82rem;font-weight:600;cursor:pointer">닫기</button>
           </div>
+          <!-- v95_p107 hotfix_051: resize handle (우하단 드래그) -->
+          <div v-if="!errMinimized" class="emd-float-resize" @pointerdown="startErrResize" title="크기 조정 (드래그)"></div>
         </div>
       </div>
 
@@ -1197,16 +1262,6 @@
 
 <script setup>
 import { fmtDate, fmtDateShort, fmtElapsed, fmtTime, parseDate, toMs } from '@/utils/dateUtils.js'
-// v95_p107 hotfix_022 (2026-05-11 본부장님 본질 처방):
-//   상태 배지/통계가 진짜 의미를 드러내도록 5단계 의미 상태로 통합
-import {
-  STATE as CS_STATE,
-  deriveConversionState,
-  getItemMeta,
-  summarizeStates,
-  describePath,
-  shortBadgeLabel,
-} from '@/utils/conversionStatus.js'
 defineOptions({ name: 'JobMonitor' })
 import { ref, computed, onMounted, onActivated, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -1216,6 +1271,7 @@ import { useMonitorStore }   from '@/store/monitorStore.js'  // v10 #22
 import ConnectPanel          from '@/components/common/ConnectPanel.vue'
 import PageHeader            from '@/components/layout/PageHeader.vue'
 import axios                 from 'axios'   // v92p6: stuck job 중단용
+import { useDragFloat }      from '@/composables/useDragFloat.js'  // v95_p107 hotfix_046: 오류 상세 모달 플로팅
 
 const conn = useConnectorStore()
 const app  = useAppStore()
@@ -1337,18 +1393,9 @@ let autoTimer = null
 const etaFixedMs = ref(0)   // 예상 완료 Unix ms
 const etaJobId   = ref('')  // 추적 중인 Job ID
 
-// v95_p107 hotfix_022 (2026-05-11): 필터에 5단계 의미 상태 추가
-//   - 기존 'error' (status==='error') 와 'cs-broken' (KB 깨짐 재시도) 명확 분리
-//   - 본부장님: "AI 로 성공 된게 빨간 색이라 헷갈려" 정면 처방
 const filters = [
-  {v:'all',      l:'전체'},
-  {v:'running',  l:'진행중'},
-  {v:'done',     l:'완료'},
-  {v:'pending',  l:'대기'},
-  {v:'error',    l:'실패'},        // 진짜 실패만 — status==='error'
-  {v:'cs-broken',l:'재시도 성공'}, // KB 정화 후보 — 결과는 OK 지만 본부장님 주목
-  {v:'cs-kb-hit',l:'KB 매칭'},     // 본부장님 KB 자산 진가
-  {v:'mismatch', l:'불일치'},
+  {v:'all',l:'전체'},{v:'running',l:'진행중'},{v:'done',l:'완료'},
+  {v:'pending',l:'대기'},{v:'error',l:'오류'},{v:'mismatch',l:'불일치'},
 ]
 const types = [
   {v:'all',l:'전체'},{v:'table',l:'테이블'},{v:'view',l:'뷰'},
@@ -1542,6 +1589,27 @@ const objectsProgress = computed(() => {
 // ════════════════════════════════════════════════════════════════
 // statusLabel() 은 line 2212 의 기존 함수 사용 (중복 정의 회피)
 
+// v95_p107 hotfix_063: 경과시간 표시 헬퍼 (실패 항목 fallback)
+function _h063ElapsedDisplay(item) {
+  // 1. started_at + finished_at 있으면 정상 계산
+  if (item.started_at) {
+    return fmtElapsed(item.started_at, item.finished_at)
+  }
+  // 2. 재이관 시간 있으면 (모달 일괄 재처리 결과)
+  if (item.retry_duration_s != null && item.retry_duration_s >= 0) {
+    const s = Number(item.retry_duration_s)
+    if (s >= 3600) return Math.floor(s / 3600) + '시간 ' + String(Math.floor((s%3600)/60)).padStart(2,'0') + '분'
+    if (s >= 60)   return Math.floor(s / 60) + '분 ' + String(s % 60).padStart(2,'0') + '초'
+    return s + '초'
+  }
+  // 3. duration_s 또는 elapsed_s (백엔드가 직접 계산해 준 경우)
+  if (item.duration_s != null) {
+    const s = Number(item.duration_s)
+    return s + '초'
+  }
+  return '—'
+}
+
 // 현재 진행 중인 단계 라벨 (running 상태에서만)
 const currentPhaseLabel = computed(() => {
   const j = job.value
@@ -1556,6 +1624,14 @@ const currentPhaseLabel = computed(() => {
     'ADVISOR_APPLY':  'AI 권고 적용 중',
   }
   return phaseMap[phase] || (phase ? `${phase} 진행 중` : '')
+})
+
+// v95_p107 hotfix_029 (2026-05-11 본부장님 본질 처방):
+// 객체 변환 단계 진행 중인지 — 접힌 헤더에서 객체 진행률 강조 표시용
+const isObjectPhaseRunning = computed(() => {
+  const j = job.value
+  if (!j || j.status !== 'running') return false
+  return j.phase === 'OBJECT_CONVERT'
 })
 
 // 전체 진행률 (effectiveProgress 와 동일)
@@ -1963,12 +2039,8 @@ const allItems = computed(()=>{
 const filteredItems = computed(()=>{
   let list = allItems.value
   if(search.value) list = list.filter(i=>i.name.toLowerCase().includes(search.value.toLowerCase()))
-  // v95_p107 hotfix_022: 5단계 의미 상태 필터 인식
-  if(activeFilter.value==='mismatch')        list = list.filter(isMismatch)
-  else if(activeFilter.value==='cs-broken')  list = list.filter(i => deriveConversionState(i) === CS_STATE.KB_BROKEN_RECOVERED)
-  else if(activeFilter.value==='cs-kb-hit')  list = list.filter(i => deriveConversionState(i) === CS_STATE.KB_HIT)
-  else if(activeFilter.value==='cs-learned') list = list.filter(i => deriveConversionState(i) === CS_STATE.AI_LEARNED)
-  else if(activeFilter.value!=='all')        list = list.filter(i=>i.status===activeFilter.value)
+  if(activeFilter.value==='mismatch') list = list.filter(isMismatch)
+  else if(activeFilter.value!=='all') list = list.filter(i=>i.status===activeFilter.value)
   if(activeType.value!=='all')   list = list.filter(i=>i.type===activeType.value)
   const order={running:0,error:1,done:2,pending:3}
   // 컬럼 정렬
@@ -2087,11 +2159,7 @@ function isMismatch(i) {
 }
 function filterCount(v) {
   if (v === 'all') return allItems.value.length
-  if (v === 'mismatch')  return allItems.value.filter(isMismatch).length
-  // v95_p107 hotfix_022: 의미 상태 필터 카운트
-  if (v === 'cs-broken') return allItems.value.filter(i => deriveConversionState(i) === CS_STATE.KB_BROKEN_RECOVERED).length
-  if (v === 'cs-kb-hit') return allItems.value.filter(i => deriveConversionState(i) === CS_STATE.KB_HIT).length
-  if (v === 'cs-learned')return allItems.value.filter(i => deriveConversionState(i) === CS_STATE.AI_LEARNED).length
+  if (v === 'mismatch') return allItems.value.filter(isMismatch).length
   return allItems.value.filter(i => i.status === v).length
 }
 function countByStatus(s){ return allItems.value.filter(i=>i.status===s).length }
@@ -2255,27 +2323,61 @@ function statusLabel(s){ return {running:'진행중',done:'완료',pending:'대�
 //       ["rule_ok"]                   → "" (단순 완료, 라벨 생략)
 //       ["rule_fail","ai_ollama_fail","ai_anthropic_ok"]
 //                                     → "실패→AI(Gemma)실패→AI(Claude)성공"
-const __PROVIDER_LBL = { anthropic:'Claude', ollama:'Gemma', gemma:'Gemma', claude:'Claude', openai:'OpenAI' }
+const __PROVIDER_LBL = { anthropic:'Claude', ollama:'Ollama', gemma:'Gemma', claude:'Claude', openai:'OpenAI' }
 function _pathStep(step) {
   if (!step) return ''
   if (step === 'rule')        return 'Rule'
   if (step === 'rule_ok')     return ''  // 단순 완료는 라벨 없음
   if (step === 'rule_fail')   return '실패'
   if (step === 'kb_match')    return 'KB매칭'
+  if (step === 'kb_miss')     return 'KB매칭없음'  // v95_p107_hotfix_042_v2
   if (step === 'ai_initial')  return 'AI'
   const m = step.match(/^ai_([a-z0-9]+?)(_ok|_fail)?$/)
   if (m) {
     const prov = __PROVIDER_LBL[m[1]] || m[1]
-    const tail = m[2] === '_ok' ? '성공' : (m[2] === '_fail' ? '실패' : '')
+    const tail = m[2] === '_ok' ? '응답수신' : (m[2] === '_fail' ? '응답없음' : '')
     return tail ? `AI(${prov})${tail}` : `AI(${prov})`
   }
   return step
 }
-function conversionPathLbl(path) {
+function conversionPathLbl(path, itemStatus) {
+  // v95_p107_hotfix_042_v2: MySQL 실행 결과까지 정확히 표시 (본부장님 모토 #14)
   if (!path || !path.length) return ''
   // 단순 완료 (rule_ok 만) 는 라벨 생략 — 기존 "완료" 표기에 위임
   if (path.length === 1 && path[0] === 'rule_ok') return ''
-  return path.map(_pathStep).filter(Boolean).join('→')
+  const base = path.map(_pathStep).filter(Boolean).join('→')
+  // AI 응답수신 단계가 있으면 MySQL 실행 결과 추가
+  if (base && itemStatus && base.includes('응답수신')) {
+    if (itemStatus === 'done')   return base + '→MySQL성공'
+    if (itemStatus === 'error')  return base + '→MySQL실패'
+  }
+  return base
+}
+
+// v95_p107 hotfix_045: 과정/결과 분리 표시 (본부장님 — 결과만 색깔 강조)
+function conversionProcessLbl(path, itemStatus) {
+  const full = conversionPathLbl(path, itemStatus)
+  if (!full) return ''
+  if (full.endsWith('성공')) return full.slice(0, -2)
+  if (full.endsWith('실패')) return full.slice(0, -2)
+  if (full.endsWith('응답없음')) return full.slice(0, -4)
+  return full
+}
+function conversionOutcomeCode(path, itemStatus) {
+  const full = conversionPathLbl(path, itemStatus)
+  if (!full) return ''
+  if (full.endsWith('성공')) return 'ok'
+  if (full.endsWith('실패')) return 'ng'
+  if (full.endsWith('응답없음')) return 'ng'
+  return ''
+}
+function conversionOutcomeLbl(path, itemStatus) {
+  const full = conversionPathLbl(path, itemStatus)
+  if (!full) return ''
+  if (full.endsWith('성공')) return '성공'
+  if (full.endsWith('실패')) return '실패'
+  if (full.endsWith('응답없음')) return '응답없음'
+  return ''
 }
 
 // phase 순서 정의
@@ -2535,6 +2637,73 @@ const remigMode    = ref('skip_geo')
 const remigRunning = ref(false)
 const showErrModal = ref(false)
 
+// ── v95_p107 hotfix_046: 오류 상세 모달 → 플로팅 윈도우 ─────────────
+const errMinimized   = ref(false)
+const errFloatPos    = ref({ x: 0, y: 0, w: 680, h: 600 })
+let   _errFloatInited = false
+function _initErrFloatPos() {
+  if (_errFloatInited) return
+  const W = 680
+  const H = Math.min((window.innerHeight || 800) * 0.8, 700)
+  errFloatPos.value = {
+    x: Math.max(10, Math.round(((window.innerWidth  || 1200) - W) / 2)),
+    y: Math.max(10, Math.round(((window.innerHeight || 800)  - H) / 2)),
+    w: W,
+    h: Math.round(H),
+  }
+  _errFloatInited = true
+}
+const errFloatStyle = computed(() => {
+  _initErrFloatPos()
+  return {
+    position: 'fixed',
+    left: errFloatPos.value.x + 'px',
+    top:  errFloatPos.value.y + 'px',
+    width:  errFloatPos.value.w + 'px',
+    height: errMinimized.value ? 'auto' : (errFloatPos.value.h + 'px'),
+    maxWidth: '95vw',
+    maxHeight: '95vh',
+    background: 'var(--bg-primary)',
+    borderRadius: '14px',
+    display: 'flex',
+    flexDirection: 'column',
+    boxShadow: '0 8px 40px rgba(0,0,0,.3)',
+    overflow: 'hidden',
+    zIndex: 9999,
+    pointerEvents: 'auto',
+  }
+})
+const { startDrag: startErrDrag } = useDragFloat({
+  pos: errFloatPos,
+  onMove: (x, y) => { errFloatPos.value = { ...errFloatPos.value, x, y } },
+})
+
+// v95_p107 hotfix_051: 모달 resize (우하단 핸들 드래그)
+function startErrResize(e) {
+  if (e.button !== undefined && e.button !== 0) return
+  const startX = e.clientX, startY = e.clientY
+  const startW = errFloatPos.value.w
+  const startH = errFloatPos.value.h
+  document.body.style.userSelect = 'none'
+  document.body.style.cursor = 'nwse-resize'
+  function onMove(ev) {
+    const nw = Math.max(420, Math.round(startW + (ev.clientX - startX)))
+    const nh = Math.max(320, Math.round(startH + (ev.clientY - startY)))
+    errFloatPos.value = { ...errFloatPos.value, w: nw, h: nh }
+  }
+  function onUp() {
+    document.body.style.userSelect = ''
+    document.body.style.cursor = ''
+    document.removeEventListener('pointermove', onMove)
+  }
+  document.addEventListener('pointermove', onMove)
+  document.addEventListener('pointerup', onUp, { once: true })
+  document.addEventListener('pointercancel', onUp, { once: true })
+  e.preventDefault()
+  e.stopPropagation()
+}
+// ── /h046 ────────────────────────────────────────────────────────
+
 // ── 일괄 재이관 상태 ──────────────────────────────────────────
 const bulkSelected   = ref(new Set())   // 선택된 항목명 Set
 const showBulkModal  = ref(false)
@@ -2757,19 +2926,72 @@ const hasAnyError = computed(() => {
   return errItems.value.length > 0
 })
 
-// ═══ v95_p107 hotfix_022 (2026-05-11 본부장님 본질 처방): 5단계 상태 분포 ═══
-// 본부장님 본질: "AI 로 성공 된게 빨간색이라 헷갈려"
-// 처방: conversion_path 까지 보고 5단계 의미 상태 도출, 진짜 메시지 전달
-const stateSummary = computed(() => summarizeStates(allItems.value))
-
 // ═══ v10: 일괄 재처리 기능 ═══
 const bulkSelectedRetry = ref(new Set())       // 선택한 item name 들
 const bulkFilterType    = ref('')              // '' | 'table' | 'procedure' | ...
 const bulkFilterErrCode = ref('')              // '' | '1064' | '1075' | ...
 const bulkRetryPanelOpen = ref(false)
 const bulkRetryMode     = ref('ai')            // 'ai' | 'drop_recreate' | 'engine_only' | 'passthrough'
-const bulkAiMaxRetries  = ref(5)
+const bulkAiMaxRetries  = ref(2)  // v95_p107 hotfix_062: 5→2 (본부장님 토큰 절감)
+const bulkConcurrency   = ref(3)  // v95_p107 hotfix_068: 동시 처리 개수 (1=순차, 3=기본, 5/10=병렬)
 const bulkRetryRunning  = ref(false)
+// v95_p107 hotfix_054: 일괄 재처리 중지 신호
+const bulkRetryAborted  = ref(false)
+const bulkAbortController = ref(null)  // v95_p107 hotfix_057: AbortController
+function abortBulkRetry() {
+  bulkRetryAborted.value = true
+  // h057: 진행 중 fetch 강제 취소
+  if (bulkAbortController.value) {
+    try { bulkAbortController.value.abort() } catch (_) {}
+  }
+  // h057: 진행 중/대기 중 retry 항목 즉시 갱신 (frontend 로컬 — UI spinner 끔)
+  const _h057Aborted = []
+  for (const name in retryStatusMap.value) {
+    const st = retryStatusMap.value[name]
+    if (st.status === 'retrying' || st.status === 'queued') {
+      const dur = st.startAt ? Math.round((Date.now() - st.startAt) / 1000) : 0
+      retryStatusMap.value[name] = {
+        ...st,
+        status:    'retry_failed',
+        lastError: '사용자 중지',
+        durationS: dur,
+      }
+      _h057Aborted.push(name)
+      // main monitor 의 item_statuses 도 frontend 로컬 갱신 (spinner 즉시 끔)
+      if (job.value?.item_statuses?.[name]) {
+        job.value.item_statuses[name] = {
+          ...job.value.item_statuses[name],
+          status: 'error',
+          error:  '사용자 중지 (백엔드 정리 중)',
+        }
+      }
+    }
+  }
+  // h057: 백엔드에도 stop 신호 (best effort — 일괄 재처리는 별도 thread 라 부분 효과)
+  if (job.value?.id) {
+    fetch(`/api/v1/jobs/${job.value.id}/stop`, { method: 'POST' }).catch(() => {})
+  }
+  app.notify(`일괄 재처리 중지 — ${_h057Aborted.length}건 UI 즉시 갱신`, 'warn')
+}
+
+// v95_p107 hotfix_048: AI provider 선택 (관리자 등록 AI 중 골라 재처리)
+const bulkAiProvider     = ref('')   // '' = 백엔드 기본 설정 사용
+const bulkAiModel        = ref('')
+const availableProviders = ref([])   // [{ id, name, models, requires, air_gapped }]
+const availableModels = computed(() => {
+  const p = availableProviders.value.find(p => p.id === bulkAiProvider.value)
+  return p?.models || []
+})
+async function loadAiProviders() {
+  try {
+    const res = await fetch('/api/v1/ai-providers/list')
+    if (!res.ok) return
+    const j = await res.json()
+    availableProviders.value = Object.entries(j.providers || {}).map(([id, p]) => ({ id, ...p }))
+  } catch (e) { /* silent */ }
+}
+onMounted(loadAiProviders)
+watch(bulkAiProvider, () => { bulkAiModel.value = '' })
 
 // 재이관 상태 추적 (item_name → { status, startAt, attempt, maxAttempt, lastError, duration })
 const retryStatusMap    = ref({})
@@ -2912,6 +3134,14 @@ function toggleBulkRetryItem(name) {
   bulkSelectedRetry.value = s
 }
 
+// v95_p107 hotfix_047: 오류만 선택 (filteredErrItems 중 status='error' 만)
+const errOnlyCount = computed(() => filteredErrItems.value.filter(i => i.status === 'error').length)
+function selectOnlyErrors() {
+  const s = new Set()
+  filteredErrItems.value.filter(i => i.status === 'error').forEach(i => s.add(i.name))
+  bulkSelectedRetry.value = s
+}
+
 // 재이관 처리 옵션
 const bulkRetryOpts = [
   {
@@ -2936,7 +3166,7 @@ const bulkRetryOpts = [
     value: 'ai',
     icon:  '🤖',
     title: 'AI 이관',
-    desc:  'Claude AI로 재변환. 실패 시 에러를 프롬프트에 누적하여 재시도.',
+    desc:  'AI 엔진으로 재변환. 재시도 N회 = 시간/비용 N배 (Claude API 는 토큰비, 로컬은 GPU 시간). 2회 권장.',
     recommended: true,
   },
 ]
@@ -2964,6 +3194,7 @@ async function runBulkRetry() {
   if (!ok) return
 
   bulkRetryRunning.value = true
+  bulkRetryAborted.value = false  // h054
   bulkRetryPanelOpen.value = false
 
   // v10 #33: 이전 배치 상태 초기화 (새 배치 시작 시)
@@ -2991,11 +3222,13 @@ async function runBulkRetry() {
   // 실시간 경과 시간 업데이트 시작
   startRetryTick()
 
-  // 백엔드 API 호출 (순차 처리)
-  // — 새 엔드포인트 /bulk-retry 가 아직 없으므로, 기존 remig-table/remig-object 를 병합 호출
+  // v95_p107 hotfix_068: 동시 처리 (병렬) — bulkConcurrency 만큼 동시에
   let okCount = 0, failCount = 0
-  for (const item of targets) {
-    // v10 #33: 해당 차례가 되면 그제야 'retrying' + 개별 startAt
+  let abortedCount = 0
+
+  // 단일 항목 처리 함수
+  async function _h068_processOne(item) {
+    if (bulkRetryAborted.value) return
     const t0 = Date.now()
     retryStatusMap.value[item.name] = {
       ...retryStatusMap.value[item.name],
@@ -3033,15 +3266,33 @@ async function runBulkRetry() {
     bulkBatchDone.value++
   }
 
+  // chunked Promise.all 병렬 처리
+  const _h068_concurrency = Math.max(1, bulkConcurrency.value || 1)
+  for (let _h068_i = 0; _h068_i < targets.length; _h068_i += _h068_concurrency) {
+    if (bulkRetryAborted.value) {
+      abortedCount = targets.length - okCount - failCount
+      break
+    }
+    const _h068_batch = targets.slice(_h068_i, _h068_i + _h068_concurrency)
+    await Promise.all(_h068_batch.map(_h068_processOne))
+  }
+
   bulkRetryRunning.value = false
   stopRetryTick()
   // 선택 초기화
   bulkSelectedRetry.value = new Set()
 
-  app.notify(
-    `일괄 재처리 완료 — 성공 ${okCount}건, 실패 ${failCount}건`,
-    failCount === 0 ? 'success' : (okCount === 0 ? 'error' : 'warn')
-  )
+  if (bulkRetryAborted.value && abortedCount > 0) {
+    app.notify(
+      `일괄 재처리 중지됨 — 성공 ${okCount}건, 실패 ${failCount}건, 미처리 ${abortedCount}건`,
+      'warn'
+    )
+  } else {
+    app.notify(
+      `일괄 재처리 완료 — 성공 ${okCount}건, 실패 ${failCount}건`,
+      failCount === 0 ? 'success' : (okCount === 0 ? 'error' : 'warn')
+    )
+  }
 }
 
 // 개별 항목 재이관 (AI 모드일 때 재시도 루프)
@@ -3090,11 +3341,15 @@ async function _runOneBulkRetry(item) {
 // 기존 remig-table / remig-object 엔드포인트 호출 래퍼
 async function _callRemigEndpoint(item, opts) {
   const isTable = item.type === 'table'
+  // v95_p107 hotfix_057: AbortController — 중지 클릭 시 진행 중 fetch 즉시 취소
+  bulkAbortController.value = new AbortController()
+  const _h057_signal = bulkAbortController.value.signal
   try {
     let res
     if (isTable) {
       res = await fetch('/api/v1/jobs/' + job.value.id + '/remig-table', {
         method: 'POST',
+        signal: _h057_signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           table:           item.name,
@@ -3105,17 +3360,24 @@ async function _callRemigEndpoint(item, opts) {
           drop_table:      job.value?.drop_table,
           truncate_target: job.value?.truncate_target,
           create_table:    job.value?.create_table,
+          // v95_p107 hotfix_048: provider override
+          ai_provider:     bulkAiProvider.value || undefined,
+          ai_model:        bulkAiModel.value || undefined,
         })
       })
     } else {
       res = await fetch('/api/v1/jobs/' + job.value.id + '/remig-object', {
         method: 'POST',
+        signal: _h057_signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           object_name:   item.name,
           object_type:   item.type,
           mode:          opts.mode,
           error_history: opts.error_history || [],
+          // v95_p107 hotfix_048: provider override
+          ai_provider:   bulkAiProvider.value || undefined,
+          ai_model:      bulkAiModel.value || undefined,
         })
       })
     }
@@ -3125,10 +3387,16 @@ async function _callRemigEndpoint(item, opts) {
     }
     // 완료 대기 (기존 _waitItemDone 패턴 재사용)
     const finalSt = await _waitItemDone(item.name, isTable ? 300 : 120)
+    // v95_p107 hotfix_059: 새 결과 즉시 폴링 (item.error 캐시 갱신 — 본부장님 진가 표시)
+    try { await loadJob() } catch (_) {}
     if (finalSt === 'done') return { success: true }
     const err = job.value?.item_statuses?.[item.name]?.error
     return { success: false, error: err || finalSt }
   } catch (e) {
+    // v95_p107 hotfix_057: AbortError 인 경우 — 사용자 중지
+    if (e.name === 'AbortError') {
+      return { success: false, error: '사용자 중지' }
+    }
     return { success: false, error: e.message }
   }
 }
@@ -3175,7 +3443,7 @@ const remigOpts = [
   { value:'drop_recreate', icon:'🔄', title:'DROP 후 재생성',     desc:'타겟 테이블 삭제 후 스키마·데이터 완전 재구성' },
   { value:'skip_geo',      icon:'🔧', title:'자체 이관',           desc:'미지원 컬럼(geography 등) NULL 처리 후 재이관' },
   { value:'original',      icon:'⚡', title:'원본 설정 그대로',    desc:'처음 이관 시 선택한 옵션으로 재시도' },
-  { value:'ai',            icon:'🤖', title:'AI 이관',             desc:'Claude AI가 오류 분석 후 스키마 변환 및 재이관' },
+  { value:'ai',            icon:'🤖', title:'AI 이관',             desc:'내부 AI(Gemini 기본)가 오류 분석 후 스키마 변환 및 재이관' },
 ]
 
 function toggleInlineRemig(name) {
@@ -3588,6 +3856,91 @@ async function doRemig(item) {
   transition: width .3s;
 }
 
+/* ════════════════════════════════════════════════════════════════
+   v95_p107 hotfix_029 (2026-05-11 본부장님 본질 처방):
+     접힌 헤더에서 테이블/객체 진행률 분리 표시
+   ════════════════════════════════════════════════════════════════ */
+
+/* 테이블 진행 (작게, 자리만 차지) */
+.kpi-compact-progress-tbl {
+  min-width: auto;
+  gap: 4px;
+  padding: 3px 8px;
+  background: rgba(148, 163, 184, .08);
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--text-secondary, #475569);
+}
+.kpi-compact-progress-tbl .kpi-compact-mini-label {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-tertiary, #94a3b8);
+}
+.kpi-compact-progress-tbl .kpi-compact-mini-count {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-compact-progress-tbl .kpi-compact-mini-pct {
+  font-weight: 700;
+  color: var(--text-primary, #334155);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 객체 진행 (강조 — 바 포함) */
+.kpi-compact-progress-obj {
+  min-width: 220px;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 5px;
+  background: rgba(20, 184, 166, .06);
+  border: 1px solid rgba(20, 184, 166, .15);
+  transition: all .3s;
+}
+.kpi-compact-progress-obj.obj-active {
+  background: rgba(20, 184, 166, .12);
+  border-color: rgba(20, 184, 166, .35);
+  animation: kpi-obj-pulse 2s ease-in-out infinite;
+}
+.kpi-compact-progress-obj.obj-failed {
+  background: rgba(239, 68, 68, .08);
+  border-color: rgba(239, 68, 68, .25);
+}
+@keyframes kpi-obj-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(20, 184, 166, .25); }
+  50%      { box-shadow: 0 0 0 4px rgba(20, 184, 166, .08); }
+}
+.kpi-compact-progress-obj .kpi-compact-mini-label {
+  font-weight: 700;
+  font-size: 11px;
+  color: #0d9488;
+  letter-spacing: .02em;
+}
+.kpi-compact-progress-obj.obj-failed .kpi-compact-mini-label {
+  color: #dc2626;
+}
+.kpi-compact-progress-obj .kpi-compact-mini-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #0f172a);
+}
+.kpi-compact-progress-obj .kpi-compact-pct {
+  font-weight: 700;
+  color: #0d9488;
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+}
+.kpi-compact-progress-obj.obj-failed .kpi-compact-pct {
+  color: #dc2626;
+}
+/* 객체 진행바 색깔 변형 */
+.kpi-compact-bar-fill.bar-failed {
+  background: linear-gradient(90deg, #ef4444, #dc2626);
+}
+.kpi-compact-bar-fill.bar-done {
+  background: linear-gradient(90deg, #10b981, #059669);
+}
+
 /* 객체 진행 상태 */
 .kpi-compact-obj {
   font-size: 12px;
@@ -3873,10 +4226,10 @@ async function doRemig(item) {
 }
 .item-table::-webkit-scrollbar-thumb:hover{background: var(--text-tertiary)}
 .item-table::-webkit-scrollbar-thumb:active{background: var(--accent-blue)}
-.item-head{display:grid;grid-template-columns:2.2fr .65fr 1fr 52px 86px .82fr 52px 78px .82fr;gap:8px;padding:8px 16px;background:var(--bg-primary);border-bottom:0.5px solid var(--border-light);font-size:.66rem;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.06em;position:sticky;top:0;z-index:2}
+.item-head{display:grid;grid-template-columns:1.7fr .6fr .9fr 48px 80px .65fr 48px 72px minmax(220px,1.5fr);gap:8px;padding:8px 16px;background:var(--bg-primary);border-bottom:0.5px solid var(--border-light);font-size:.66rem;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.06em;position:sticky;top:0;z-index:2}
 .ih-sort{cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:3px;transition:color .1s}.ih-sort:hover{color:var(--text-primary)}
 .sort-arrow{color:#2563eb;font-weight:700;font-size:.8rem}
-.item-row{display:grid;grid-template-columns:2.2fr .65fr 1fr 52px 86px .82fr 52px 78px .82fr;gap:8px;padding:9px 16px;align-items:center;border-bottom:0.5px solid var(--border-light);cursor:pointer;transition:background .12s;font-size:.82rem}
+.item-row{display:grid;grid-template-columns:1.7fr .6fr .9fr 48px 80px .65fr 48px 72px minmax(220px,1.5fr);gap:8px;padding:9px 16px;align-items:center;border-bottom:0.5px solid var(--border-light);cursor:pointer;transition:background .12s;font-size:.82rem}
 .item-row:last-child{border-bottom:none}
 .item-row:hover{background:var(--bg-primary)}
 .item-row.running{background:rgba(59,130,246,.03)}
@@ -3905,61 +4258,21 @@ async function doRemig(item) {
 .prog-pct{font-size:.7rem;font-weight:600;color:var(--text-secondary);min-width:30px;text-align:right;flex-shrink:0}
 .prog-pct.error{color:#ef4444}.prog-pct.pending{color:var(--text-tertiary)}
 .muted{color:var(--text-tertiary)}
-.stat-pill{display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:600;padding:3px 8px;border-radius:99px}
+.stat-pill{display:inline-flex;align-items:center;gap:3px;font-size:.7rem;font-weight:500;padding:3px 8px;border-radius:99px;white-space:nowrap;max-width:100%;background:transparent}
 .stat-pill svg{width:10px;height:10px;flex-shrink:0}
 .stat-pill.running{background:rgba(59,130,246,.1);color:#1d4ed8;animation:pillBlink 1.2s ease-in-out infinite}
-.stat-pill.done{background:rgba(22,163,74,.1);color:#15803d}
-.stat-pill.error{background:rgba(220,38,38,.1);color:#b91c1c}
-.stat-pill.pending{background:var(--border-light);color:var(--text-tertiary)}
+.stat-pill.done{color:#15803d}
+.stat-pill.error{color:#b91c1c}
+.stat-pill.pending{color:var(--text-tertiary)}
+/* v95_p107 hotfix_045: 과정/결과 분리 — 과정은 회색, 결과만 강조 */
+.stp-process{color:var(--text-tertiary);font-weight:500;opacity:.85}
+.stp-outcome{font-weight:700;margin-left:2px}
+.stp-outcome.ok{color:#15803d}
+.stp-outcome.ng{color:#b91c1c}
 /* v90.67: AI 재이관으로 성공 — 보라색 (특별한 성공) */
 .stat-pill.done.via-ai{background:linear-gradient(135deg,rgba(139,92,246,.12),rgba(168,85,247,.08));color:#6d28d9;border:1px solid rgba(139,92,246,.2)}
 /* v90.67: 1차 실패 → 재시도로 성공 — 청록색 (회복) */
 .stat-pill.done.recovered{background:rgba(20,184,166,.1);color:#0f766e;border:1px solid rgba(20,184,166,.18)}
-
-/* ═══════════════════════════════════════════════════════════════════
-   v95_p107 hotfix_022 (2026-05-11 본부장님 본질 처방):
-   5단계 의미 상태 (cs-*) — conversion_path 기반 진짜 의미 색상
-   기존 .stat-pill.done 보다 우선 (CSS 우선순위 위해 별도 셀렉터 사용)
-   ═══════════════════════════════════════════════════════════════════ */
-/* 🟢 KB 즉시 매칭 — 본부장님 KB 자산 진가 (가장 좋은 상태) */
-.stat-pill.cs-kb-hit{background:rgba(26,127,55,.12);color:#1a7f37;border:1px solid rgba(26,127,55,.30);font-weight:700}
-/* 🔵 AI 신규 학습 — KB 미스 → AI 변환 → KB 등록 (다음에 즉시 매칭됨) */
-.stat-pill.cs-ai-learned{background:rgba(9,105,218,.10);color:#0969da;border:1px solid rgba(9,105,218,.25)}
-/* 🟡 재시도 성공 — KB 깨짐 발견 → AI 복구. 결과 OK, KB 정화 필요 */
-.stat-pill.cs-kb-broken{background:rgba(154,103,0,.10);color:#9a6700;border:1px solid rgba(154,103,0,.30);font-weight:600}
-/* 🟢 정상 완료 (path 없는 단순 완료) */
-.stat-pill.cs-completed{background:rgba(22,163,74,.10);color:#15803d;border:1px solid rgba(22,163,74,.20)}
-/* 🔴 완전 실패 — 본부장님 개입 필요 */
-.stat-pill.cs-failed{background:rgba(207,34,46,.12);color:#cf222e;border:1px solid rgba(207,34,46,.35);font-weight:700}
-/* 🟦 진행중 */
-.stat-pill.cs-running{background:rgba(59,130,246,.10);color:#1d4ed8;animation:pillBlink 1.2s ease-in-out infinite}
-/* ⚪ 대기 */
-.stat-pill.cs-pending{background:var(--border-light);color:var(--text-tertiary)}
-
-/* ═══ KPI 카드 — 상태 분포 미니 표시 ═══ */
-.kpi-card.kpi-review{border-color:rgba(154,103,0,.30);background:rgba(154,103,0,.04)}
-.kpi-value.ok-val{color:#1a7f37}
-.kpi-value.review-val{color:#9a6700}
-.state-mini{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.csm{display:inline-flex;align-items:center;gap:3px;font-size:.66rem;font-weight:600;padding:2px 7px;border-radius:99px;border:1px solid transparent;cursor:help}
-.csm-dot{width:6px;height:6px;border-radius:50%;display:inline-block}
-.csm-kb-hit{background:rgba(26,127,55,.10);color:#1a7f37;border-color:rgba(26,127,55,.20)}
-.csm-kb-hit .csm-dot{background:#1a7f37}
-.csm-ai-learned{background:rgba(9,105,218,.10);color:#0969da;border-color:rgba(9,105,218,.20)}
-.csm-ai-learned .csm-dot{background:#0969da}
-.csm-kb-broken{background:rgba(154,103,0,.10);color:#9a6700;border-color:rgba(154,103,0,.25)}
-.csm-kb-broken .csm-dot{background:#9a6700}
-.csm-completed{background:rgba(22,163,74,.08);color:#15803d;border-color:rgba(22,163,74,.18)}
-.csm-completed .csm-dot{background:#15803d}
-.csm-failed{background:rgba(207,34,46,.10);color:#cf222e;border-color:rgba(207,34,46,.30)}
-.csm-failed .csm-dot{background:#cf222e}
-.kpi-sub-extra{margin-top:6px}
-
-/* 필터 버튼 — cs-* 필터들 (재시도 성공/KB 매칭) 도 dot 표시 */
-.filter-btn .fdot.cs-broken{background:#9a6700}
-.filter-btn .fdot.cs-kb-hit{background:#1a7f37}
-.filter-btn .fdot.cs-learned{background:#0969da}
-
 /* v9 패치 #39: 진행중 상태 깜빡임 */
 @keyframes pillBlink {
   0%,100% { background:rgba(59,130,246,.1); color:#1d4ed8; }
@@ -4156,23 +4469,44 @@ async function doRemig(item) {
   line-height:1.45;
 }
 .brp-ai-opts{
-  display:flex; align-items:center; gap:7px;
-  margin-top:6px; padding:6px 9px;
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px 14px;
+  margin-top:8px;
+  padding:10px 12px;
   background:var(--bg-primary);
   border:0.5px solid var(--border-light);
   border-radius:6px;
   font-size:.72rem;
 }
-.brp-ai-lbl{color:var(--text-secondary)}
+.brp-ai-field{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  white-space:nowrap;
+}
+.brp-ai-lbl{
+  color:var(--text-secondary);
+  font-weight:500;
+}
 .brp-sel{
-  font-size:.72rem; padding:2px 7px;
+  font-size:.72rem; padding:3px 8px;
   border:0.5px solid var(--border-mid);
   border-radius:4px;
   background:var(--bg-primary);
   color:var(--text-primary);
   font-family:var(--font);
 }
-.brp-ai-hint{color:var(--text-tertiary); font-size:.66rem; margin-left:auto}
+.brp-ai-hint{
+  flex-basis:100%;
+  margin-top:4px;
+  padding-top:8px;
+  border-top:0.5px dashed var(--border-light);
+  color:var(--text-tertiary);
+  font-size:.68rem;
+  line-height:1.5;
+}
 .brp-actions{
   display:flex; gap:8px; justify-content:flex-end;
   margin-top:12px; padding-top:10px;
@@ -4693,5 +5027,114 @@ async function doRemig(item) {
   border-radius: 99px;
   margin-left: 1px;
 }
+
+
+/* ── v95_p107 hotfix_046: 오류 상세 모달 → 플로팅 윈도우 ───────── */
+.emd-float-root{
+  position:fixed; inset:0; z-index:9999;
+  pointer-events:none; /* 배경 클릭 통과 — 화면 컨트롤 가능 */
+}
+.emd-float-root > *{ pointer-events:auto; }
+.emd-float-header{
+  display:flex; align-items:center; gap:8px;
+  padding:14px 18px;
+  border-bottom:0.5px solid var(--border-light);
+  cursor:move;
+  user-select:none;
+  touch-action:none;
+}
+.emd-float-header > span{ cursor:move; }
+.emd-float-header button{ cursor:pointer; }
+.emd-float-root.emd-float-min .emd-float-card > *:not(.emd-float-header){
+  display:none !important;
+}
+.emd-float-root.emd-float-min .emd-float-card{
+  max-height:none !important;
+  height:auto !important;
+}
+/* ── /h046 ────────────────────────────────────────────────────── */
+
+
+/* ── v95_p107 hotfix_047: 오류만 선택 + 시도 횟수 표시 ────────── */
+.bulk-only-err-btn{
+  display:inline-flex; align-items:center; gap:4px;
+  padding:4px 10px;
+  border:1px solid rgba(220,38,38,.3);
+  background:rgba(220,38,38,.05);
+  color:#b91c1c;
+  border-radius:6px;
+  font-size:.72rem;
+  font-weight:600;
+  cursor:pointer;
+  margin-left:8px;
+  transition: background .12s;
+}
+.bulk-only-err-btn:hover:not(:disabled){ background:rgba(220,38,38,.12); }
+.bulk-only-err-btn:disabled{ opacity:.5; cursor:not-allowed; }
+.emd-retry-attempt-cnt{ font-weight:700; color:#1d4ed8; }
+/* ── /h047 ────────────────────────────────────────────────────── */
+
+
+/* ── v95_p107 hotfix_051: 모달 resize handle + AI 모드 카드 레이아웃 ───── */
+.emd-float-resize{
+  position:absolute; bottom:0; right:0;
+  width:18px; height:18px;
+  cursor:nwse-resize;
+  opacity:.35;
+  background-image:
+    linear-gradient(135deg,
+      transparent 0%, transparent 38%,
+      var(--text-tertiary) 38%, var(--text-tertiary) 46%,
+      transparent 46%, transparent 60%,
+      var(--text-tertiary) 60%, var(--text-tertiary) 68%,
+      transparent 68%, transparent 82%,
+      var(--text-tertiary) 82%, var(--text-tertiary) 90%,
+      transparent 90%);
+  z-index:10;
+}
+.emd-float-resize:hover{ opacity:.7; }
+
+/* AI 모드 선택 시: 나머지 3카드 컴팩트, AI 카드는 우측 컬럼 전체 차지 */
+.brp-grid.has-ai-active{
+  grid-template-columns: 0.75fr 1.25fr;
+}
+.brp-grid.has-ai-active .brp-opt:not(.brp-opt-ai){
+  padding: 6px 10px;
+}
+.brp-grid.has-ai-active .brp-opt:not(.brp-opt-ai) .brp-opt-desc{
+  display: none;
+}
+.brp-grid.has-ai-active .brp-opt:not(.brp-opt-ai) .brp-opt-head{
+  gap: 6px;
+}
+.brp-grid.has-ai-active .brp-opt.brp-opt-ai{
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+/* ── /h051 ──────────────────────────────────────────────────────────── */
+
+
+/* ── v95_p107 hotfix_054: 일괄 재처리 중지 버튼 ─────────────────────── */
+.emd-prog-abort-btn{
+  padding: 3px 10px;
+  border: 1px solid rgba(220,38,38,.4);
+  background: rgba(220,38,38,.06);
+  color: #b91c1c;
+  border-radius: 5px;
+  font-size: .68rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-left: 8px;
+  transition: background .12s;
+}
+.emd-prog-abort-btn:hover{ background: rgba(220,38,38,.15); }
+.emd-prog-aborting{
+  color: #b91c1c;
+  font-weight: 600;
+  font-size: .68rem;
+  margin-left: 8px;
+  font-style: italic;
+}
+/* ── /h054 ───────────────────────────────────────────────────────── */
 
 </style>

@@ -1,374 +1,145 @@
-【VIEW 전용 추가 규칙】
+═══════════════════════════════════════════════════════════════
+【VIEW 특화 변환】
+═══════════════════════════════════════════════════════════════
 
-═══════════════════════════════════════════════════════════════════
-【v95_p74 (2026-05-06 본부장님 5번째 통찰): 안전 변환 의무화】
-═══════════════════════════════════════════════════════════════════
-본부장님 호소: "사용자는 view를 변환할 능력이 없다 — 시스템이 책임져야"
+기본 변환:
+  MSSQL: CREATE VIEW [Schema].[ViewName] AS SELECT ... FROM [Schema].[Table]
+  MySQL: CREATE VIEW `Schema_ViewName` AS SELECT ... FROM `Schema_Table`
 
-⛔ 절대 규칙 ⛔ — 이 규칙들을 위반하면 변환 실패로 간주됩니다.
+[변환 룰]
+- 스키마 점 표기 → 언더스코어 (Schema.Table → Schema_Table)
+- 대괄호 [] → 백틱 ``
+- WITH (NOLOCK), WITH (READPAST), WITH (HOLDLOCK) 등 힌트 → 완전 제거
+- TOP N → LIMIT N (SELECT 끝)
+- TOP N PERCENT → MySQL 미지원, 대안 권장 (LIMIT 단순 변환)
+- OFFSET N ROWS FETCH NEXT M ROWS ONLY → LIMIT M OFFSET N
+- ISNULL → IFNULL
+- LEN → CHAR_LENGTH
+- GETDATE() → NOW()
+- CONVERT(NVARCHAR(N), x) → CAST(x AS CHAR(N))
+- DATEADD/DATEDIFF → DATE_ADD/TIMESTAMPDIFF
+- CHARINDEX → LOCATE
 
-규칙 A: FROM/JOIN 의 모든 테이블은 원본 MSSQL DDL 에 존재해야 함
-   ─────────────────────────────────────────────────────────────
-   변환 결과의 FROM/JOIN 절에 등장하는 모든 테이블 이름은 반드시:
-     1) 원본 MSSQL DDL 의 FROM/JOIN 에 등장하는 테이블이거나
-     2) 원본 MSSQL DDL 에 [Schema].[Table] 형태로 존재하는 것
-   
-   다음 패턴은 100% 환각 — 절대 출력 금지:
-     ❌ {원본VIEW이름}_data       (예: vJobCandidateEducation_data)
-     ❌ {원본VIEW이름}_DATA
-     ❌ {원본VIEW이름}_Flat
-     ❌ {원본VIEW이름}_Flattened
-     ❌ {원본VIEW이름}_flattened
-     ❌ {원본VIEW이름}_info
-     ❌ {원본VIEW이름}_detail
-     ❌ {원본VIEW이름}_helper
-     ❌ {원본VIEW이름}_Helper
-     ❌ {원본VIEW이름}_aux
-     ❌ {원본VIEW이름}_tmp
-     ❌ {원본VIEW이름}_ref
-     ❌ {원본VIEW이름}_instruction
-     ❌ {원본VIEW이름}_node
-     ❌ {원본VIEW이름}_joined
-     ❌ {원본VIEW이름}_merged
-     ❌ {원본VIEW이름}_split
-     ❌ {원본테이블이름}_Flattened (예: ProductModel_Flattened)
-     ❌ 자기참조 (vXXX 가 XXX 또는 vXXX_anything 참조)
-   
-   AI 환각 검증 시스템 (v95_p72) 이 작동 중 — 위 패턴 출력 시
-   자동으로 안전 폴백으로 대체되며 사용자에게 환각 검출 표시됨.
-   환각 출력 시 변환 실패로 카운트되어 비용 낭비 + 시스템 재시도 비용 증가.
+[XML 메서드 — ⛔ MySQL 미지원]
+다음 패턴이 있으면 변환 불가 — VIEW 본문 빈 SELECT + 주석으로 알림:
+  - col.value('xpath', 'type')
+  - col.query('xpath')
+  - col.nodes('xpath')
+  - col.exist('xpath')
 
-규칙 B: XML 함수 (.value, .nodes, .query, .exist) 발견 시 안전 폴백
-   ─────────────────────────────────────────────────────────────
-   원본 MSSQL VIEW 가 XML 함수를 사용하면:
-   
-   ✅ 정답 (안전 폴백) — XML 파싱 결과 컬럼은 NULL 로:
-   
-      MSSQL 원본:
-        CREATE VIEW vJobCandidateEducation AS
-        SELECT JobCandidateID,
-               Resume.value('(/Resume/Edu/Lvl)[1]','nvarchar(50)') AS EduLevel,
-               Resume.value('(/Resume/Edu/Major)[1]','nvarchar(50)') AS Major
-        FROM HumanResources.JobCandidate
-      
-      MySQL 변환 (정답):
-        CREATE OR REPLACE VIEW `HumanResources_vJobCandidateEducation` AS
-        SELECT `JobCandidateID`,
-               NULL AS `EduLevel`,    -- XML 파싱 컬럼 NULL (응용단 처리)
-               NULL AS `Major`        -- XML 파싱 컬럼 NULL (응용단 처리)
-        FROM `HumanResources_JobCandidate`;
-   
-   ❌ 절대 금지 (환각):
-      FROM `HumanResources_vJobCandidateEducation_data`     ← 가짜
-      FROM `HumanResources_JobCandidate_Flattened`           ← 가짜
-      JSON_TABLE(...)                                         ← MySQL 8.0.14+ 만 + 컬럼 보존 안 됨
+예시:
+  ⛔ MSSQL: SELECT CatalogDescription.value('declare default ...', 'nvarchar(MAX)') ...
+  ✅ MySQL 변환:
+     CREATE VIEW `vProductModelCatalogDescription` AS
+     SELECT 1 AS placeholder
+     -- MSSQL XML 메서드 미지원: 본 VIEW 는 수동 변환 필요
 
-규칙 C: CROSS APPLY / OUTER APPLY 도 안전 폴백
-   ─────────────────────────────────────────────────────────────
-   원본이 CROSS APPLY 또는 OUTER APPLY 사용 시:
-   
-   ✅ 정답:
-      - APPLY 결과 alias (예: MfgInstructions, Steps) 가 사용된 컬럼 → NULL
-      - FROM 은 원본의 베이스 테이블만 (CROSS APPLY 부분 완전 제거)
-   
-   예: vProductModelInstructions
-      MSSQL:
-        SELECT ProductModelID, Name,
-               Instructions.value('xpath','nvarchar(max)') AS Inst,
-               MfgInstructions.ref.value('@LocationID[1]','int') AS LocID,
-               Steps.ref.value('string(.)[1]','nvarchar(1024)') AS Step
-        FROM Production.ProductModel
-        CROSS APPLY Instructions.nodes('xpath') MfgInstructions(ref)
-        CROSS APPLY MfgInstructions.ref.nodes('step') Steps(ref)
-      
-      MySQL 변환 (정답):
-        CREATE OR REPLACE VIEW `Production_vProductModelInstructions` AS
-        SELECT `ProductModelID`, `Name`,
-               NULL AS `Inst`,
-               NULL AS `LocID`,
-               NULL AS `Step`
-        FROM `Production_ProductModel`;
+═══════════════════════════════════════════════════════════════
+【TRIGGER 특화 변환】
+═══════════════════════════════════════════════════════════════
 
-규칙 D: PIVOT / UNPIVOT 도 안전 폴백
-   ─────────────────────────────────────────────────────────────
-   PIVOT/UNPIVOT 발견 시 → 원본 베이스 테이블만 SELECT, PIVOT 결과는 NULL.
+[시그니처]
+MSSQL: CREATE TRIGGER [Schema].[trg_name] ON [Schema].[Table]
+       AFTER INSERT, UPDATE AS BEGIN ... END
 
-규칙 E: 컬럼 보존 의무
-   ─────────────────────────────────────────────────────────────
-   ⚠️ 안전 폴백 적용 시에도 원본의 모든 컬럼 이름은 반드시 보존 (NULL 로):
-     - 응용 프로그램이 컬럼 이름으로 참조 → 컬럼 이름 누락 시 응용 깨짐
-     - 데이터 타입 차이는 OK (모두 NULL) — 컬럼 이름만 보존
-   
-   예: 원본에 EduLevel, Major 컬럼 있으면 → 변환에도 NULL AS EduLevel, NULL AS Major
+MySQL: CREATE TRIGGER `Schema_trg_name`
+       AFTER INSERT ON `Schema_Table` FOR EACH ROW
+       BEGIN ... END
 
-규칙 F: 응답 노트
-   ─────────────────────────────────────────────────────────────
-   안전 폴백 적용 시 changes 배열에 다음 노트 추가:
-     - "v95_p74 안전 폴백: XML/CROSS APPLY 부분은 NULL 로 변환됨"
-     - "원본 컬럼 이름 모두 보존됨 (응용단에서 별도 처리 권장)"
-═══════════════════════════════════════════════════════════════════
+⚠ 중요 1: MySQL 은 트리거 1개당 **하나의 이벤트** (INSERT/UPDATE/DELETE 중 1개)만
+  → MSSQL `AFTER INSERT, UPDATE` 같이 여러 이벤트 = **트리거 분리 필수**
+  → 예: trg_name_INSERT + trg_name_UPDATE 두 개 생성
 
-1. 헤더 형식
-   CREATE OR REPLACE VIEW `{obj_name}` AS
-   SELECT ...
+⚠ 중요 2: MySQL 은 `INSTEAD OF` 트리거 미지원
+  → BEFORE 또는 AFTER 만
 
-2. WITH CHECK OPTION 유지 가능
-3. 파라미터 없음 — WHERE절 하드코딩된 파라미터 제거 불필요
-4. TOP n → LIMIT n (끝에 추가)
-5. NOLOCK 제거
+⚠ 중요 3: FOR EACH ROW 필수
 
-6. 【v63 최우선】 뷰 본문 SELECT 안의 모든 테이블 참조에서 스키마 접두사 제거 【필수】
+[INSERTED / DELETED → NEW / OLD]
+MSSQL `INSERTED.col` → MySQL `NEW.col`
+MSSQL `DELETED.col` → MySQL `OLD.col`
 
-   ❌ 잘못된 패턴 (1146 Table 'db.schema_table' doesn't exist 원인):
-      CREATE OR REPLACE VIEW `v_customer_360` AS
-      SELECT c.*, l.loan_amount
-      FROM customer.customers c               ← customer. 스키마 접두사
-      JOIN credit.loans l ON c.id = l.cust_id ← credit. 스키마 접두사
-      LEFT JOIN collection.delinquent d       ← collection. 스키마 접두사
+⛔ INSERT 트리거: `OLD` 참조 금지 (1363 에러: 'There is no OLD row in on INSERT trigger')
+⛔ DELETE 트리거: `NEW` 참조 금지 (1362 에러)
+✅ UPDATE 트리거: NEW/OLD 모두 사용 가능
 
-   ✅ 올바른 패턴:
-      CREATE OR REPLACE VIEW `v_customer_360` AS
-      SELECT c.*, l.loan_amount
-      FROM `customers` c
-      JOIN `loans` l ON c.id = l.cust_id
-      LEFT JOIN `delinquent` d ON l.id = d.loan_id
+[OBJECT_ID 헤더 제거]
+MSSQL:
+  IF OBJECT_ID(N'[dbo].[trg_x]', N'TR') IS NOT NULL
+    DROP TRIGGER [dbo].[trg_x]
 
-   규칙:
-   - MySQL 은 database.table 형식만 지원. 스키마 개념이 없음.
-   - MSSQL 의 dbo.xxx, credit.xxx, collection.xxx, settlement.xxx, customer.xxx, ref.xxx
-     등 모든 스키마 접두사는 반드시 제거.
-   - FROM 절, JOIN 절, 서브쿼리 안의 FROM 절 모두 적용.
-   - 만약 이관 당시 테이블명이 「스키마_테이블」 형태 (예: settlement_trx)로
-     바뀌었으면 그 패턴을 따라가되, 기본은 스키마 제거.
-
-7. 【v63】 CROSS APPLY / OUTER APPLY 변환
-   - MSSQL 의 CROSS APPLY → MySQL 의 JOIN LATERAL (MySQL 8.0.14+) 또는 서브쿼리
-   - OUTER APPLY → LEFT JOIN LATERAL
-
-   예:
-   MSSQL:  FROM t1 CROSS APPLY (SELECT col FROM t2 WHERE t2.id = t1.id) AS x
-   MySQL:  FROM t1, LATERAL (SELECT col FROM t2 WHERE t2.id = t1.id) AS x
-
-8. 【v63】 상관 서브쿼리 alias 주의
-   - SELECT 절 안의 서브쿼리는 alias 뒤에 세미콜론 절대 금지
-   - SELECT (SELECT MAX(col) FROM tbl WHERE ...) AS max_val  ← 괄호 안에 세미콜론 없음
-
-9. 【v95_p33 본질 1 — 본부장님 처방】 OPENXML / XQuery / .nodes() / .value() 처리
-
-   ❌ 절대 금지: 가짜 의존 테이블 만들지 말 것
-      MSSQL VIEW 가 OPENXML, .nodes(), .value(), .query() 같은 XML 함수를 사용할 때
-      AI 가 임의로 가짜 테이블 이름을 만드는 것 (예: _data, _flat, _Flattened, _Instruction,
-      _DATA, _Instructions_Flat, _Helper, _Aux, _Tmp, _Ref 등 어떤 접미사든) **절대 금지**.
-
-      이미 발견된 환각 사례 (본부장님 환경):
-        ❌ FROM `Production_ProductModelInstructions_Flat`     ← 존재 안 하는 가짜
-        ❌ FROM `Production_ProductModelInstructions_Flattened` ← 존재 안 하는 가짜
-        ❌ FROM `Production_ProductModelInstructions`           ← VIEW 자기참조 금지
-        ❌ FROM `Production_ProductModel_Flattened`             ← 존재 안 하는 가짜
-        ❌ FROM `Production_ProductModel_Instruction`           ← 존재 안 하는 가짜
-        ❌ FROM `HumanResources_vJobCandidateEducation_DATA`    ← 존재 안 하는 가짜
-        ❌ FROM `HumanResources_vJobCandidateEducation_data`    ← 존재 안 하는 가짜
-        ❌ FROM `HumanResources_vJobCandidateEducation_flat`    ← 존재 안 하는 가짜
-        ❌ FROM `HumanResources_vJobCandidateEducation_Helper`  ← 존재 안 하는 가짜
-
-      【v95_p35 강화】 위 모든 사례는 AI 가 만든 환각이며 절대 출력 금지.
-      어떤 접미사도 추가 금지: _data, _flat, _info, _detail, _helper, _aux, _tmp,
-      _ref, _instruction, _node, _joined, _merged, _split, _Helper, _DATA 등 모두.
-      VIEW 가 자기 자신을 참조하면 안 됨 (vProductModelInstructions 가
-      Production_ProductModelInstructions 참조 = 자기참조 금지).
-
-   ✅ 올바른 처방 — XML 컬럼은 그대로 반환 (MySQL 은 LONGTEXT 로 받음)
-
-      MSSQL 원본 (예시):
-        CREATE VIEW vJobCandidateEducation AS
-        SELECT JobCandidateID,
-               Resume.value('(/Resume/Edu/Lvl)[1]','nvarchar(50)') AS EduLevel
-        FROM HumanResources.JobCandidate
-
-      MySQL 변환 (정답):
-        CREATE OR REPLACE VIEW `HumanResources_vJobCandidateEducation` AS
-        SELECT `JobCandidateID`, `Resume`
-        FROM `HumanResources_JobCandidate`
-        -- XML 파싱 컬럼은 LONGTEXT 그대로. MySQL 에서 EXTRACTVALUE() 로
-        -- 별도 처리하거나, 응용단에서 파싱.
-
-   원칙:
-   (a) 원본 VIEW 가 XML 함수 사용 시 → XML 컬럼을 그대로 SELECT (파싱 결과 컬럼 제거)
-   (b) 가짜 의존 테이블 ABSOLUTELY 만들지 말 것 — 모든 FROM/JOIN 은 실제 존재하는
-       MSSQL 테이블/뷰 이름만 사용 (스키마 접두사는 MySQL 형식 `Schema_Table` 으로)
-   (c) XML 파싱이 핵심이라 단순화 불가능하면 → 빈 SELECT (NULL 컬럼) 로 처리:
-        SELECT NULL AS EduLevel, NULL AS Degree FROM `HumanResources_JobCandidate`
-   (d) 절대 자기참조 VIEW 만들지 말 것 (예: vProductModelInstructions 가
-       Production_ProductModelInstructions 참조)
-   (e) 【v95_p35】 의심스러우면 가장 안전한 폴백 — 원본 베이스 테이블만 SELECT 하고
-       XML 함수 부분은 NULL 컬럼으로 대체:
-
-          ✅ 안전 폴백 패턴:
-          CREATE OR REPLACE VIEW `Production_vProductModelInstructions` AS
-          SELECT `ProductModelID`, `Name`,
-                 NULL AS `Instructions`,    -- XML 파싱 결과 NULL
-                 NULL AS `LocationID`,      -- XML 파싱 결과 NULL
-                 `ModifiedDate`
-          FROM `Production_ProductModel`    -- 실제 존재하는 베이스 테이블만
-          -- 응용단에서 XML 파싱 필요 시 EXTRACTVALUE() 사용
-
-10. 【v95_p33 본질 1】 의존 객체 이름은 변형 금지
-
-    AI 변환 시 원본 MSSQL VIEW 가 참조하는 모든 테이블/뷰는:
-    - 스키마 접두사만 underscore 로 변경: `Production.Product` → `Production_Product`
-    - 절대 접미사 (_data, _flat, _info, _detail 등) 추가 금지
-    - 절대 단어 분리/병합 금지 (Salesorderheader → SalesOrderHeader 같은 변형)
-    - 의심스러우면 원본 그대로 두고 (스키마만 변환), AI 가 작명하지 말 것
-
-11. 【v95_p35 본질 2 — 본부장님 강력 경고】 ★★★ 절대 규칙 ★★★
-
-    AI 가 지금까지 만든 모든 환각 가짜 테이블 이름 — 모두 1146 에러 원인:
-
-    ❌ 절대 만들지 말 것 (이전 발견 사례):
-       _data, _DATA, _Data           ← 데이터 변형 환각
-       _flat, _Flat, _Flattened      ← 평탄화 환각
-       _Instruction, _Instructions   ← 단수/복수 환각
-       _Helper, _HELPER              ← 보조 테이블 환각
-       _info, _detail, _summary      ← 표현 변형 환각
-       _aux, _temp, _tmp, _ref       ← 임시 환각
-       _view, _table                 ← 메타 환각
-       _extended, _normalized        ← 정규화 환각
-       _joined, _merged              ← 결합 환각
-
-    ❌ 자기참조 환각 절대 금지:
-       vProductModelInstructions VIEW 가 Production_ProductModelInstructions
-       또는 그 변형 (Instructions_Helper, ProductModel_Instruction 등) 참조 절대 금지.
-       VIEW 는 BASE TABLE 만 참조해야 함.
-
-    ✅ 단 하나의 규칙 — 의심 1순위 행동:
-       MSSQL VIEW 가 XML 함수, 복잡한 OPENXML 사용하면
-       → 단순화 불가능 → 빈 SELECT (NULL 컬럼) 형태로 처리
-       → 절대 새로운 테이블 이름 만들지 말 것
-
-    ✅ 모든 FROM/JOIN 의 식별자 검증 체크리스트:
-       (a) 이 식별자는 원본 MSSQL 에 진짜 존재하는 테이블인가?
-       (b) 스키마 접두사만 변경했나? (Schema.Table → Schema_Table)
-       (c) 접미사를 추가하지 않았나?
-       (d) 단어를 분리/병합하지 않았나?
-       (e) 의심되면 → 만들지 말고 NULL 컬럼으로 대체
-
-    【v95_p49 본질 — 본부장님】★★★ 백틱 강제 형식 ★★★
-
-       이 규칙은 환각 자동 검출 시스템과 직결되어 있음.
-       AI 응답의 모든 테이블 식별자는 반드시 백틱(`)으로 감싸야 함.
-       
-       ❌ 절대 출력 금지 (백틱 누락):
-          CREATE VIEW v AS SELECT * FROM Production_ProductModel pm
-          CREATE VIEW v AS SELECT * FROM Sales_Customer sc JOIN Person_Person pp
-          CREATE VIEW v AS SELECT * FROM Production_Product
-       
-       ✅ 반드시 출력 (백틱 강제):
-          CREATE VIEW `v` AS SELECT * FROM `Production_ProductModel` pm
-          CREATE VIEW `v` AS SELECT * FROM `Sales_Customer` sc JOIN `Person_Person` pp
-          CREATE VIEW `v` AS SELECT * FROM `Production_Product`
-       
-       대상:
-         - VIEW 이름: CREATE VIEW `name` AS
-         - FROM 절 테이블: FROM `Schema_Table`
-         - JOIN 절 테이블: JOIN `Schema_Table` ON ...
-         - 컬럼 이름 (필요 시): SELECT `col_name` FROM ...
-       
-       이유:
-         - 백틱이 누락되면 환각 검출 시스템이 식별자를 추적하지 못함
-         - 환각이 발생해도 안전 폴백 발동 안 됨 → 1146 에러로 사용자 작업 실패
-         - 또한 MySQL 예약어 충돌 가능성 차단 (PRIMARY, KEY, ORDER 등)
-
-12. 【v95_p36 본질 A — 본부장님】 MSSQL XML 함수 절대 출력 금지 ★★★
-
-    MSSQL 의 XML 메서드는 MySQL 에 존재하지 않음. AI 응답에 다음 중 하나라도
-    포함되면 → MySQL 1064 syntax error → 즉시 실패.
-
-    ❌ 절대 출력 금지 (모두 MySQL 1064 발생):
-       Resume.value('(/Resume/Edu/Lvl)[1]', 'nvarchar(50)')
-       ProductModel.Instructions.nodes('/...')
-       Instructions.value('(@LocationID)[1]', 'int')
-       declare default element namespace "http://schemas.microsoft.com/..."
-       declare namespace ml="..."
-       OPENXML(@idoc, '/...', 2)
-       sp_xml_preparedocument
-       FOR XML AUTO/PATH/EXPLICIT
-       .query('/path'), .modify('insert ...'), .exist('...')
-
-    ✅ 유일한 처방 — XML 함수 부분 모두 NULL 컬럼으로 대체:
-
-       MSSQL 원본:
-         CREATE VIEW vJobCandidateEducation AS
-         SELECT JobCandidateID,
-                Resume.value('(/Resume/Edu/Lvl)[1]','nvarchar(50)') AS EduLevel,
-                Resume.value('(/Resume/Edu/Major)[1]','nvarchar(50)') AS Major
-         FROM HumanResources.JobCandidate
-
-       MySQL 변환 (정답 — XML 함수 결과를 모두 NULL 로):
-         CREATE OR REPLACE VIEW `HumanResources_vJobCandidateEducation` AS
-         SELECT `JobCandidateID`,
-                NULL AS `EduLevel`,
-                NULL AS `Major`,
-                `Resume`                  -- XML 컬럼은 LONGTEXT 그대로 노출
-         FROM `HumanResources_JobCandidate`
-         -- 응용단에서 EXTRACTVALUE() 또는 외부 파서로 처리
-
-    ★ 이 규칙은 본부장님 운영 환경에서 가장 중요한 규칙입니다.
-    ★ XML 메서드 코드를 한 글자라도 출력하면 → 1064 → 이관 실패.
-    ★ 의심되면 무조건 NULL 컬럼으로 대체하세요.
-
-13. 【v95_p36 본질 B — 본부장님】 MSSQL 전용 키워드 모두 제거 ★★★
-
-    다음 MSSQL 키워드들은 MySQL 에 없으므로 SELECT 자체에서 제거 필요:
-
-    ❌ MySQL 에 없는 키워드 (제거 필수):
-       WITH SCHEMABINDING        ← MySQL 미지원, 1064 발생
-       WITH ENCRYPTION           ← MySQL 미지원
-       WITH VIEW_METADATA        ← MySQL 미지원
-       WITH (NOLOCK)             ← MySQL 미지원 (이미 처방 5번)
-       WITH (READPAST)           ← MySQL 미지원
-       NOEXPAND                  ← MySQL 미지원
-       FORCESCAN, FORCESEEK      ← MySQL 미지원
-       ROW_NUMBER() OVER (...)   ← MySQL 8.0+ 만 지원, 5.7 호환 위해 주의
-
-    ✅ 처방:
-       - 이 키워드들이 등장하면 단순히 제거 (의미 손실 없음)
-       - WITH SCHEMABINDING AS SELECT ... → AS SELECT ...
-       - SELECT * FROM t WITH (NOLOCK) → SELECT * FROM t
-
-    예시:
-       MSSQL: CREATE VIEW vProductAndDescription WITH SCHEMABINDING AS
-              SELECT p.ProductID FROM Production.Product p
-       MySQL: CREATE OR REPLACE VIEW `Production_vProductAndDescription` AS
-              SELECT p.`ProductID` FROM `Production_Product` p
+MySQL:
+  DROP TRIGGER IF EXISTS `trg_x`;
 
 
-【TRIGGER 전용 추가 규칙】
+[Few-shot 트리거 예시]
 
-1. 헤더 형식
-   DROP TRIGGER IF EXISTS `{obj_name}`;
-   DELIMITER $$          ← 트리거는 DELIMITER 사용 가능 (별도 처리됨)
-   CREATE TRIGGER `{obj_name}`
-   {BEFORE|AFTER} {INSERT|UPDATE|DELETE}
-   ON `table_name` FOR EACH ROW
-   BEGIN
-     ...
-   END$$
-   DELIMITER ;
+[예 1] INSERT/UPDATE 분리
+MSSQL:
+  CREATE TRIGGER [dbo].[Sales_iduSalesOrderDetail] ON Sales.SalesOrderDetail
+  AFTER INSERT, UPDATE, DELETE AS
+  BEGIN
+    -- INSERT 처리
+    INSERT INTO TransactionHistory (ProductID, ReferenceOrderID)
+      SELECT inserted.ProductID, inserted.SalesOrderID FROM inserted;
+  END
 
-2. INSERTED → NEW, DELETED → OLD
+MySQL (INSERT 트리거만 분리):
+  DROP TRIGGER IF EXISTS `Sales_iduSalesOrderDetail_INSERT`;
+  CREATE TRIGGER `Sales_iduSalesOrderDetail_INSERT`
+  AFTER INSERT ON `Sales_SalesOrderDetail` FOR EACH ROW
+  BEGIN
+    INSERT INTO `Production_TransactionHistory` (`ProductID`, `ReferenceOrderID`)
+      VALUES (NEW.`ProductID`, NEW.`SalesOrderID`);
+  END
 
-3. MySQL 트리거 제약
-   - 자기 테이블 UPDATE 불가 → 제거 또는 주석 처리
-   - INSERT 트리거에서 OLD 참조 불가
-   - DELETE 트리거에서 NEW 참조 불가
+⚠ 컬럼명 절대 변경 금지:
+  ❌ BusinessEntityID → BusinessEntityENDID (X — Gemma 가 잘 하는 실수)
+  ❌ SubTotal → SubDESC_SubTotal (X)
+  ✅ BusinessEntityID → BusinessEntityID (유지)
 
-4. FOR INSERT, UPDATE, DELETE (MSSQL) →
-   MySQL은 각각 별도 트리거 3개로 분리 필요
-   (하나의 트리거에서 여러 이벤트 처리 불가)
 
-5. WITH EXECUTE AS → 제거
+[예 2] UPDATE 트리거 — NEW/OLD 모두 사용
+MSSQL:
+  CREATE TRIGGER [dbo].[trg_Person_iu] ON [Person].[Person]
+  AFTER INSERT, UPDATE AS
+  BEGIN
+    UPDATE p SET p.ModifiedDate = GETDATE()
+    FROM [Person].[Person] p INNER JOIN INSERTED i ON p.BusinessEntityID = i.BusinessEntityID
+  END
 
-6. 자주 발생하는 오류 패턴 (누적)
-   - 오류: "Can't update table in stored function/trigger"
-     원인: 트리거에서 자기 테이블 수정
-     해결: 해당 로직 제거 또는 주석 처리 + 경고 추가
+MySQL (UPDATE 만 분리):
+  DROP TRIGGER IF EXISTS `Person_iuPerson_update`;
+  CREATE TRIGGER `Person_iuPerson_update`
+  BEFORE UPDATE ON `Person_Person` FOR EACH ROW
+  BEGIN
+    SET NEW.`ModifiedDate` = NOW();
+  END
+
+핵심:
+- UPDATE FROM ... INNER JOIN INSERTED → MySQL: NEW.col 직접 사용
+- BEFORE UPDATE 권장 (NEW 수정 가능)
+- AFTER UPDATE 면 UPDATE 추가 호출 불가 (재귀)
+- 컬럼명 100% 유지
+
+[예 3] DELETE 트리거
+MSSQL:
+  CREATE TRIGGER [dbo].[dEmployee] ON [HumanResources].[Employee]
+  AFTER DELETE AS BEGIN
+    INSERT INTO AuditLog (EmpID) SELECT BusinessEntityID FROM DELETED;
+  END
+
+MySQL:
+  DROP TRIGGER IF EXISTS `HumanResources_dEmployee`;
+  CREATE TRIGGER `HumanResources_dEmployee`
+  AFTER DELETE ON `HumanResources_Employee` FOR EACH ROW
+  BEGIN
+    INSERT INTO `AuditLog` (`EmpID`) VALUES (OLD.`BusinessEntityID`);
+  END
+
+[흔한 실수 — 절대 금지]
+1. ❌ INSERT 트리거에서 OLD 참조 → 1363 에러
+2. ❌ 컬럼명 변경 (BusinessEntityID → BusinessEntityENDID 등)
+3. ❌ AFTER UPDATE 안에서 UPDATE 호출 (무한 재귀)
+4. ❌ FOR EACH ROW 누락
+5. ❌ FOR EACH STATEMENT 사용 (MySQL 미지원)

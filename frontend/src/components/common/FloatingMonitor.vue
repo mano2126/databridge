@@ -826,8 +826,12 @@ function sparkPoints(targetId) {
   transition: box-shadow .15s ease;
 }
 .fm-root.fm-dragging {
-  box-shadow: 0 16px 32px rgba(0, 0, 0, .2), 0 4px 12px rgba(0, 0, 0, .15);
+  /* v95_p107 hotfix_086 (2026-05-13 본부장님): AI 엔진 모니터처럼 반투명 효과 */
+  opacity: 0.85;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .22), 0 4px 14px rgba(0, 0, 0, .18);
   cursor: grabbing !important;
+  transform: scale(1.015);
+  transition: transform .12s ease, opacity .12s ease, box-shadow .12s ease;
 }
 .fm-root.fm-min {
   height: auto !important;

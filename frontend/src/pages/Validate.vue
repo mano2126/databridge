@@ -1723,7 +1723,7 @@
 
   <!-- ── 재이관 모달 ── -->
   <teleport to="body">
-    <div v-if="remigModal" class="vp-remig-overlay" @click.self="!remigRunning && closeRemigModal()">
+    <div v-if="remigModal" class="vp-remig-overlay" data-v95_p107_hotfix_037_backdrop="true" @click.stop>
       <div class="vp-remig-modal">
         <!-- 헤더 -->
         <div class="vp-remig-modal-header">

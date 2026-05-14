@@ -22,6 +22,7 @@ from app.core.logging_setup import (
     save_settings,
     archive_and_clear,
     cleanup_old_archives,
+    apply_runtime_settings,   # v95_p107 hotfix_098
 )
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -32,6 +33,14 @@ class SettingsPayload(BaseModel):
     size_mb: int = Field(..., ge=1, le=5)
     interval_hours: int = Field(..., ge=1, le=24)
     retention_days: int = Field(30, ge=1, le=365)
+
+
+# v95_p107 hotfix_098 (2026-05-13 본부장님 본질 처방):
+#   "로그 시작 중지는 tray에서 지정할 수 있도록"
+#   파일 로깅 토글 + 레벨 전용 페이로드 (size/interval 같이 안 보내도 됨)
+class LoggingTogglePayload(BaseModel):
+    file_logging_enabled: bool | None = None
+    log_level: str | None = Field(None, pattern="^(DEBUG|INFO|WARNING|ERROR)$")
 
 
 @router.get("/tail")
@@ -107,6 +116,25 @@ def update_log_settings(payload: SettingsPayload):
         f"(다음 회전 시 적용)"
     )
     return {"status": "ok", "settings": saved, "note": "다음 회전부터 적용됩니다."}
+
+
+# v95_p107 hotfix_098 (2026-05-13 본부장님 본질 처방):
+#   트레이에서 호출하는 토글 전용 endpoint.
+#   백엔드 재시작 없이 즉시 반영.
+@router.post("/toggle")
+def toggle_logging(payload: LoggingTogglePayload):
+    """파일 로깅 ON/OFF + 레벨 즉시 반영. 본부장님 본질 처방."""
+    saved = save_settings(
+        file_logging_enabled=payload.file_logging_enabled,
+        log_level=payload.log_level,
+    )
+    # 즉시 반영 — 재시작 불필요
+    apply_runtime_settings()
+    logger.info(
+        f"[v95_p107-hotfix_098] 로깅 토글: file={'ON' if saved['file_logging_enabled'] else 'OFF'} "
+        f"level={saved['log_level']}"
+    )
+    return {"status": "ok", "settings": saved, "applied": "즉시 반영됨"}
 
 
 @router.post("/clear")

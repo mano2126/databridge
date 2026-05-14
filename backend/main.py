@@ -383,6 +383,16 @@ app.include_router(sql_validate.router,                         tags=["SQL Valid
 #   GET /api/v1/ai-stats/summary, /cache-stats, /kb-stats, /failures, /recent-calls
 app.include_router(ai_stats.router,                             tags=["AI Stats"])
 
+# v95_p107 hotfix_098 (2026-05-13 본부장님 본질 처방):
+#   "로그 시작 중지는 tray에서 지정할 수 있도록"
+#   /api/logs/* 라우터 mount (트레이가 GET/POST 호출하여 로깅 토글)
+try:
+    from app.api import logs as _logs_router
+    app.include_router(_logs_router.router, tags=["Logs"])
+except Exception as _e:
+    import logging as _l
+    _l.getLogger("databridge.main").warning(f"[hotfix_098] logs router mount 실패: {_e}")
+
 # v88 P1: AI DBA Consultant Wizard (Stage 4)
 # - /api/v1/advisor/estimate-cost     (구현 완료)
 # - /api/v1/advisor/analyze           (P1: placeholder, P2~P5 에서 실제 구현)

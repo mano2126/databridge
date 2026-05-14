@@ -848,6 +848,15 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
     error_hint = body.get("error_hint", "")
     # v10 #17: error_history 수용 (프론트 일괄 재처리가 전달)
     error_history = body.get("error_history", [])
+    # v95_p107 hotfix_048: provider override (UI 에서 선택 — Phase 3 라우팅 적용까지 로그 신호만)
+    ai_provider_override = body.get("ai_provider") or ""
+    ai_model_override    = body.get("ai_model") or ""
+    if ai_provider_override:
+        import logging as _h048lg
+        _h048lg.getLogger("databridge.jobs").info(
+            "[h048] remig-object provider override: %s / %s (대상: %s)",
+            ai_provider_override, ai_model_override, name
+        )
     if not name: raise HTTPException(400, "name 필수")
 
     # v10 #17: KB 패턴 매칭 — AI 스킵 대상인지 먼저 확인
@@ -944,6 +953,47 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
                             cur_tgt = tgt_conn.cursor()
                             for stmt in stmts:
                                 if stmt.strip():
+                                    # v95_p107 hotfix_066: 안전망 통합 적용 (진짜 본질)
+                                    # 이 경로는 obj_executor._exec_one 우회 → h054~h061 안전망 적용 안 됨
+                                    # 본부장님 오늘 하루 절망의 진짜 본질
+                                    try:
+                                        import re as _h066re
+                                        # 1) post_process_sql (POSTPROCESS_RULES 통합 — R-001~R-041)
+                                        try:
+                                            from app.core.sql_post_processor import post_process_sql as _h066_pps
+                                            stmt, _h066_fixes = _h066_pps(stmt, name, verbose=False)
+                                            if _h066_fixes:
+                                                engine._log("info", f"[h066] [{name}] post_process 적용: {', '.join(_h066_fixes)}")
+                                        except Exception as _h066pe:
+                                            engine._log("warn", f"[h066] post_process 실패 (무시): {_h066pe}")
+                                        # 2) R-033 proc signature (함수형 룰)
+                                        try:
+                                            from app.core.sql_post_processor import _r033_fix_proc_signature as _h066_r033
+                                            if "CREATE PROCEDURE" in stmt.upper() or "CREATE FUNCTION" in stmt.upper():
+                                                stmt, _h066_r033c = _h066_r033(stmt)
+                                                if _h066_r033c > 0:
+                                                    engine._log("info", f"[h066] [{name}] R-033 정정 x{_h066_r033c}")
+                                        except Exception: pass
+                                        # 3) 핵심 안전망 (bracket + AS BEGIN + OPTION + CONVERT + N'literal')
+                                        _h066_olen = len(stmt)
+                                        # R-034: [ident] → `ident`
+                                        stmt = _h066re.sub(r'\[([A-Za-z_][\w]*)\]', r'`\1`', stmt)
+                                        # R-037: OPTION (MAXRECURSION N)
+                                        stmt = _h066re.sub(r'\s*OPTION\s*\(\s*MAXRECURSION\s+\d+\s*\)\s*', ' ', stmt, flags=_h066re.IGNORECASE)
+                                        # R-039: FUNC AS BEGIN
+                                        stmt = _h066re.sub(
+                                            r'(CREATE\s+FUNCTION\s+`?\w+`?\s*\([^)]*\)\s*RETURNS\s+\w+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)\s+AS\s*(\n?\s*)BEGIN\b',
+                                            r'\1\2BEGIN', stmt, flags=_h066re.IGNORECASE)
+                                        # R-040: CONVERT style
+                                        stmt = _h066re.sub(r"('\d{8}')\s*,\s*\d{2,3}\s*\)", r"CAST(\1 AS DATETIME))", stmt)
+                                        # R-041: N'literal'
+                                        stmt = _h066re.sub(r"\bN'((?:[^'\\]|\\.|'')*)'", r"'\1'", stmt)
+                                        # DELIMITER 잔재 제거
+                                        stmt = _h066re.sub(r"(?im)^\s*DELIMITER\s+\S+\s*$", "", stmt)
+                                        if len(stmt) != _h066_olen:
+                                            engine._log("info", f"[h066-safetynet] [{name}] 정규식 정정 (len {_h066_olen}→{len(stmt)})")
+                                    except Exception as _h066e:
+                                        engine._log("warn", f"[h066] 안전망 예외 (원본 사용): {_h066e}")
                                     cur_tgt.execute(stmt)
                                     tgt_conn.commit()
                             j["item_statuses"][name].update({"status":"done","finished_at":datetime.now(_KST).isoformat()})
@@ -1023,12 +1073,75 @@ def remig_object(jid: str, body: dict, _=Depends(require_operator)):
                     f"[v95_p90_schemactx_005] _conns 채우기 실패 (무시): {_ce}")
 
             engine._migrate_objects(src_conn, tgt_conn, objects, True)
+            # v95_p107 hotfix_043 (본부장님 모토 #14 정면 — 진가 검증):
+            # _migrate_objects 가 status 를 명시적 설정 못하는 경로 본질 처방.
+            # MySQL 에 진짜 객체 존재 확인 후 status 결정.
             st = j["item_statuses"].get(name, {})
-            if st.get("status") != "error":
+            _h043_status = st.get("status")
+            # 진짜 본질: MySQL 객체 실제 존재 여부 검증
+            _h043_obj_exists = False
+            try:
+                _h043_check_cur = tgt_conn.cursor()
+                _h043_tgt_db = engine_job.get("tgt_database", "")
+                if obj_type == "PROCEDURE":
+                    _h043_check_cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.ROUTINES "
+                        "WHERE ROUTINE_SCHEMA=%s AND ROUTINE_TYPE=\'PROCEDURE\' "
+                        "AND (ROUTINE_NAME=%s OR ROUTINE_NAME LIKE %s OR ROUTINE_NAME LIKE %s)",
+                        [_h043_tgt_db, name, f"%_{name}", f"{name}_%"]
+                    )
+                elif obj_type == "FUNCTION":
+                    _h043_check_cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.ROUTINES "
+                        "WHERE ROUTINE_SCHEMA=%s AND ROUTINE_TYPE=\'FUNCTION\' "
+                        "AND (ROUTINE_NAME=%s OR ROUTINE_NAME LIKE %s OR ROUTINE_NAME LIKE %s)",
+                        [_h043_tgt_db, name, f"%_{name}", f"{name}_%"]
+                    )
+                elif obj_type == "TRIGGER":
+                    _h043_check_cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.TRIGGERS "
+                        "WHERE TRIGGER_SCHEMA=%s "
+                        "AND (TRIGGER_NAME=%s OR TRIGGER_NAME LIKE %s OR TRIGGER_NAME LIKE %s)",
+                        [_h043_tgt_db, name, f"%_{name}", f"{name}_%"]
+                    )
+                elif obj_type == "VIEW":
+                    _h043_check_cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.VIEWS "
+                        "WHERE TABLE_SCHEMA=%s "
+                        "AND (TABLE_NAME=%s OR TABLE_NAME LIKE %s OR TABLE_NAME LIKE %s)",
+                        [_h043_tgt_db, name, f"%_{name}", f"{name}_%"]
+                    )
+                _h043_row = _h043_check_cur.fetchone()
+                _h043_obj_exists = bool(_h043_row and (_h043_row[0] if not isinstance(_h043_row, dict) else list(_h043_row.values())[0]))
+                _h043_check_cur.close()
+            except Exception as _h043_e:
+                engine._log("warn", f"[{name}] [h043] MySQL 객체 검증 예외: {_h043_e}")
+            
+            if _h043_obj_exists:
+                # 진짜 MySQL 객체 존재 → 성공
                 j["item_statuses"][name].update({"status":"done","finished_at":datetime.now(_KST).isoformat()})
                 if j.get("rows_error", 0) > 0:
                     j["rows_error"] -= 1
                 engine._log("info", f"✓ [{name}] 재이관 완료")
+            else:
+                # v95_p107 hotfix_064: 실패 시 반드시 timestamp 갱신 (본부장님 모토 #14 정직)
+                # 본질: 옛날 흐름이 status=error 면 error 안 덮어쓰던 결함 → 본부장님 화면 캐시
+                _h064_now = datetime.now(_KST).strftime("%H:%M:%S")
+                _h064_existing = (st.get("error") or "").strip()
+                if _h064_existing and not _h064_existing.startswith("["):
+                    _h064_msg = f"[{_h064_now} 재시도] {_h064_existing}"
+                elif _h064_existing:
+                    # 이미 [시각] prefix 있으면 새 시각으로 교체
+                    import re as _h064re
+                    _h064_msg = _h064re.sub(r"^\[[^\]]+\]\s*", f"[{_h064_now} 재시도] ", _h064_existing, count=1)
+                else:
+                    _h064_msg = f"[{_h064_now}] MySQL 객체 생성 실패 (h043 검증 — 엔진 변환 후 객체 없음)"
+                j["item_statuses"][name].update({
+                    "status": "error",
+                    "error": _h064_msg[:400],
+                    "finished_at": datetime.now(_KST).isoformat(),
+                })
+                engine._log("warn", f"✗ [{name}] [h064] 재이관 실패 — error 갱신: {_h064_msg[:80]}")
         except Exception as e:
             j["item_statuses"][name] = {"type":obj_type.lower(),"status":"error","rows":0,
                 "error":str(e)[:300],"started_at":None,"finished_at":datetime.now(_KST).isoformat()}
@@ -1058,6 +1171,15 @@ def remig_table(jid: str, body: dict, _=Depends(require_operator)):
     override_drop_table      = body.get("drop_table")
     override_truncate_target = body.get("truncate_target")
     override_create_table    = body.get("create_table")
+    # v95_p107 hotfix_048: provider override (UI 에서 선택 — Phase 3 라우팅 적용까지 로그 신호만)
+    ai_provider_override = body.get("ai_provider") or ""
+    ai_model_override    = body.get("ai_model") or ""
+    if ai_provider_override:
+        import logging as _h048lg
+        _h048lg.getLogger("databridge.jobs").info(
+            "[h048] remig-table provider override: %s / %s (테이블: %s)",
+            ai_provider_override, ai_model_override, table
+        )
     if not table: raise HTTPException(400, "table 필수")
 
     # 누적 오류 히스토리 → AI 프롬프트용 텍스트 생성

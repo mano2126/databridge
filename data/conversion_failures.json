@@ -1,0 +1,17 @@
+{
+  "failures": [
+    {
+      "src_hash": "8910dbd0dba74c53",
+      "src_db": "mssql",
+      "tgt_db": "mysql",
+      "obj_type": "TRIGGER",
+      "obj_name_sample": "iPurchaseOrderDetail",
+      "ai_attempts": 1,
+      "ai_failures": 1,
+      "last_error": "HTTP Error 401: Unauthorized",
+      "first_failed_at": "2026-05-11T20:51:21",
+      "last_failed_at": "2026-05-11T20:51:21",
+      "block_until_user_decides": false
+    }
+  ]
+}

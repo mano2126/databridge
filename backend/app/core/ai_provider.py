@@ -50,13 +50,15 @@ SUPPORTED_PROVIDERS = {
     "ollama": {
         "name": "Ollama (로컬)",
         "models": [
-            {"id": "gemma2:9b", "label": "Gemma 2 9B"},
-            {"id": "gemma2:27b", "label": "Gemma 2 27B (긴 SQL 추천)"},
-            {"id": "qwen2.5-coder:7b", "label": "Qwen 2.5 Coder 7B (코드 특화)"},
-            {"id": "qwen2.5-coder:32b", "label": "Qwen 2.5 Coder 32B (코드 특화, 큰 모델)"},
-            {"id": "deepseek-coder-v2:16b", "label": "DeepSeek Coder V2 16B"},
-            {"id": "llama3.1:8b", "label": "Llama 3.1 8B"},
-            {"id": "llama3.3:70b", "label": "Llama 3.3 70B"},
+            # v95_p107 hotfix_069: 코딩 특화 모델 상위 정렬 — MSSQL→MySQL 변환 권장
+            {"id": "qwen2.5-coder:32b", "label": "⭐ Qwen 2.5 Coder 32B (코딩 특화 — 권장)"},
+            {"id": "deepseek-coder-v2:16b", "label": "⭐ DeepSeek Coder V2 16B (코딩 특화)"},
+            {"id": "qwen2.5-coder:7b", "label": "Qwen 2.5 Coder 7B (코딩 특화, 가벼움)"},
+            {"id": "gemma4:26b", "label": "Gemma 4 26B (일반 LLM, 본부장님 현재)"},
+            {"id": "gemma2:27b", "label": "Gemma 2 27B (일반 LLM)"},
+            {"id": "gemma2:9b", "label": "Gemma 2 9B (일반, 가벼움)"},
+            {"id": "llama3.3:70b", "label": "Llama 3.3 70B (일반, 거대)"},
+            {"id": "llama3.1:8b", "label": "Llama 3.1 8B (일반, 가벼움)"},
         ],
         "requires": ["ollama_url"],
         "air_gapped": True,  # ⭐ 본부장님 air-gapped 비전
@@ -75,6 +77,18 @@ SUPPORTED_PROVIDERS = {
         "models": [],  # 사용자가 직접 입력
         "requires": ["base_url", "api_key", "model"],
         "air_gapped": False,  # 사용자 환경에 따라
+    },
+    # v95_p107 hotfix_050: Moonshot AI (Kimi K2) — 코딩 챌린저 우수 모델
+    "moonshot": {
+        "name": "Moonshot AI (Kimi K2)",
+        "models": [
+            {"id": "kimi-k2-0711-preview", "label": "Kimi K2 (코딩 챌린저 우수)"},
+            {"id": "moonshot-v1-128k",     "label": "Moonshot v1 128k"},
+            {"id": "moonshot-v1-32k",      "label": "Moonshot v1 32k"},
+            {"id": "moonshot-v1-8k",       "label": "Moonshot v1 8k"},
+        ],
+        "requires": ["api_key"],
+        "air_gapped": False,  # cloud API (api.moonshot.cn 또는 .ai)
     },
 }
 
@@ -190,6 +204,23 @@ class CustomProvider(AIProviderBase):
         return bool(self.config.get("base_url") and self.config.get("api_key"))
 
 
+# v95_p107 hotfix_050: Moonshot AI (Kimi K2) — OpenAI 호환 API
+class MoonshotProvider(AIProviderBase):
+    """Moonshot AI Kimi K2.
+    Base URL: https://api.moonshot.cn/v1 (중국) 또는 https://api.moonshot.ai/v1 (글로벌)
+    OpenAI 호환 인터페이스 — Phase 3 에서 OpenAI SDK with base_url override 로 구현.
+    """
+    provider_id = "moonshot"
+
+    def convert_ddl(self, src_ddl, obj_type, obj_name,
+                     src_dialect, tgt_dialect, error_hint="", max_tokens=8192):
+        """Phase 3: Moonshot Kimi K2 호출 (OpenAI 호환). 현재 골격."""
+        return None
+
+    def is_available(self) -> bool:
+        return bool(self.config.get("api_key"))
+
+
 # ════════════════════════════════════════════════════════════
 # Factory 함수
 # ════════════════════════════════════════════════════════════
@@ -200,6 +231,7 @@ def get_ai_provider(provider_id: str, config: dict) -> Optional[AIProviderBase]:
         "ollama": OllamaProvider,
         "openai": OpenAIProvider,
         "custom": CustomProvider,
+        "moonshot": MoonshotProvider,  # v95_p107 hotfix_050
     }
     cls = classes.get(provider_id)
     if not cls:
@@ -222,7 +254,8 @@ def select_model_for_obj_type(obj_type: str, default_config: dict) -> dict:
         "by_obj_type": {
           "PROCEDURE": {"provider": "ollama", "model": "qwen2.5-coder:32b"},
           "FUNCTION":  {"provider": "ollama", "model": "qwen2.5-coder:32b"},
-          "TRIGGER":   {"provider": "anthropic", "model": "claude-sonnet-4"},
+          # v95_p107 hotfix_060: 본부장님 환경 Gemma 강제 (Claude 비용 차단)
+          "TRIGGER":   {"provider": "ollama", "model": "gemma2:27b"},
           "VIEW":      {"provider": "ollama", "model": "gemma2:9b"},
         }
       }

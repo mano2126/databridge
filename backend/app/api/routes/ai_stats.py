@@ -287,3 +287,166 @@ def get_recent_calls(limit: int = Query(50, ge=1, le=500)) -> dict:
         "total": len(calls),
         "calls": calls,
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# v95_p107 hotfix_085 (2026-05-13 본부장님): AI 엔진 실시간 가시화
+# ════════════════════════════════════════════════════════════════════
+@router.get("/live")
+def get_ai_live_status():
+    """AI 엔진 실시간 상태 — Topbar AI 버튼 클릭 시 팝업용.
+    
+    Ollama /api/ps + DataBridge 세션 메트릭 결합.
+    Polling 권장 주기: 5초 (lightweight).
+    """
+    import urllib.request as _ur
+    import json as _j
+    import logging as _log
+    
+    _lg = _log.getLogger("databridge.ai_live")
+    
+    # 현재 settings 로드
+    from app.api.routes.settings import _cfg
+    cfg = _cfg()
+    provider = (cfg.get("ai_provider", "anthropic") or "anthropic").strip().lower()
+    
+    result = {
+        "ok": True,
+        "provider": provider,
+        "ts": datetime.now().isoformat(),
+        "ollama": None,
+        "anthropic": None,
+        "session": {},
+    }
+    
+    # ── Ollama 실시간 상태 ────────────────────────────────────────
+    if provider == "ollama":
+        ollama_url = (cfg.get("ollama_url", "http://localhost:11434")
+                      or "http://localhost:11434").rstrip("/")
+        configured_model = (cfg.get("ollama_model", "") or "").strip()
+        
+        ollama_data = {
+            "url": ollama_url,
+            "reachable": False,
+            "configured_model": configured_model,
+            "loaded_models": [],
+            "error": None,
+        }
+        
+        try:
+            req = _ur.Request(f"{ollama_url}/api/ps",
+                              headers={"Content-Type": "application/json"})
+            with _ur.urlopen(req, timeout=3) as r:
+                data = _j.loads(r.read())
+            ollama_data["reachable"] = True
+            
+            # /api/ps 응답 → 로드된 모델 목록
+            for m in data.get("models", []) or []:
+                # processor 비율 계산: size_vram / size (없으면 0)
+                size_total = int(m.get("size", 0) or 0)
+                size_vram  = int(m.get("size_vram", 0) or 0)
+                if size_total > 0:
+                    gpu_pct = round(100.0 * size_vram / size_total)
+                    cpu_pct = 100 - gpu_pct
+                else:
+                    gpu_pct = 0; cpu_pct = 0
+                
+                # 잔여 시간 계산
+                expires_at = m.get("expires_at", "")
+                expires_in_sec = None
+                if expires_at:
+                    try:
+                        from datetime import datetime as _dt
+                        # ISO 8601 (timezone 포함될 수 있음)
+                        _exp = _dt.fromisoformat(expires_at.replace("Z", "+00:00"))
+                        _now = _dt.now(_exp.tzinfo) if _exp.tzinfo else _dt.now()
+                        expires_in_sec = int((_exp - _now).total_seconds())
+                    except Exception:
+                        pass
+                
+                # context window (details.parameter_size 같은 데서 추출되지 않음 — 기본값)
+                # details 에서 추출 시도
+                details = m.get("details", {}) or {}
+                
+                ollama_data["loaded_models"].append({
+                    "name":           m.get("name", ""),
+                    "size_bytes":     size_total,
+                    "size_gb":        round(size_total / 1024 / 1024 / 1024, 1),
+                    "size_vram_gb":   round(size_vram / 1024 / 1024 / 1024, 1),
+                    "cpu_pct":        cpu_pct,
+                    "gpu_pct":        gpu_pct,
+                    "context":        m.get("context_length", 0) or 0,
+                    "expires_at":     expires_at,
+                    "expires_in_sec": expires_in_sec,
+                    "parameter_size": details.get("parameter_size", ""),
+                    "quantization":   details.get("quantization_level", ""),
+                })
+        except Exception as e:
+            ollama_data["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+            _lg.debug(f"[ai_live] Ollama /api/ps 실패: {e}")
+        
+        result["ollama"] = ollama_data
+    
+    # ── Anthropic 상태 (API key 있는지만) ─────────────────────────
+    if provider == "anthropic":
+        result["anthropic"] = {
+            "api_key_set": bool(cfg.get("anthropic_api_key_set") or cfg.get("anthropic_api_key")),
+            "model":       cfg.get("anthropic_model", "claude-sonnet-4-5"),
+        }
+    
+    # ── DataBridge 세션 메트릭 (가능한 만큼) ──────────────────────
+    try:
+        from app.core.mysql_runtime_validator import get_validation_stats
+        vstats = get_validation_stats() or {}
+        result["session"]["validator"] = {
+            "passes": vstats.get("passes", 0),
+            "fails":  vstats.get("fails", 0),
+            "total":  vstats.get("total", 0),
+        }
+    except Exception:
+        result["session"]["validator"] = {"passes": 0, "fails": 0, "total": 0}
+    
+    # 오늘 로그에서 AI 호출 카운트 (lightweight grep)
+    try:
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        log_path = os.path.join(_logs_dir(), "databridge_backend.log")
+        ai_calls = 0
+        pattern_kb_hits = 0
+        kb_registers = 0
+        validator_ok = 0
+        validator_fail = 0
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                # 메모리 절약 — 큰 로그는 마지막 N MB 만
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 5_000_000))
+                for line in f:
+                    if today not in line:
+                        continue
+                    if "AI-TRACE 03-http-send" in line:
+                        ai_calls += 1
+                    elif "PATTERN-KB-FIRST" in line:
+                        pattern_kb_hits += 1
+                    elif "PATTERN-KB-REGISTER" in line:
+                        kb_registers += 1
+                    elif "PATTERN-KB-VALIDATOR-OK" in line or "MYSQL-VALIDATE-OK" in line:
+                        validator_ok += 1
+                    elif "PATTERN-KB-VALIDATION-FAIL" in line:
+                        validator_fail += 1
+        result["session"]["today"] = {
+            "ai_calls":         ai_calls,
+            "pattern_kb_hits":  pattern_kb_hits,
+            "kb_registers":     kb_registers,
+            "validator_ok":     validator_ok,
+            "validator_fail":   validator_fail,
+        }
+    except Exception as e:
+        _lg.debug(f"[ai_live] today metric 실패: {e}")
+        result["session"]["today"] = {
+            "ai_calls": 0, "pattern_kb_hits": 0, "kb_registers": 0,
+            "validator_ok": 0, "validator_fail": 0,
+        }
+    
+    return result

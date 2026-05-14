@@ -1,0 +1,233 @@
+"""
+DataBridge Ollama 자가복구 모듈 — hotfix_095 (본부장님 본질 처방)
+=========================================================================
+
+본부장님 본질 통찰 (2026-05-13 사고):
+  "1시간 9분 무한 대기 — Ollama 살아있는데 응답 없음"
+
+발견된 사고 시나리오:
+  1) Ollama 데몬은 살아있음 (curl /api/ps 응답 OK)
+  2) 하지만 {"models": []} — 모델이 RAM 에서 풀려있음
+  3) DataBridge 가 그래도 /api/chat 호출
+  4) Ollama 가 모델 재로드 시도 → macOS RAM 부족 → swap 폭발 → hang
+  5) DataBridge 는 300초 timeout 까지 대기
+  6) 다음 객체도 동일 → 누적 1시간+
+
+본질 처방 — 변환 시작 전 3단계 health check:
+
+  Phase 1) /api/version  (1초 timeout) — 데몬 살았나
+  Phase 2) /api/ps       (2초 timeout) — 우리 모델 RAM 에 있나
+  Phase 3) /api/generate (5초, prompt="ping") — 실제로 응답 가능한가
+
+각 phase 결과:
+  ✅ ALL PASS    → 변환 진행
+  ⚠️ Phase 2 FAIL → keep_alive=-1 로 warmup 시도 (60초 대기) → 재검사
+  ❌ Phase 1/3 FAIL → 즉시 실패 (300초 timeout 대기 X)
+
+부작용 0:
+  - 기존 변환 로직 변경 없음 — entry 에서 1초 check 만 추가
+  - check 실패 시에만 추가 동작 (warmup 또는 fail-fast)
+  - check 자체 예외 발생 시 안전 통과 (기존 흐름 유지)
+"""
+from __future__ import annotations
+import json
+import logging
+import time
+import urllib.request as _ur
+import urllib.error
+from typing import Tuple
+
+_log = logging.getLogger("databridge.ollama_health")
+
+# ─────────────────────────────────────────────
+# health check 결과 코드
+# ─────────────────────────────────────────────
+HEALTH_OK         = "ok"                    # 모든 phase 통과
+HEALTH_DAEMON_DEAD = "daemon_dead"          # Phase 1 fail — Ollama 자체 죽음
+HEALTH_MODEL_COLD  = "model_cold"           # Phase 2 fail — 모델 RAM 에 없음
+HEALTH_HANG        = "hang"                 # Phase 3 fail — 응답 못 함
+HEALTH_RECOVERED   = "recovered"            # warmup 후 정상 복구
+
+
+def _http_get(url: str, timeout: float) -> Tuple[bool, dict]:
+    """짧은 timeout 으로 GET. (ok, data) 반환."""
+    try:
+        req = _ur.Request(url)
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            return True, json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
+        return False, {"error": str(e)}
+    except Exception as e:
+        return False, {"error": f"unexpected: {e}"}
+
+
+def _http_post(url: str, payload: dict, timeout: float) -> Tuple[bool, dict]:
+    """짧은 timeout 으로 POST. (ok, data) 반환."""
+    try:
+        req = _ur.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            return True, json.loads(resp.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
+        return False, {"error": str(e)}
+    except Exception as e:
+        return False, {"error": f"unexpected: {e}"}
+
+
+def check_ollama_health(
+    ollama_url: str,
+    model: str,
+    obj_name_for_log: str = "",
+) -> Tuple[str, str]:
+    """3단계 Ollama 헬스 체크.
+
+    Returns:
+        (status, reason)
+        status: HEALTH_OK | HEALTH_DAEMON_DEAD | HEALTH_MODEL_COLD | HEALTH_HANG | HEALTH_RECOVERED
+        reason: 사람이 읽을 수 있는 설명
+    """
+    base = ollama_url.rstrip("/")
+    tag = f"[ollama_health] [{obj_name_for_log}]" if obj_name_for_log else "[ollama_health]"
+
+    # ─────────────────────────────────────────────
+    # Phase 1: 데몬 살았나? (/api/version, 1초)
+    # ─────────────────────────────────────────────
+    _t0 = time.monotonic()
+    ok, data = _http_get(f"{base}/api/version", timeout=1.0)
+    _elapsed = time.monotonic() - _t0
+    if not ok:
+        msg = f"Phase1 데몬 응답 없음 ({_elapsed*1000:.0f}ms, err={data.get('error')})"
+        _log.warning("%s %s", tag, msg)
+        return HEALTH_DAEMON_DEAD, msg
+    _log.info("%s Phase1 OK (version=%s, %.0fms)",
+              tag, data.get("version", "?"), _elapsed*1000)
+
+    # ─────────────────────────────────────────────
+    # Phase 2: 우리 모델 RAM 에 있나? (/api/ps, 2초)
+    # ─────────────────────────────────────────────
+    _t0 = time.monotonic()
+    ok, data = _http_get(f"{base}/api/ps", timeout=2.0)
+    _elapsed = time.monotonic() - _t0
+    if not ok:
+        msg = f"Phase2 /api/ps 응답 없음 ({_elapsed*1000:.0f}ms)"
+        _log.warning("%s %s", tag, msg)
+        return HEALTH_DAEMON_DEAD, msg
+
+    loaded_models = data.get("models", [])
+    loaded_names = [m.get("name", "") for m in loaded_models]
+    if model not in loaded_names:
+        msg = f"Phase2 모델 RAM 미적재 (loaded={loaded_names}, target={model})"
+        _log.warning("%s %s", tag, msg)
+        return HEALTH_MODEL_COLD, msg
+    _log.info("%s Phase2 OK (모델 적재됨: %s, %.0fms)",
+              tag, model, _elapsed*1000)
+
+    # ─────────────────────────────────────────────
+    # Phase 3: 실제로 응답 가능한가? (/api/generate, 5초)
+    # ─────────────────────────────────────────────
+    _t0 = time.monotonic()
+    ok, data = _http_post(
+        f"{base}/api/generate",
+        {
+            "model": model,
+            "prompt": "ping",
+            "stream": False,
+            "keep_alive": "-1",   # ★ 본부장님 모토: 영구 유지
+            "options": {"num_predict": 5},  # 5 토큰만
+        },
+        timeout=10.0,   # ping 은 빠르게 — 5초 + 여유
+    )
+    _elapsed = time.monotonic() - _t0
+    if not ok:
+        msg = f"Phase3 ping 실패 ({_elapsed*1000:.0f}ms, err={data.get('error')})"
+        _log.warning("%s %s", tag, msg)
+        return HEALTH_HANG, msg
+
+    eval_count = data.get("eval_count", 0)
+    msg = f"Phase3 OK (ping 응답 {eval_count}토큰, {_elapsed*1000:.0f}ms)"
+    _log.info("%s %s", tag, msg)
+    return HEALTH_OK, msg
+
+
+def warmup_model(
+    ollama_url: str,
+    model: str,
+    obj_name_for_log: str = "",
+    timeout_sec: float = 90.0,
+) -> Tuple[bool, str]:
+    """모델을 RAM 에 로드 (keep_alive=-1 영구).
+
+    Phase 2 fail (모델 cold) 시 호출.
+    14B 면 30~60초, 32B 면 60~120초.
+
+    Returns:
+        (success, reason)
+    """
+    base = ollama_url.rstrip("/")
+    tag = f"[ollama_warmup] [{obj_name_for_log}]" if obj_name_for_log else "[ollama_warmup]"
+    _log.info("%s 모델 warmup 시작 (timeout=%.0fs): %s", tag, timeout_sec, model)
+
+    _t0 = time.monotonic()
+    ok, data = _http_post(
+        f"{base}/api/generate",
+        {
+            "model": model,
+            "prompt": "ping",
+            "stream": False,
+            "keep_alive": "-1",   # 영구 유지
+            "options": {"num_predict": 5},
+        },
+        timeout=timeout_sec,
+    )
+    elapsed = time.monotonic() - _t0
+
+    if not ok:
+        msg = f"warmup 실패 ({elapsed:.1f}s, err={data.get('error')})"
+        _log.error("%s %s", tag, msg)
+        return False, msg
+
+    msg = f"warmup 성공 ({elapsed:.1f}s, keep_alive=-1 영구 적용)"
+    _log.info("%s %s", tag, msg)
+    return True, msg
+
+
+def ensure_ollama_ready(
+    ollama_url: str,
+    model: str,
+    obj_name_for_log: str = "",
+    enable_warmup: bool = True,
+) -> Tuple[bool, str]:
+    """변환 호출 전 Ollama 준비 상태 보장.
+
+    1) check_ollama_health 호출
+    2) HEALTH_OK 면 즉시 True
+    3) HEALTH_MODEL_COLD 면 warmup 시도 → 재검사
+    4) HEALTH_DAEMON_DEAD / HANG 면 즉시 False (15분 timeout 대기 차단)
+
+    Returns:
+        (ready, reason)
+    """
+    status, reason = check_ollama_health(ollama_url, model, obj_name_for_log)
+
+    if status == HEALTH_OK:
+        return True, reason
+
+    if status == HEALTH_MODEL_COLD and enable_warmup:
+        _log.info(
+            "[ollama_ready] [%s] 모델 cold → warmup 시도",
+            obj_name_for_log,
+        )
+        ok, warmup_msg = warmup_model(ollama_url, model, obj_name_for_log)
+        if not ok:
+            return False, f"warmup 실패: {warmup_msg}"
+        # 재검사
+        status2, reason2 = check_ollama_health(ollama_url, model, obj_name_for_log)
+        if status2 == HEALTH_OK:
+            return True, f"warmup 후 복구됨: {reason2}"
+        return False, f"warmup 후에도 비정상: {reason2}"
+
+    # HEALTH_DAEMON_DEAD / HEALTH_HANG → fail-fast
+    return False, reason

@@ -143,8 +143,11 @@ def _extract_type_pairs(src_ddl: str, tgt_stmts: list[str]) -> list[tuple[str, s
 # 2. 오브젝트 변환 패턴 추출 (간이)
 # ══════════════════════════════════════════════════════════
 # 주요 syntax 변환: 함수 치환, 식별자 인용 부호 등
+# hotfix_078 (2026-05-12 본부장님 본질 처방):
+#   본부장님 13개 실패 직접 원인 패턴 추가 — 학습 KB 가 시간 갈수록 자람
+#   메모리 #4 (변환 KB = 살아있는 자산, AI 호출 점점 감소) 정면 실현
 _OBJ_PATTERNS = [
-    # (정규식, 카테고리, 설명 템플릿, src_example, tgt_example)
+    # ── 함수 치환 (기존) ──
     ("GETDATE\\(\\)",        "NOW\\(\\)",              "함수", "GETDATE()", "NOW()"),
     ("ISNULL\\s*\\(",        "IFNULL\\s*\\(",          "함수", "ISNULL(", "IFNULL("),
     ("NEWID\\(\\)",          "UUID\\(\\)",             "함수", "NEWID()", "UUID()"),
@@ -152,6 +155,25 @@ _OBJ_PATTERNS = [
     ("RAISERROR",            "SIGNAL\\s+SQLSTATE",     "예외처리", "RAISERROR", "SIGNAL SQLSTATE"),
     ("NOW\\(\\)",            "GETDATE\\(\\)",          "함수", "NOW()", "GETDATE()"),
     ("IFNULL\\s*\\(",        "ISNULL\\s*\\(",          "함수", "IFNULL(", "ISNULL("),
+    # ── 함수 치환 (hotfix_078 추가, 본부장님 환경 빈도 높은 7건) ──
+    ("\\bLEN\\s*\\(",        "\\bCHAR_LENGTH\\s*\\(",  "함수", "LEN(", "CHAR_LENGTH("),
+    ("GETUTCDATE\\(\\)",     "UTC_TIMESTAMP\\(\\)",    "함수", "GETUTCDATE()", "UTC_TIMESTAMP()"),
+    ("\\bIIF\\s*\\(",        "\\bIF\\s*\\(",           "함수", "IIF(", "IF("),
+    ("\\bCHARINDEX\\s*\\(",  "\\bLOCATE\\s*\\(",       "함수", "CHARINDEX(", "LOCATE("),
+    ("\\bSUSER_SNAME\\b",    "\\bCURRENT_USER\\(\\)",  "함수", "SUSER_SNAME", "CURRENT_USER()"),
+    ("DATEPART\\s*\\(\\s*yy", "\\bYEAR\\s*\\(",        "함수", "DATEPART(yy,)", "YEAR("),
+    ("CONVERT\\s*\\(\\s*VARCHAR", "DATE_FORMAT\\s*\\(", "함수", "CONVERT(VARCHAR,d,fmt)", "DATE_FORMAT(d,fmt)"),
+    # ── 식별자 인용 부호 (hotfix_078 핵심 — 13개 실패 직접 원인) ──
+    ("\\[\\w+\\]\\.\\[\\w+\\]", "`\\w+_\\w+`",          "식별자", "[Schema].[Object]", "`Schema_Object`"),
+    ("\\[[A-Za-z_]\\w*\\]",  "`[A-Za-z_]\\w*`",        "식별자", "[Identifier]", "`Identifier`"),
+    # ── T-SQL 잔재 (hotfix_078 추가) ──
+    ("\\bN'[^']*'",          "(?<!N)'[^']*'",          "리터럴", "N'string'", "'string'"),
+    ("SET\\s+NOCOUNT\\s+ON", "",                       "지시어", "SET NOCOUNT ON", "(제거)"),
+    # ── 데이터형/연산자 (hotfix_078 추가) ──
+    ("\\bTOP\\s+\\d+",       "LIMIT\\s+\\d+",          "쿼리", "TOP N", "LIMIT N"),
+    ("\\bCONCAT\\s*\\+",     "CONCAT\\s*\\(",          "연산자", "a + b (문자)", "CONCAT(a,b)"),
+    ("WITH\\s+\\(\\s*NOLOCK\\s*\\)", "",               "힌트", "WITH (NOLOCK)", "(제거)"),
+    ("WITH\\s+SCHEMABINDING", "",                      "지시어", "WITH SCHEMABINDING", "(제거)"),
 ]
 
 
@@ -162,6 +184,16 @@ def _extract_obj_patterns(src_ddl: str, tgt_stmts: list[str]) -> list[dict]:
     tgt_all = "\n".join(s or "" for s in tgt_stmts)
     hits: list[dict] = []
     for src_re, tgt_re, cat, sp, tp in _OBJ_PATTERNS:
+        # hotfix_078: tgt_re 가 빈 문자열이면 "제거 변환" — src 만 있고 tgt 에 없으면 학습
+        if not tgt_re:
+            if re.search(src_re, src_ddl, re.IGNORECASE) and not re.search(src_re, tgt_all, re.IGNORECASE):
+                hits.append({
+                    "category":   cat,
+                    "src_syntax": sp,
+                    "tgt_syntax": tp,
+                    "note":       f"AI 학습 — {sp} → {tp}",
+                })
+            continue
         if re.search(src_re, src_ddl, re.IGNORECASE) and re.search(tgt_re, tgt_all, re.IGNORECASE):
             hits.append({
                 "category":   cat,

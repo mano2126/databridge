@@ -1,3 +1,4 @@
+# v95_p107 hotfix_067: 모든 끝나는 시점의 started_at 보존 (본부장님 분노 해소)
 """
 app/engine/migration_engine.py
 실제 데이터 이관을 수행하는 MigrationEngine 클래스.
@@ -2058,7 +2059,7 @@ class MigrationEngine:
                 self.job["item_statuses"][name] = {
                     "type": obj_type.lower(), "status": "done",
                     "rows": 0, "error": None,
-                    "started_at": None, "finished_at": datetime.now(_KST).isoformat()
+                    "started_at": ((self.job.get("item_statuses",{}).get(name,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()), "finished_at": datetime.now(_KST).isoformat()
                 }
                 return True
             # v95_p38 본질 (a)+(c): drop_recreate 분기 — 명시적 DROP IF EXISTS
@@ -2190,7 +2191,7 @@ class MigrationEngine:
                     self.job["item_statuses"][name] = {
                         "type": obj_type.lower(), "status": "error",
                         "rows": 0, "error": err_msg,
-                        "started_at": None, "finished_at": datetime.now(_KST).isoformat()
+                        "started_at": ((self.job.get("item_statuses",{}).get(name,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()), "finished_at": datetime.now(_KST).isoformat()
                     }
                     return False
                 try:
@@ -2592,7 +2593,7 @@ class MigrationEngine:
                     "status": "done",
                     "rows": 0,
                     "error": None,
-                    "started_at": None,
+                    "started_at": ((self.job.get("item_statuses",{}).get(name,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()),
                     "finished_at": datetime.now(_KST).isoformat(),
                     # v90.67: 이전에 실패한 적 있으면 마킹 — UI 의 "재시도 후 성공" 라벨용
                     "had_error": _prev_had_error,
@@ -2687,21 +2688,42 @@ class MigrationEngine:
                                     # 하지만 현재 _exec_tgt 구조상 AI 경로를 다시 타게 됨 →
                                     # 대신 statements 만 교체 후 실행 블록만 재실행
                                     statements = _retry_stmts
-                                    # v9 #44 후처리 (백틱, DROP 문 변환) 다시 적용
+                                    # v95_p107 hotfix_080 (2026-05-12):
+                                    # 재시도 후처리 방향성 — tgt=MySQL 이면 backtick 유지 + nuclear cleanup
                                     import re as _re_rty
-                                    for _i, _st in enumerate(statements):
-                                        if '`' in _st:
-                                            _st = _re_rty.sub(r'`([^`]+)`', r'[\1]', _st)
-                                            _st = _st.replace('`', '')
+                                    _h080_tgt_mysql = (tgt_db_type or "").lower() in (
+                                        "mysql", "aurora", "mariadb", "tidb", "cloudsql"
+                                    )
+                                    if _h080_tgt_mysql:
+                                        for _i, _st in enumerate(statements):
+                                            _st = _re_rty.sub(r'\[(\w+)\]\.\[(\w+)\]', r'`\1_\2`', _st)
+                                            _st = _re_rty.sub(r'\[([A-Za-z_]\w*)\]', r'`\1`', _st)
+                                            _st = _re_rty.sub(r'(?m)^\s*DELIMITER\s+.*$', '', _st)
+                                            _st = _re_rty.sub(r'END\s*//\s*$', 'END;', _st, flags=_re_rty.MULTILINE)
+                                            _st = _re_rty.sub(r'(?m)^\s*(//|\$\$)\s*$', '', _st)
+                                            _st = _re_rty.sub(r'(?mi)^\s*GO\s*$', '', _st)
+                                            _st = _re_rty.sub(r"\bN'", "'", _st)
+                                            _st = _re_rty.sub(r'(?i)SET\s+NOCOUNT\s+ON\s*;?\s*', '', _st)
+                                            _st = _re_rty.sub(r'(?i)WITH\s*\(\s*NOLOCK\s*\)', '', _st)
+                                            _st = _re_rty.sub(r'(?i)WITH\s+SCHEMABINDING', '', _st)
                                             statements[_i] = _st
-                                        _up = _st.upper().strip()
-                                        if _up.startswith('DROP TRIGGER IF EXISTS'):
-                                            _m = _re_rty.search(r'DROP\s+TRIGGER\s+IF\s+EXISTS\s+\[?`?(\w+)`?\]?',
-                                                                _st, _re_rty.IGNORECASE)
-                                            if _m:
-                                                _tn = _m.group(1)
-                                                statements[_i] = (f"IF OBJECT_ID(N'[dbo].[{_tn}]', N'TR') IS NOT NULL "
-                                                                  f"DROP TRIGGER [{_tn}]")
+                                        self._log("info",
+                                            f"  [h080-retry-nuclear] [{name}] MySQL 방향 재시도 후처리 — bracket → backtick + 잔재 제거")
+                                    else:
+                                        # tgt=MSSQL: 기존 v9 #44 동작 (backtick → [bracket])
+                                        for _i, _st in enumerate(statements):
+                                            if '`' in _st:
+                                                _st = _re_rty.sub(r'`([^`]+)`', r'[\1]', _st)
+                                                _st = _st.replace('`', '')
+                                                statements[_i] = _st
+                                            _up = _st.upper().strip()
+                                            if _up.startswith('DROP TRIGGER IF EXISTS'):
+                                                _m = _re_rty.search(r'DROP\s+TRIGGER\s+IF\s+EXISTS\s+\[?`?(\w+)`?\]?',
+                                                                    _st, _re_rty.IGNORECASE)
+                                                if _m:
+                                                    _tn = _m.group(1)
+                                                    statements[_i] = (f"IF OBJECT_ID(N'[dbo].[{_tn}]', N'TR') IS NOT NULL "
+                                                                      f"DROP TRIGGER [{_tn}]")
                                     # v9 #46 중복 @변수 자동 제거
                                     def _dedupe_retry(m2):
                                         _body = m2.group(1)
@@ -2733,7 +2755,7 @@ class MigrationEngine:
                                     self._log("info", f"✓ {obj_type} [{name}] AI 재시도 {_current_retry+1}회로 생성 완료")
                                     self.job["item_statuses"][name] = {
                                         "type":obj_type.lower(),"status":"done","rows":0,"error":None,
-                                        "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                                        "started_at":((self.job.get("item_statuses",{}).get(name,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()),"finished_at":datetime.now(_KST).isoformat()
                                     }
                                     self._ai_retry_depth = 0  # 성공 시 리셋
                                     return True
@@ -2775,7 +2797,10 @@ class MigrationEngine:
                     _err_path[-1] = _err_path[-1] + "_fail"
                 if not _err_path:
                     _err_path = ["rule_fail"]
-                self.job["item_statuses"][name] = {"type":obj_type.lower(),"status":"error","rows":0,"error":str(e)[:200],"started_at":None,"finished_at":datetime.now(_KST).isoformat(),
+                # v95_p107 hotfix_065: started_at 보존 — 본부장님 "얼마나 걸렸는지" 본질
+                _h065_prev = self.job.get("item_statuses",{}).get(name,{}) or {}
+                _h065_started = _h065_prev.get("started_at") or datetime.now(_KST).isoformat()
+                self.job["item_statuses"][name] = {"type":obj_type.lower(),"status":"error","rows":0,"error":str(e)[:200],"started_at":_h065_started,"finished_at":datetime.now(_KST).isoformat(),
                     # v90.67: 실패해도 attempts 누적 + had_error 마킹
                     "had_error": True,
                     "attempts": int((self.job["item_statuses"].get(name) or {}).get("attempts") or 0) + 1,
@@ -2909,7 +2934,7 @@ class MigrationEngine:
                 self.job["item_statuses"][_tn] = {
                     "type":"trigger","status":"skipped","rows":0,
                     "error":"사용자가 skip_triggers 옵션 사용",
-                    "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                    "started_at":((self.job.get("item_statuses",{}).get(_tn,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()),"finished_at":datetime.now(_KST).isoformat()
                 }
         else:
             import threading as _trig_th
@@ -2919,7 +2944,7 @@ class MigrationEngine:
                     self._log("info", f"[{name}] 트리거 이미 존재 (이관 중 복원됨) — skip")
                     self.job["item_statuses"][name] = {
                         "type":"trigger","status":"done","rows":0,"error":None,
-                        "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                        "started_at":((self.job.get("item_statuses",{}).get(name,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()),"finished_at":datetime.now(_KST).isoformat()
                     }
                     continue
                 
@@ -2951,7 +2976,7 @@ class MigrationEngine:
                     self.job["item_statuses"][name] = {
                         "type":"trigger","status":"error","rows":0,
                         "error":f"timeout ({_trigger_timeout}초) - 강제 skip",
-                        "started_at":None,"finished_at":datetime.now(_KST).isoformat()
+                        "started_at":((self.job.get("item_statuses",{}).get(name,{}) or {}).get("started_at") or datetime.now(_KST).isoformat()),"finished_at":datetime.now(_KST).isoformat()
                     }
                     failed.append(("TRIGGER", name, _result_holder.get("ddl") or "", "timeout"))
                     # 스레드는 daemon 이라 백엔드 종료 시 같이 죽음

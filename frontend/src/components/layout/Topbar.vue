@@ -25,7 +25,7 @@
                 'is-disconnected': aiInfo.connected === false,
                 'is-checking':  aiInfo.connected === null
               }"
-              @click="openAiSettings"
+              @click="aiMonitorOpen = !aiMonitorOpen"
               :title="aiTooltip">
         <!-- 접속 상태 점 -->
         <span class="ai-status-dot"
@@ -39,6 +39,11 @@
         <span class="tbtn-label" v-else-if="aiInfo.provider === 'ollama'">{{ aiInfo.modelShort || 'Ollama' }}</span>
         <span class="tbtn-label" v-else>AI</span>
       </button>
+      <!-- v95_p107 hotfix_085 (2026-05-13 본부장님): AI 엔진 실시간 모니터 팝업 -->
+      <AiEngineMonitor
+        v-model="aiMonitorOpen"
+        @open-settings="openAiSettings"
+      />
       <!-- 설정 아이콘 -->
       <button class="tbtn-icon tbtn-labeled" @click="router.push('/settings')" title="시스템 설정 (로깅 / AI 변환 엔진 / 백업)">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:14px;height:14px">
@@ -79,10 +84,12 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/store/authStore.js'
 import { useConnectorStore } from '@/store/connectorStore.js'
+import AiEngineMonitor from '@/components/common/AiEngineMonitor.vue'
 const route = useRoute(); const router = useRouter()
 const authStore = useAuthStore()
 const connector = useConnectorStore()
 const userMenuOpen = ref(false)
+const aiMonitorOpen = ref(false)  // v95_p107 hotfix_085: AI 엔진 실시간 모니터 팝업
 const online = ref(true)
 
 // ════════════════════════════════════════════════════════════════
@@ -118,7 +125,7 @@ const aiTooltip = computed(() => {
   if (a.connected === true)  lines.push('✓ 연결됨')
   else if (a.connected === false) lines.push('✗ 연결 실패' + (a.lastError ? ': ' + a.lastError : ''))
   else lines.push('⋯ 확인 중')
-  lines.push('— 클릭: 시스템 설정으로 이동 —')
+  lines.push('— 클릭: AI 엔진 실시간 모니터 —')
   return lines.join('\n')
 })
 
@@ -252,13 +259,23 @@ function getNow() {
 const clock = ref(getNow())
 let timer = null
 let aiTimer = null  // v95_p101: AI 헬스체크 주기
+// v95_p107 hotfix_072: 설정 변경 즉시 Topbar 갱신
+function _h072_onAiConfigChanged() {
+  loadAiInfo()
+}
 onMounted(() => {
+  // v95_p107 hotfix_072: 설정 변경 이벤트 리스너
+  window.addEventListener('ai-config-changed', _h072_onAiConfigChanged)
   timer = setInterval(() => { clock.value = getNow() }, 1000)
   // v95_p101: AI 엔진 정보 + 접속 상태 — 마운트 시 1회 + 60초마다
   loadAiInfo()
   aiTimer = setInterval(() => { loadAiInfo() }, 60000)
 })
 onUnmounted(() => {
+  // v95_p107 hotfix_072: 이벤트 리스너 정리
+  window.removeEventListener('ai-config-changed', _h072_onAiConfigChanged)
+  // v95_p107 hotfix_072: 이벤트 리스너 정리
+  window.removeEventListener('ai-config-changed', _h072_onAiConfigChanged)
   clearInterval(timer)
   if (aiTimer) clearInterval(aiTimer)
 })
